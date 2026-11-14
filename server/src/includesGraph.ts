@@ -13,6 +13,7 @@ class FileNode {
 
 export class IncludesGraph {
     private nodes: Map<string, FileNode> = new Map();
+    private translationUnitCache: Map<string, readonly string[]> = new Map();
 
     private getOrCreateNode(uri: string): FileNode {
         if (!this.nodes.has(uri)) {
@@ -23,10 +24,21 @@ export class IncludesGraph {
 
     public updateIncludes(uri: string, newIncludeUris: string[]) {
         const sourceNode = this.getOrCreateNode(uri);
-        const oldIncludes = new Set(sourceNode.includes);
+        const oldIncludes = sourceNode.includes;
         const newIncludes = new Set(
             newIncludeUris.map(depUri => this.getOrCreateNode(depUri))
         );
+
+        let changed = oldIncludes.size !== newIncludes.size;
+        if (!changed) {
+            for (const dep of newIncludes) {
+                if (!oldIncludes.has(dep)) {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if (!changed) return;
 
         for (const oldInclude of oldIncludes) {
             if (!newIncludes.has(oldInclude)) {
@@ -41,6 +53,7 @@ export class IncludesGraph {
         }
 
         sourceNode.includes = newIncludes;
+        this.translationUnitCache.clear();
     }
 
     // -----------------------------
@@ -73,16 +86,34 @@ export class IncludesGraph {
         }
     }
 
-    public *getTranslationUnit(uri: string): Generator<string> {
+    public getTranslationUnit(uri: string): readonly string[] {
+        const cached = this.translationUnitCache.get(uri);
+        if (cached) {
+            return cached;
+        }
+
         const visitedUris = new Set<string>();
+        const result: string[] = [];
         for (const root of this.getIncludingRoots(uri)) {
             for (const dependencyUri of this.getTransitiveDependencies(root)) {
                 if (!visitedUris.has(dependencyUri)) {
                     visitedUris.add(dependencyUri);
-                    yield dependencyUri;
+                    result.push(dependencyUri);
                 }
             }
         }
+        // Fallback if an include cycle leaves no root with in-degree 0
+        if (result.length === 0 && this.nodes.has(uri)) {
+            for (const dependencyUri of this.getTransitiveDependencies(uri)) {
+                if (!visitedUris.has(dependencyUri)) {
+                    visitedUris.add(dependencyUri);
+                    result.push(dependencyUri);
+                }
+            }
+        }
+
+        this.translationUnitCache.set(uri, result);
+        return result;
     }
 
     public isTranslationUnitRoot(uri: string): boolean {
@@ -126,6 +157,7 @@ export class IncludesGraph {
         }
 
         this.nodes.delete(uri);
+        this.translationUnitCache.clear();
     }
 
     public toString(): string {

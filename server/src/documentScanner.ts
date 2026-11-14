@@ -3,9 +3,6 @@ import {
 } from 'vscode-languageserver-types';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { Export, ExportKind, ImportKind, Macro, MacroKind, ReferenceInfo, Scope, ScopeKind, Symbol, SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
-// import { getSymbolsAtLine } from './symbolUtils';
-import { URI } from 'vscode-uri';
-import * as path from 'path';
 import { getAnonLabelRefOffsetFromPreviousLabel } from './anonymousLabelUtils';
 import { getDocumentSettings, performanceMonitor } from './server';
 import { resolveIncludeUri } from './pathUtils';
@@ -15,6 +12,26 @@ type LineItem = {
     text: string;
     index: number;
 };
+
+/**
+ * Returns the index of the first `;` comment delimiter outside of quotes, or -1 if none.
+ */
+export function findCommentStart(line: string): number {
+    let quote: '"' | "'" | null = null;
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (quote) {
+            if (ch === quote) {
+                quote = null;
+            }
+        } else if (ch === '"' || ch === "'") {
+            quote = ch;
+        } else if (ch === ';') {
+            return i;
+        }
+    }
+    return -1;
+}
 
 export function parseLine(line: string): {
     label?: LineItem;
@@ -28,7 +45,7 @@ export function parseLine(line: string): {
         startIndex: number
     ): [string, number] {
         const afterStart = rest.slice(startIndex);
-        const trimmed = afterStart.trimLeft();
+        const trimmed = afterStart.trimStart();
         const skipped = afterStart.length - trimmed.length;
 
         const nextRest = trimmed;
@@ -37,13 +54,13 @@ export function parseLine(line: string): {
         return [nextRest, nextRestOffset];
     }
 
-    // Slice the comment off first
+    // Slice the comment off first (respecting string/char literals)
     let comment: LineItem | undefined;
-    const semicolonIndex = line.indexOf(';');
+    const semicolonIndex = findCommentStart(line);
     if (semicolonIndex >= 0) {
-        comment = {text: line.slice(semicolonIndex), index: semicolonIndex};
+        comment = { text: line.slice(semicolonIndex), index: semicolonIndex };
         line = line.slice(0, semicolonIndex);
-    } 
+    }
 
     let label: LineItem | undefined;
     let [rest, restOffset] = getNextRest(line, 0, 0);
@@ -70,7 +87,7 @@ export function parseLine(line: string): {
         [rest, restOffset] = getNextRest(rest, restOffset, commandText.length);
 
         if (rest.length > 0) {
-            args = { text: rest.trimRight(), index: restOffset }
+            args = { text: rest.trimEnd(), index: restOffset };
         }
     }
 
@@ -157,7 +174,7 @@ export interface ParsedImportExportArgs {
 
 export function parseImportExportArgs(text: string, offset: number): ParsedImportExportArgs[] {
     function trimWithOffset(str: string, baseOffset: number): [string, number] {
-        const trimmed = str.trimLeft();
+        const trimmed = str.trimStart();
         const skipped = str.length - trimmed.length;
         return [trimmed, baseOffset + skipped];
     }
@@ -209,7 +226,7 @@ export function parseImportExportArgs(text: string, offset: number): ParsedImpor
             [rest, restOffset] = trimWithOffset(rest, restOffset);
 
             if (rest.length > 0) {
-                group.value = { text: rest.trimRight(), index: restOffset };
+                group.value = { text: rest.trimEnd(), index: restOffset };
             }
         }
 
@@ -222,9 +239,10 @@ export function parseImportExportArgs(text: string, offset: number): ParsedImpor
 export async function scanDocument(document: TextDocument): Promise<SymbolTable> {
     const symbolTable = new SymbolTable(document.uri);
     const settings = await getDocumentSettings(document.uri);
-    performanceMonitor.start("scanDocument");
+    return performanceMonitor.time('scanDocument', () => {
     let currentScope: Scope = symbolTable.getRootScope();
-    let currentMacro: Macro | null;
+    let currentMacro: Macro | null = null;
+    let inIgnoredMacro = false;
 
     let currentSegment: string = 'CODE';
 
@@ -294,7 +312,8 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
             const refText = match[0];
             const offset = getAnonLabelRefOffsetFromPreviousLabel(refText);
 
-            let targetIndex = nextAnonLabelIndex - 1 + offset
+            const targetIndex = nextAnonLabelIndex - 1 + offset;
+            if (targetIndex < 0) continue;
 
             if (!symbolTable.anonymousLabelReferences.has(targetIndex)) {
                 symbolTable.anonymousLabelReferences.set(targetIndex, []);
@@ -335,7 +354,7 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
         const regex = /^\s*(?<name>[a-zA-Z_@.][a-zA-Z0-9_]*)\s*\.set\s*(?<value>[^;]*?)(?:\s*;.*)?$/;
         const match = text.match(regex);
         if (!match || !match.groups) return false;
-        const { name, value } = match.groups;
+        const { name } = match.groups;
         const nameIndex = text.indexOf(name);
         const definition: Range = Range.create(
             line,
@@ -355,14 +374,18 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
     }
 
     const maybeHandleMacroContent = (line: number, text: string): boolean => {
-        if (!currentMacro) return false;
+        if (!currentMacro && !inIgnoredMacro) return false;
 
-        const firstWord = text.trim().split(' ')[0];
-        if (!firstWord) return false;
+        const firstWord = text.trim().split(/\s+/)[0];
+        if (!firstWord) return true;
 
         if (['.endmac', '.endmacro'].includes(firstWord.toLowerCase())) {
-            if (currentMacro.range) currentMacro.range.end = {line, character: text.indexOf('.end')}
+            if (currentMacro?.range) {
+                const endIdx = text.toLowerCase().indexOf('.end');
+                currentMacro.range.end = { line, character: endIdx >= 0 ? endIdx : 0 };
+            }
             currentMacro = null;
+            inIgnoredMacro = false;
         }
         return true;
     }
@@ -372,7 +395,7 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
             return false;
         }
 
-        const {label, command, args} = parseLine(text);
+        const { command, args } = parseLine(text);
 
         const firstWord = command?.text;
         if (!firstWord) return false;
@@ -380,7 +403,7 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
 
         if ((currentScope.kind === ScopeKind.Struct && cmd === '.endstruct')
             || (currentScope.kind === ScopeKind.Union && cmd === '.endunion')) {
-            if (currentScope.range) currentScope.range.end = {line, character: text.indexOf('.end')}
+            if (currentScope.range) currentScope.range.end = { line, character: command.index };
             if (currentScope.scope) currentScope = currentScope.scope;
             return true;
         }
@@ -421,10 +444,10 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
             nameIndex + name.length
         )
 
-        if (args && args.text.toLowerCase().startsWith(`.tag`)) {
+        if (args && args.text.split(/\s+/)[0].toLowerCase() === '.tag') {
             // Struct member is at the command position
             addSingleReference('symbol', line, command.text, command.index, currentScope)
-            const argsWithoutTag = args.text.slice(`.tag`.length).trimLeft();
+            const argsWithoutTag = args.text.slice(`.tag`.length).trimStart();
             const indexOfStructName = args.text.length - argsWithoutTag.length + args.index;
             const structName = argsWithoutTag.split(/\s+/)[0];
             if (structName) {
@@ -446,14 +469,14 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
             return false;
         }
 
-        const {label, command, args} = parseLine(text);
+        const { command } = parseLine(text);
 
         const firstWord = command?.text;
         if (!firstWord) return false;
         const cmd = firstWord.toLowerCase();
 
         if (cmd === '.endenum') {
-            if (currentScope.range) currentScope.range.end = {line, character: text.indexOf('.end')}
+            if (currentScope.range) currentScope.range.end = { line, character: command.index };
             if (currentScope.scope) currentScope = currentScope.scope;
             return true;
         }
@@ -563,8 +586,8 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
                     if (!currentScope.scope) break;
                     if (currentScope.kind != ScopeKind.Proc) break;
                     if (currentScope.range) currentScope.range.end = {
-                        line, character: text.indexOf('.end')
-                    }
+                        line, character: command.index
+                    };
                     currentScope = currentScope.scope;
                     return true;
                 case '.endscope': {
@@ -572,8 +595,8 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
                     if (!currentScope.scope) break;
                     if (currentScope.kind != ScopeKind.Scope) break;
                     if (currentScope.range) currentScope.range.end = {
-                        line, character: text.indexOf('.end')
-                    }
+                        line, character: command.index
+                    };
                     currentScope = currentScope.scope;
                     return true;
                 }
@@ -582,7 +605,7 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
                     const name = args?.text.split(/\s+/)[0];
                     if (!name) return true;
                     addSingleReference('macro', line, name, argsIndex, currentScope);
-                    if (name && !symbolTable.getMacro(name)) {
+                    if (!symbolTable.getMacro(name)) {
                         currentMacro = symbolTable.addMacro(
                             name,
                             Range.create(
@@ -592,7 +615,9 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
                                 argsIndex + argsText.length
                             ),
                             MacroKind.Macro,
-                        )
+                        );
+                    } else {
+                        inIgnoredMacro = true;
                     }
                     return true;
                 }
@@ -640,7 +665,6 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
                     if (!args) return true;
                     for (const {
                             identifier,
-                            addressSpecification,
                             assignmentOp,
                             value
                         } of parseImportExportArgs(args.text, args.index)) {
@@ -701,6 +725,8 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
                             resolveIncludeUri(document.uri, filename, settings.includeDirs);
                         if (targetUri) {
                             symbolTable.includedFiles.push(targetUri);
+                        } else {
+                            symbolTable.unresolvedIncludes.push(filename);
                         }
                         currentSegment = `segment from ${filename}`;
                     }
@@ -709,7 +735,7 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
 
             if (currentLabel) {
                 // Consume any un-labeled commands as part of the current label
-                currentLabel.range.end = { line, character: text.length - 1 };
+                currentLabel.range.end = { line, character: text.trimEnd().length };
                 // Infer the type of label by the first non-alignment command
                 if (!pendingLabelKindSet && cmd !== '.align') {
                     switch (cmd) {
@@ -782,7 +808,7 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
         let text = lines[lineNumber];
 
         let hasComment = false;
-        const commentIdx = text.indexOf(';');
+        const commentIdx = findCommentStart(text);
         if (commentIdx >= 0) {
             hasComment = true;
             text = text.slice(0, commentIdx);
@@ -799,7 +825,7 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
             // parser using tree-sitter instead of our current fragile hand-rolled one.
             addReferences(lineNumber, text, 0, currentScope);
             if (currentLabel) {
-                currentLabel.range.end = { line: lineNumber, character: text.length - 1 };
+                currentLabel.range.end = { line: lineNumber, character: text.trimEnd().length };
             }
             continue;
         }
@@ -817,6 +843,13 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
         // Empty line?
     }
 
+    // Prune any out-of-bounds forward anonymous label references past EOF
+    for (const refIndex of symbolTable.anonymousLabelReferences.keys()) {
+        if (refIndex < 0 || refIndex >= nextAnonLabelIndex) {
+            symbolTable.anonymousLabelReferences.delete(refIndex);
+        }
+    }
+
     // Close any open scopes at EOF
     let openScope: Scope | null = currentScope;
     while (openScope != null) {
@@ -825,7 +858,6 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
         };
         openScope = openScope.scope;
     }
-    performanceMonitor.stop("scanDocument");
-    // symbolTable.dump();
     return symbolTable;
+    });
 }

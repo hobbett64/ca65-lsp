@@ -5,11 +5,10 @@ import {
 } from 'vscode-languageserver-types';
 import { SymbolTable, Symbol, SymbolTableEntity, Macro, Scope, ScopeKind, MacroKind, SymbolKind, ReferenceInfo, Export, Import } from './symbolTable';
 import { IncludesGraph } from './includesGraph';
-import { exportsMap, performanceMonitor, symbolTables } from './server';
-import { Ca65Settings } from './settings';
+import { exportsMap, performanceMonitor } from './server';
 
-const cachedLocalResolutionsPerUri: Map<string, Map<ReferenceInfo, SymbolTableEntity>> = new Map();
-const cachedExportResolutionsPerUri: Map<string, Map<Export, Symbol | Scope>> = new Map();
+const cachedLocalResolutionsPerUri: Map<string, Map<ReferenceInfo, SymbolTableEntity | null>> = new Map();
+const cachedExportResolutionsPerUri: Map<string, Map<Export, Symbol | Scope | null>> = new Map();
 
 export function deleteCachedResolutions(uri: string) {
     cachedLocalResolutionsPerUri.delete(uri);
@@ -48,38 +47,33 @@ export function resolveReferenceAtPosition(
 export function resolveReference(
     ref: ReferenceInfo,
     allSymbolTables: Map<string, SymbolTable>,
-    includesGraph: IncludesGraph, // Assuming your include graph type
+    includesGraph: IncludesGraph,
     implicitImports: boolean
 ): SymbolTableEntity | undefined {
-    performanceMonitor.start('resolveReference');
+    return performanceMonitor.time('resolveReference', () => {
+        const localReference = resolveLocalReference(ref, allSymbolTables, includesGraph);
 
-    const localReference = resolveLocalReference(ref, allSymbolTables, includesGraph);
+        // We found an import. Now check all of the exported symbols in the workspace.
+        // If there is no exported symbol, treat the import itself as the definition since we may
+        // be looking at a library header.
+        if (localReference instanceof Import) {
+            const resolvedImport = resolveImport(localReference.name, allSymbolTables, includesGraph);
+            return resolvedImport ? resolvedImport : localReference;
+        }
 
-    // We found an import. Now check all of the exported symbols in the workspace.
-    // If there is no exported symbol, treat the import itself as the definition since we may
-    // be looking at a library header.
-    if (localReference instanceof Import) {
-        const resolvedImport = resolveImport(localReference.name, symbolTables, includesGraph);
-        performanceMonitor.stop('resolveReference');
-        return resolvedImport ? resolvedImport : localReference; 
-    }
+        // If we didn't find a local reference, and implicit imports are enabled,
+        // and this is a symbol reference in the global scope, try to resolve it as an implicit import.
+        if (
+            !localReference
+            && implicitImports
+            && ref.context === 'symbol'
+            && (ref.qualifiers.length === 0 || ref.qualifiers[0].length === 0 /* Global scope */)
+        ) {
+            return resolveImport(ref.name, allSymbolTables, includesGraph);
+        }
 
-    // If we didn't find a local reference, and implicit imports are enabled,
-    // and this is a symbol reference in the global scope, try to resolve it as an implicit import.
-    if (
-        !localReference
-        && implicitImports
-        && ref.context === 'symbol'
-        && (ref.qualifiers.length === 0 || ref.qualifiers[0].length === 0 /* Global scope */)
-    ) {
-        const impliedImport = resolveImport(ref.name, symbolTables, includesGraph);
-        performanceMonitor.stop('resolveReference');
-        return impliedImport;
-    }
-
-    // Nothing doing.
-    performanceMonitor.stop('resolveReference');
-    return localReference;
+        return localReference;
+    });
 }
 
 /**
@@ -88,71 +82,63 @@ export function resolveReference(
 export function resolveLocalReference(
     ref: ReferenceInfo,
     allSymbolTables: Map<string, SymbolTable>,
-    includesGraph: IncludesGraph, // Assuming your include graph type
+    includesGraph: IncludesGraph,
 ): SymbolTableEntity | undefined {
-    const cachedResolution = cachedLocalResolutionsPerUri.get(ref.uri)?.get(ref);
-    if (cachedResolution) {
-        return cachedResolution
-    }
-    performanceMonitor.start('resolveLocalReference_uncached');
-
-    let cachedResolutions: Map<ReferenceInfo, SymbolTableEntity> | undefined
-        = cachedLocalResolutionsPerUri.get(ref.uri);
-    if (!cachedResolutions) {
-        cachedResolutions = new Map();
-        cachedLocalResolutionsPerUri.set(ref.uri, cachedResolutions)
+    let cachedResolutions = cachedLocalResolutionsPerUri.get(ref.uri);
+    if (cachedResolutions && cachedResolutions.has(ref)) {
+        return cachedResolutions.get(ref) ?? undefined;
     }
 
-    // Macros have a flat, non-lexical namespace within a file and its includes.
-    if (ref.context === 'macro') {
+    return performanceMonitor.time('resolveLocalReference_uncached', () => {
+        if (!cachedResolutions) {
+            cachedResolutions = new Map();
+            cachedLocalResolutionsPerUri.set(ref.uri, cachedResolutions);
+        }
+
+        // Macros have a flat, non-lexical namespace within a file and its includes.
+        if (ref.context === 'macro') {
+            for (const uri of includesGraph.getTranslationUnit(ref.uri)) {
+                const symbolTable = allSymbolTables.get(uri);
+                if (!symbolTable) continue;
+
+                const macro = symbolTable.getMacro(ref.name);
+                if (macro) {
+                    cachedResolutions.set(ref, macro);
+                    return macro;
+                }
+            }
+            cachedResolutions.set(ref, null);
+            return undefined; // No preceding macro found
+        }
+
+        // Try to find the symbol in our locally visible files
+        let importEntity: Import | undefined;
         for (const uri of includesGraph.getTranslationUnit(ref.uri)) {
             const symbolTable = allSymbolTables.get(uri);
             if (!symbolTable) continue;
 
-            const macro = symbolTable.getMacro(ref.name);
-            if (macro) {
-                cachedResolutions.set(ref, macro);
-                performanceMonitor.stop('resolveLocalReference_uncached');
-                return macro;
+            const localEntity = uri === ref.uri
+                ? ref.scope.findDefinitionOrImport(ref.name, ref.qualifiers, ref.context)
+                : symbolTable.getRootScope().findDefinitionOrImport(ref.name, ref.qualifiers, ref.context);
+
+            if (localEntity) {
+                if (localEntity instanceof Import) {
+                    importEntity = localEntity;
+                    break;
+                }
+                cachedResolutions.set(ref, localEntity);
+                return localEntity;
             }
         }
-        performanceMonitor.stop('resolveLocalReference_uncached');
-        return undefined; // No preceding macro found
-    }
 
-    // Try to find the symbol in our locally visible files
-    let importEntity: Import | undefined;
-    for (const uri of includesGraph.getTranslationUnit(ref.uri)) {
-        const symbolTable = symbolTables.get(uri);
-        if (!symbolTable) continue;
-
-        let localEntity;
-        if (uri === ref.uri) {
-            localEntity = ref.scope.findDefinitionOrImport(ref.name, ref.qualifiers, ref.context);
-        } else {
-            localEntity =
-                symbolTable.getRootScope().findDefinitionOrImport(ref.name, ref.qualifiers, ref.context);
+        if (importEntity) {
+            cachedResolutions.set(ref, importEntity);
+            return importEntity;
         }
 
-        if (localEntity) {
-            if (localEntity instanceof Import) {
-                importEntity = localEntity;
-                break;
-            }
-            cachedResolutions.set(ref, localEntity);
-            performanceMonitor.stop('resolveLocalReference_uncached');
-            return localEntity;
-        }
-    }
-
-    if (importEntity) {
-        cachedResolutions.set(ref, importEntity);
-        performanceMonitor.stop('resolveLocalReference_uncached');
-        return importEntity;
-    }
-
-    performanceMonitor.stop('resolveLocalReference_uncached');
-    return undefined;
+        cachedResolutions.set(ref, null);
+        return undefined;
+    });
 }
 
 /**
@@ -188,45 +174,40 @@ export function resolveExport(
     allSymbolTables: Map<string, SymbolTable>,
     includesGraph: IncludesGraph,
 ): Symbol | Scope | undefined {
-    const cachedResolution = cachedExportResolutionsPerUri.get(exportEntity.uri)?.get(exportEntity);
-    if (cachedResolution) {
-        return cachedResolution
-    }
-    performanceMonitor.start('resolveExport_uncached');
-    let cachedResolutions: Map<Export, Symbol | Scope> | undefined
-        = cachedExportResolutionsPerUri.get(exportEntity.uri);
-    if (!cachedResolutions) {
-        cachedResolutions = new Map();
-        cachedExportResolutionsPerUri.set(exportEntity.uri, cachedResolutions)
+    let cachedResolutions = cachedExportResolutionsPerUri.get(exportEntity.uri);
+    if (cachedResolutions && cachedResolutions.has(exportEntity)) {
+        return cachedResolutions.get(exportEntity) ?? undefined;
     }
 
-    for (const translationUnitUri of includesGraph.getTranslationUnit(exportEntity.uri)) {
-        const translationUnitSymbolTable = allSymbolTables.get(translationUnitUri);
-        if (!translationUnitSymbolTable) continue;
-
-        let foreignEntity;
-        let searchScope;
-        if (translationUnitUri === exportEntity.uri && exportEntity.scope) {
-            searchScope = exportEntity.scope;
-        } else {
-            searchScope = translationUnitSymbolTable.getRootScope();
+    return performanceMonitor.time('resolveExport_uncached', () => {
+        if (!cachedResolutions) {
+            cachedResolutions = new Map();
+            cachedExportResolutionsPerUri.set(exportEntity.uri, cachedResolutions);
         }
-        foreignEntity = searchScope.findDefinition(
-            exportEntity.name,
-            exportEntity.scope?.getScopeStack() ?? [],
-            'symbol'
-        );
-        if (!foreignEntity) continue;
 
-        if (foreignEntity instanceof Symbol
-            || foreignEntity instanceof Scope && foreignEntity.kind === ScopeKind.Proc) {
-            cachedResolutions.set(exportEntity, foreignEntity);
-            performanceMonitor.stop('resolveExport_uncached');
-            return foreignEntity;
+        for (const translationUnitUri of includesGraph.getTranslationUnit(exportEntity.uri)) {
+            const translationUnitSymbolTable = allSymbolTables.get(translationUnitUri);
+            if (!translationUnitSymbolTable) continue;
+
+            const searchScope = (translationUnitUri === exportEntity.uri && exportEntity.scope)
+                ? exportEntity.scope
+                : translationUnitSymbolTable.getRootScope();
+            const foreignEntity = searchScope.findDefinition(
+                exportEntity.name,
+                exportEntity.scope?.getScopeStack() ?? [],
+                'symbol'
+            );
+            if (!foreignEntity) continue;
+
+            if (foreignEntity instanceof Symbol
+                || (foreignEntity instanceof Scope && foreignEntity.kind === ScopeKind.Proc)) {
+                cachedResolutions.set(exportEntity, foreignEntity);
+                return foreignEntity;
+            }
         }
-    }
-    performanceMonitor.stop('resolveExport_uncached');
-    return undefined;
+        cachedResolutions.set(exportEntity, null);
+        return undefined;
+    });
 }
 
 export function getAllReferencesForEntity(
@@ -235,20 +216,34 @@ export function getAllReferencesForEntity(
     includesGraph: IncludesGraph,
     implicitImports: boolean
 ): ReferenceInfo[] {
-    performanceMonitor.start('getAllReferencesForEntity');
-    const allRefs: ReferenceInfo[] = [];
+    return performanceMonitor.time('getAllReferencesForEntity', () => {
+        const allRefs: ReferenceInfo[] = [];
 
-    for (const symbolTable of allSymbolTables.values()) {
-        for (const ref of symbolTable.getReferencesByName(entity.name)) {
-            const refResult = resolveReference(ref, allSymbolTables, includesGraph, implicitImports);
-            if (refResult !== entity) continue;
-            
-            allRefs.push(ref);
+        const isExported = exportsMap.get(entity.name).some(
+            exp => resolveExport(exp, allSymbolTables, includesGraph) === entity
+        );
+        let tablesToSearch: Iterable<SymbolTable>;
+        if (isExported) {
+            tablesToSearch = allSymbolTables.values();
+        } else {
+            const tuUris = includesGraph.getTranslationUnit(entity.uri);
+            const candidateUris = tuUris.length > 0 ? tuUris : [entity.uri];
+            tablesToSearch = candidateUris
+                .map(uri => allSymbolTables.get(uri))
+                .filter((st): st is SymbolTable => st !== undefined);
         }
-    }
 
-    performanceMonitor.stop('getAllReferencesForEntity');
-    return allRefs;
+        for (const symbolTable of tablesToSearch) {
+            for (const ref of symbolTable.getReferencesByName(entity.name)) {
+                const refResult = resolveReference(ref, allSymbolTables, includesGraph, implicitImports);
+                if (refResult !== entity) continue;
+
+                allRefs.push(ref);
+            }
+        }
+
+        return allRefs;
+    });
 }
 
 export function getAllReferenceLocationsForEntity(
@@ -296,30 +291,61 @@ export function getLSPSymbolKind(item: SymbolTableEntity): LSPSymbolKind {
     return LSPSymbolKind.Function;
 }
 
+/**
+ * Resolves references once per file across the given URIs and returns per-file entity hit counts.
+ */
+export function countReferencesByFile(
+    uris: Iterable<string>,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+): Map<string, Map<SymbolTableEntity, number>> {
+    return performanceMonitor.time('countReferencesByFile', () => {
+        const countsByFile = new Map<string, Map<SymbolTableEntity, number>>();
+        for (const uri of uris) {
+            const symbolTable = allSymbolTables.get(uri);
+            if (!symbolTable) continue;
+
+            const fileCounts = new Map<SymbolTableEntity, number>();
+            for (const ref of symbolTable.getAllReferences()) {
+                const resolved = resolveReference(ref, allSymbolTables, includesGraph, false);
+                if (resolved) {
+                    fileCounts.set(resolved, (fileCounts.get(resolved) ?? 0) + 1);
+                }
+            }
+            countsByFile.set(uri, fileCounts);
+        }
+        return countsByFile;
+    });
+}
+
 export function isEntityUsed(
     entity: SymbolTableEntity,
     allSymbolTables: Map<string, SymbolTable>,
-    includesGraph: IncludesGraph
+    includesGraph: IncludesGraph,
+    precomputedCounts?: Map<string, Map<SymbolTableEntity, number>>,
 ): boolean {
-    performanceMonitor.start("isEntityUsed");
-    let refCount: number = 0;
-    for (const translationUnitUri of includesGraph.getTranslationUnit(entity.uri)) {
-        const symbolTable = allSymbolTables.get(translationUnitUri);
-        if (!symbolTable) continue;
+    return performanceMonitor.time('isEntityUsed', () => {
+        let refCount = 0;
+        for (const translationUnitUri of includesGraph.getTranslationUnit(entity.uri)) {
+            if (precomputedCounts) {
+                refCount += precomputedCounts.get(translationUnitUri)?.get(entity) ?? 0;
+                if (refCount > 1) return true;
+                continue;
+            }
 
-        for (const ref of symbolTable.getReferencesByName(entity.name)) {
-            const refResult = resolveReference(ref, allSymbolTables, includesGraph, false);
-            if (refResult === entity) {
-                // We found a reference to the entity. Increment the count.
-                refCount++;
-                // Check if the ref count is more than 1 (the definition).
-                if (refCount > 1) {
-                    performanceMonitor.stop("isEntityUsed");
-                    return true;
+            const symbolTable = allSymbolTables.get(translationUnitUri);
+            if (!symbolTable) continue;
+
+            for (const ref of symbolTable.getReferencesByName(entity.name)) {
+                const refResult = resolveReference(ref, allSymbolTables, includesGraph, false);
+                if (refResult === entity) {
+                    refCount++;
+                    if (refCount > 1) {
+                        return true;
+                    }
                 }
             }
         }
-    }
-    performanceMonitor.stop("isEntityUsed");
-    return false;
+        return false;
+    });
 }

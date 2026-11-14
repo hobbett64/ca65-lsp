@@ -1,16 +1,8 @@
 import * as path from 'path';
-import { fileURLToPath } from "url";
 import { URI } from 'vscode-uri';
 import { symbolTables, workspaceFolderUris } from './server';
 import { globSync } from 'glob';
 import * as fs from 'fs/promises';
-
-export function getRelativePath(fromUri: string, toUri: string): string {
-    const fromPath = path.dirname(fileURLToPath(fromUri));
-    const toPath = fileURLToPath(toUri);
-
-    return path.relative(fromPath, toPath);
-}
 
 export function getWorkspaceRelativePath(fileUri: string): string | null {
     const workspaceFolderUri = getWorkspaceFolderOfFile(fileUri);
@@ -26,7 +18,10 @@ export function getWorkspaceFolderOfFile(fileUri: string): string | undefined {
     // Find the workspace folder that this file is inside of.
     // Sort by length to find the most specific (deepest) match first in case of nested folders.
     const sortedFolders = workspaceFolderUris
-        .filter(folder => fileUri.startsWith(folder))
+        .filter(folder => {
+            const prefix = folder.endsWith('/') ? folder : `${folder}/`;
+            return fileUri === folder || fileUri.startsWith(prefix);
+        })
         .sort((a, b) => b.length - a.length);
 
     return sortedFolders.length > 0 ? sortedFolders[0] : undefined;
@@ -68,22 +63,27 @@ export function resolveWorkspaceRelativeDirs(
     return resolvedPaths;
 }
 
+function getSearchDirectories(
+    currentFileUri: string,
+    relativeDirs: string[] | undefined,
+): string[] {
+    const currentDir = path.dirname(URI.parse(currentFileUri).fsPath);
+    const workspaceFolderUri = getWorkspaceFolderOfFile(currentFileUri);
+    const workspaceRoot = workspaceFolderUri ? URI.parse(workspaceFolderUri).fsPath : undefined;
+    const resolvedDirs = resolveWorkspaceRelativeDirs(currentFileUri, relativeDirs);
+    return [
+        currentDir,
+        ...(workspaceRoot && workspaceRoot !== currentDir ? [workspaceRoot] : []),
+        ...resolvedDirs
+    ];
+}
+
 export function resolveIncludeUri(
     currentFileUri: string,
     includeFile: string,
     includeDirs: string[] | undefined,
 ): string | null {
-    const currentDir = path.dirname(URI.parse(currentFileUri).fsPath);
-    const workspaceFolderUri = getWorkspaceFolderOfFile(currentFileUri);
-    const workspaceRoot = workspaceFolderUri ? URI.parse(workspaceFolderUri).fsPath : undefined;
-    const resolvedIncludeDirs = resolveWorkspaceRelativeDirs(currentFileUri, includeDirs);
-    const directoriesToSearch = [
-        currentDir,
-        ...(workspaceRoot && workspaceRoot !== currentDir ? [workspaceRoot] : []),
-        ...resolvedIncludeDirs
-    ];
-
-    for (const dir of directoriesToSearch) {
+    for (const dir of getSearchDirectories(currentFileUri, includeDirs)) {
         const fullPath = path.join(dir, includeFile);
         const uri = URI.file(fullPath).toString();
         if (symbolTables.has(uri)) {
@@ -99,17 +99,7 @@ export async function resolveIncbinUri(
     incbinFile: string,
     binIncludeDirs: string[] | undefined,
 ): Promise<string | null> {
-    const currentDir = path.dirname(URI.parse(currentFileUri).fsPath);
-    const workspaceFolderUri = getWorkspaceFolderOfFile(currentFileUri);
-    const workspaceRoot = workspaceFolderUri ? URI.parse(workspaceFolderUri).fsPath : undefined;
-    const resolvedBinIncludeDirs = resolveWorkspaceRelativeDirs(currentFileUri, binIncludeDirs);
-    const directoriesToSearch = [
-        currentDir,
-        ...(workspaceRoot && workspaceRoot !== currentDir ? [workspaceRoot] : []),
-        ...resolvedBinIncludeDirs
-    ];
-
-    for (const dir of directoriesToSearch) {
+    for (const dir of getSearchDirectories(currentFileUri, binIncludeDirs)) {
         const fullPath = path.join(dir, incbinFile);
         try {
             const stat = await fs.stat(fullPath);

@@ -13,6 +13,21 @@ import { getDocumentSettings, includesGraph, initializationGate, symbolTables } 
 import { getAllReferencesForEntity, resolveReferenceAtPosition, getLSPSymbolKind, resolveReference } from './symbolResolver';
 import { Scope, ScopeKind, Symbol, SymbolTableEntity } from './symbolTable';
 
+function toCallHierarchyItem(entity: SymbolTableEntity): CallHierarchyItem {
+    return {
+        kind: getLSPSymbolKind(entity),
+        name: entity.getQualifiedName(),
+        uri: entity.uri,
+        range: entity.range,
+        selectionRange: entity.definition,
+        data: {
+            uri: entity.uri,
+            name: entity.name,
+            scopeStack: entity.getScopeStack()
+        },
+    };
+}
+
 export function initializeCallHierarchyProvider(
     connection: _Connection,
     documents: TextDocuments<TextDocument>
@@ -39,18 +54,7 @@ export function initializeCallHierarchyProvider(
 
             if (foundEntity instanceof Symbol
                 || (foundEntity instanceof Scope && foundEntity.kind === ScopeKind.Proc)) {
-                return [{
-                    kind: getLSPSymbolKind(foundEntity),
-                    name: foundEntity.getQualifiedName(),
-                    uri: foundEntity.uri,
-                    range: foundEntity.range,
-                    selectionRange: foundEntity.definition,
-                    data: {
-                        uri: foundEntity.uri,
-                        name: foundEntity.name,
-                        scopeStack: foundEntity.getScopeStack()
-                    },
-                }];
+                return [toCallHierarchyItem(foundEntity)];
             }
             return null;
         }
@@ -97,20 +101,8 @@ export function initializeCallHierarchyProvider(
             // 4. Format the results from the grouped map.
             const incomingCalls: CallHierarchyIncomingCall[] = [];
             for (const [caller, ranges] of callsByCaller.entries()) {
-                if (!uri) continue;
                 incomingCalls.push({
-                    from: {
-                        kind: getLSPSymbolKind(caller),
-                        name: caller.getQualifiedName(),
-                        uri: caller.uri,
-                        range: caller.range,
-                        selectionRange: caller.definition,
-                        data: {
-                            uri: caller.uri,
-                            name: caller.name,
-                            scopeStack: caller.getScopeStack()
-                        },
-                    },
+                    from: toCallHierarchyItem(caller),
                     fromRanges: ranges,
                 });
             }
@@ -157,18 +149,7 @@ export function initializeCallHierarchyProvider(
             const outgoingCalls: CallHierarchyOutgoingCall[] = [];
             for (const [calledEntity, ranges] of callsByDefinition.entries()) {
                 outgoingCalls.push({
-                    to: {
-                        kind: getLSPSymbolKind(calledEntity),
-                        name: calledEntity.getQualifiedName(),
-                        uri: calledEntity.uri,
-                        range: calledEntity.range,
-                        selectionRange: calledEntity.definition,
-                        data: {
-                            uri: calledEntity.uri,
-                            name: calledEntity.name,
-                            scopeStack: calledEntity.getScopeStack()
-                        },
-                    },
+                    to: toCallHierarchyItem(calledEntity),
                     fromRanges: ranges
                 });
             }

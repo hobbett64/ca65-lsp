@@ -50,17 +50,6 @@ export class ExportsMap {
         return exports ? exports : [];
     }
 
-    /**
-     * Return all currently active exports (deduped by base name).
-     */
-    getAll(): Export[] {
-        const results: Export[] = [];
-        for (const stack of this.global.values()) {
-            if (stack.length > 0) results.push(stack[stack.length - 1]);
-        }
-        return results;
-    }
-
     // --- Internals ---
 
     private addToGlobal(baseName: string, exp: Export) {
@@ -82,15 +71,16 @@ export class ExportsMap {
         }
     }
 
-    dump() {
-        console.log("\n--- Exports Map Dump ---");
+    toString(): string {
+        const lines: string[] = ['--- Exports Map Dump ---'];
         for (const [baseName, stack] of this.global) {
             if (stack.length === 0) continue;
-            console.log(`* ${baseName}:`);
+            lines.push(`* ${baseName}:`);
             for (let i = stack.length - 1; i >= 0; i--) {
                 const exp = stack[i];
-                console.log(`    - ${exp.name} (URI: ${exp.uri}, line ${exp.definition.start.line})`);
+                lines.push(`    - ${exp.name} (URI: ${exp.uri}, line ${exp.definition.start.line})`);
             }
         }
+        return lines.join('\n') + '\n';
     }
 }

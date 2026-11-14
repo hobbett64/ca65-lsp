@@ -6,7 +6,6 @@ import {
     Range,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { URI } from 'vscode-uri';
 import { resolveIncbinUri, resolveIncludeUri } from './pathUtils';
 import { getDocumentSettings, initializationGate } from './server';
 
@@ -32,7 +31,8 @@ export function initializeDocumentLinkProvider(connection: _Connection, document
                 const directive = match[1].toLowerCase(); // "include" or "incbin"
                 const filename = match[2];
 
-                const startChar = line.indexOf(filename);
+                const quotedStart = line.indexOf(`"${filename}"`);
+                const startChar = quotedStart >= 0 ? quotedStart + 1 : line.indexOf(filename);
                 const endChar = startChar + filename.length;
                 const range = Range.create(i, startChar, i, endChar);
 

@@ -8,30 +8,53 @@ export class Performance {
     private timings: Map<string, OperationWindowStats> = new Map();
     private startTimes: Map<string, number> = new Map();
 
-    public start(name: string): void {
-        this.startTimes.set(name, performance.now());
+    public start(name: string): number {
+        const now = performance.now();
+        this.startTimes.set(name, now);
+        return now;
     }
 
-    public stop(name: string): void {
-        const startTime = this.startTimes.get(name);
+    public stop(name: string, startTime?: number): void {
         if (startTime === undefined) {
-            return;
+            startTime = this.startTimes.get(name);
+            if (startTime === undefined) {
+                return;
+            }
+            this.startTimes.delete(name);
         }
-        this.startTimes.delete(name);
-        const duration = performance.now() - startTime;
+        this.record(name, performance.now() - startTime);
+    }
 
-        if (!this.timings.has(name)) {
-            this.timings.set(name, {
-                samples: [],
-            });
+    public record(name: string, duration: number): void {
+        let stats = this.timings.get(name);
+        if (!stats) {
+            stats = { samples: [] };
+            this.timings.set(name, stats);
         }
 
-        const stats = this.timings.get(name)!;
         stats.samples.push(duration);
 
         // Keep the window size capped by removing the oldest sample.
         if (stats.samples.length > WINDOW_SIZE) {
             stats.samples.shift();
+        }
+    }
+
+    public time<T>(name: string, fn: () => T): T {
+        const startTime = performance.now();
+        try {
+            return fn();
+        } finally {
+            this.record(name, performance.now() - startTime);
+        }
+    }
+
+    public async timeAsync<T>(name: string, fn: () => Promise<T>): Promise<T> {
+        const startTime = performance.now();
+        try {
+            return await fn();
+        } finally {
+            this.record(name, performance.now() - startTime);
         }
     }
 
@@ -68,6 +91,5 @@ export class Performance {
     public clear(): void {
         this.timings.clear();
         this.startTimes.clear();
-        console.log('Performance stats cleared.');
     }
 }

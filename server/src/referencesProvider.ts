@@ -17,46 +17,40 @@ export function initializeReferencesProvider(connection: _Connection, documents:
      */
     connection.onReferences(async (params: ReferenceParams): Promise<Location[] | undefined> => {
         await initializationGate.isInitialized;
-        performanceMonitor.start("onReferences");
+        return performanceMonitor.timeAsync("onReferences", async () => {
+            const uri = params.textDocument.uri;
+            const document = documents.get(uri);
+            const symbolTable = symbolTables.get(uri);
+            if (!document || !symbolTable) {
+                return undefined;
+            }
 
-        const uri = params.textDocument.uri;
-        const document = documents.get(uri);
-        const symbolTable = symbolTables.get(uri);
-        if (!document || !symbolTable) {
-            performanceMonitor.stop("onReferences");
-            return undefined;
-        }
-
-        const settings = await getDocumentSettings(uri);
-        
-        const foundEntity = resolveReferenceAtPosition(
-            uri, params.position, symbolTables, includesGraph, settings.implicitImports
-        );
-
-        if (foundEntity) {
-            const result = getAllReferenceLocationsForEntity(
-                foundEntity,
-                symbolTables,
-                includesGraph,
-                settings.implicitImports
+            const settings = await getDocumentSettings(uri);
+            
+            const foundEntity = resolveReferenceAtPosition(
+                uri, params.position, symbolTables, includesGraph, settings.implicitImports
             );
-            performanceMonitor.stop("onReferences");
-            return result;
-        }
 
-        // Didn't find a real symbol, check if it's a cheap or anonymous reference.
-        const cheapLocalRefs = findAllCheapLocalLabelReferences(document, params.position);
-        if (cheapLocalRefs.length > 0) {
-            performanceMonitor.stop("onReferences");
-            return cheapLocalRefs;
-        }
+            if (foundEntity) {
+                return getAllReferenceLocationsForEntity(
+                    foundEntity,
+                    symbolTables,
+                    includesGraph,
+                    settings.implicitImports
+                );
+            }
 
-        const anonLabelRef = findAllAnonLabelReferences(document, params.position);
-        if (anonLabelRef.length > 0) {
-            performanceMonitor.stop("onReferences");
-            return anonLabelRef;
-        }
-        performanceMonitor.stop("onReferences");
-        return;
+            // Didn't find a real symbol, check if it's a cheap or anonymous reference.
+            const cheapLocalRefs = findAllCheapLocalLabelReferences(document, params.position);
+            if (cheapLocalRefs.length > 0) {
+                return cheapLocalRefs;
+            }
+
+            const anonLabelRef = findAllAnonLabelReferences(document, params.position);
+            if (anonLabelRef.length > 0) {
+                return anonLabelRef;
+            }
+            return undefined;
+        });
     });
 }

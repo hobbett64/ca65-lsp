@@ -9,6 +9,7 @@
 /client/out
 /server/out
 /dist/
+*.tsbuildinfo
 
 # Packaged Extension
 # This is a release artifact, not source code

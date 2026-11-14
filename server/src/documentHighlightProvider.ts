@@ -8,7 +8,7 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import { getDocumentSettings, includesGraph, initializationGate, symbolTables } from './server';
 import { findAllCheapLocalLabelReferences } from './cheapLocalLabelUtils';
 import { findAllAnonLabelReferences } from './anonymousLabelUtils';
-import { getAllReferenceLocationsForEntity, resolveReferenceAtPosition } from './symbolResolver';
+import { resolveReference, resolveReferenceAtPosition } from './symbolResolver';
 
 export function initializeDocumentHighlightProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
     connection.onDocumentHighlight(async (params: DocumentHighlightParams): Promise<DocumentHighlight[] | undefined> => {
@@ -27,13 +27,13 @@ export function initializeDocumentHighlightProvider(connection: _Connection, doc
             params.textDocument.uri, params.position, symbolTables, includesGraph, settings.implicitImports
         );
         if (foundEntity) {
-
-            const refLocations = getAllReferenceLocationsForEntity(
-                foundEntity, symbolTables, includesGraph, settings.implicitImports
-            );
-
-            return refLocations.filter(loc => loc.uri === document.uri)
-                .map(loc => DocumentHighlight.create(loc.range));
+            const highlights: DocumentHighlight[] = [];
+            for (const ref of symbolTable.getReferencesByName(foundEntity.name)) {
+                if (resolveReference(ref, symbolTables, includesGraph, settings.implicitImports) === foundEntity) {
+                    highlights.push(DocumentHighlight.create(ref.location));
+                }
+            }
+            return highlights;
         }
 
         const cheapLocalLabelRefs = findAllCheapLocalLabelReferences(document, params.position);

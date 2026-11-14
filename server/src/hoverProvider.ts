@@ -11,7 +11,7 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import { URI } from 'vscode-uri';
 import * as fs from 'fs/promises';
 
-import { mnemonicData, directiveData } from './dataManager';
+import { mnemonicData, resolveDirectiveAlias } from './dataManager';
 import { Macro, SymbolTableEntity } from './symbolTable';
 import { getLSPSymbolKind, resolveReference } from './symbolResolver';
 import { getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
@@ -20,16 +20,13 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
     connection.onHover(async ({ textDocument, position }: TextDocumentPositionParams): Promise<Hover | undefined> => {
         await initializationGate.isInitialized;
 
-        performanceMonitor.start("onHover");
-        
+        return performanceMonitor.timeAsync("onHover", async () => {
         const document = documents.get(textDocument.uri);
         if (!document) {
-            performanceMonitor.stop("onHover");
             return undefined;
         }
         const symbolTable = symbolTables.get(textDocument.uri);
         if (!symbolTable) {
-            performanceMonitor.stop("onHover");
             return undefined;
         }
 
@@ -51,10 +48,9 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
                         const filePath = URI.parse(foundEntity.uri).fsPath;
                         const content = await fs.readFile(filePath, 'utf-8');
                         // Create a temporary document object for the hover generator
-                        definitionDocument = TextDocument.create(foundEntity.uri, 'ca65-lsp', 0, content);
+                        definitionDocument = TextDocument.create(foundEntity.uri, 'ca65', 0, content);
                     } catch (e) {
                         connection.console.error(`Failed to read file for hover: ${foundEntity.uri}`);
-                        performanceMonitor.stop("onHover");
                         return undefined; // Can't show hover if we can't read the file
                     }
                 }
@@ -64,10 +60,10 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
                         kind: MarkupKind.Markdown,
                         value: generateSymbolTableEntityMarkdown(foundEntity, definitionDocument)
                     },
-                    range: ref?.location 
+                    range: ref.location
                 };
-            };
-        };
+            }
+        }
 
         // Fallback for mnemonics and directives
         const lineText = document.getText({ start: { line: position.line, character: 0 }, end: { line: position.line, character: Number.MAX_VALUE } });
@@ -83,28 +79,23 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
                 const hoverRange = Range.create(position.line, start, position.line, end);
 
                 if (word.startsWith('.')) {
-                    const name = word.slice(1).toUpperCase();
-                    let data = directiveData[name];
-                    if (typeof data === 'string') data = directiveData[data];
+                    const data = resolveDirectiveAlias(word.slice(1));
                     if (data) {
-                        performanceMonitor.stop("onHover");
                         return { contents: { kind: MarkupKind.Markdown, value: generateDirectiveHoverMarkdown(word, data) }, range: hoverRange };
                     }
                 } else {
                     const name = word.toUpperCase();
                     const data = mnemonicData[name];
                     if (data) {
-                        performanceMonitor.stop("onHover");
                         return { contents: { kind: MarkupKind.Markdown, value: generateMnemonicHoverMarkdown(word, data) }, range: hoverRange };
                     }
                 }
-                performanceMonitor.stop("onHover");
                 return undefined;
             }
         }
 
-        performanceMonitor.stop("onHover");
         return undefined;
+        });
     });
 }
 
@@ -186,10 +177,14 @@ function generateSymbolTableEntityMarkdown(entity: SymbolTableEntity, document: 
         content += `.segment "${entity.segment}"\n`;
     }
 
+    const scopeLines: string[] = [];
     let currentScope = entity.scope;
     while (currentScope && currentScope.name !== '') {
-        content += `.${currentScope.kind} ${currentScope.name}\n`;
-        currentScope = currentScope.scope
+        scopeLines.unshift(`.${currentScope.kind} ${currentScope.name}`);
+        currentScope = currentScope.scope;
+    }
+    if (scopeLines.length > 0) {
+        content += scopeLines.join('\n') + '\n';
     }
 
     if (commentLines.length > 0) {
@@ -215,10 +210,10 @@ function generateMnemonicHoverMarkdown(mnemonic: string, data: any): string {
     if (data.description) markdown += `${data.description}\n\n`;
     if (data.warning) markdown += `⚠️ **Warning**: ${data.warning}\n\n`;
     if (data.note) markdown += `*Note: ${data.note}*\n\n`;
-    if (data.flags && Object.keys(data.flags).length > 0) {
+    if (data.flagChanges && Object.keys(data.flagChanges).length > 0) {
         markdown += `**Flags affected:**\n`;
-        for (const flag in data.flags) {
-            markdown += `- **\`${flag}\`**: ${data.flags[flag].description}\n`;
+        for (const flag of Object.keys(data.flagChanges)) {
+            markdown += `- **\`${flag}\`**: ${data.flagChanges[flag]}\n`;
         }
         markdown += `\n`;
     }

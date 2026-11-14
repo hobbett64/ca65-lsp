@@ -11,9 +11,9 @@ import {
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
-import { directiveData, mnemonicData } from './dataManager';
+import { directiveData, mnemonicData, resolveDirectiveAlias } from './dataManager';
 import { Export, Import, ImportKind, Macro, MacroKind, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
-import { findPreviousCheapLocalBoundary, CHEAP_LOCAL_BOUNDARY_REGEX } from './cheapLocalLabelUtils';
+import { getCheapLocalLabelDefinitions } from './cheapLocalLabelUtils';
 import { IncludesGraph } from './includesGraph';
 import { getLSPSymbolKind, resolveExport, resolveImport } from './symbolResolver';
 import { findCanonicalIncludePath, getWorkspaceRelativePath } from './pathUtils';
@@ -104,196 +104,150 @@ function isAutoIncludable(uri: string, settings: Ca65Settings) {
     return false;
 }
 
+interface StaticCompletionTemplates {
+    mnemonics: Omit<CompletionItem, 'textEdit'>[];
+    controlDirectives: Omit<CompletionItem, 'textEdit'>[];
+    operandDirectives: Omit<CompletionItem, 'textEdit'>[];
+}
+
+let cachedStaticTemplates: StaticCompletionTemplates | null = null;
+
+function getStaticTemplates(): StaticCompletionTemplates {
+    if (cachedStaticTemplates) {
+        return cachedStaticTemplates;
+    }
+
+    const mnemonics: Omit<CompletionItem, 'textEdit'>[] = [];
+    for (const key in mnemonicData) {
+        const lowerCaseKey = key.toLowerCase();
+        mnemonics.push({
+            label: lowerCaseKey,
+            kind: CompletionItemKind.Keyword,
+            detail: 'Mnemonic',
+            sortText: MNEMONIC_ITEM_PREFIX + lowerCaseKey
+        });
+    }
+
+    const controlDirectives: Omit<CompletionItem, 'textEdit'>[] = [];
+    const operandDirectives: Omit<CompletionItem, 'textEdit'>[] = [];
+    for (const key in directiveData) {
+        const directive = resolveDirectiveAlias(key);
+        if (!directive) continue;
+
+        const directiveName = `.${key.toLowerCase()}`;
+        if (directive.type === 'Control command') {
+            controlDirectives.push({
+                label: directiveName,
+                kind: CompletionItemKind.Keyword,
+                detail: 'Control Command',
+                sortText: DIRECTIVE_ITEM_PREFIX + directiveName
+            });
+        } else if (directive.type === 'Pseudo-function' || directive.type === 'Pseudo-variable') {
+            operandDirectives.push({
+                label: directiveName,
+                kind: directive.type === 'Pseudo-function' ? CompletionItemKind.Function : CompletionItemKind.Variable,
+                detail: directive.type,
+                sortText: DIRECTIVE_ITEM_PREFIX + directiveName
+            });
+        }
+    }
+
+    cachedStaticTemplates = { mnemonics, controlDirectives, operandDirectives };
+    return cachedStaticTemplates;
+}
+
 function getCheapLocalLabelCompletions(
     document: TextDocument,
     position: Position,
     replacementRange: Range,
     currentWord: string
 ): CompletionItem[] {
-    const items: CompletionItem[] = [];
-    const cheapLocalDefRegex = /^\s*(@[a-zA-Z0-9_@]+):/;
-
-    const boundaryLine = findPreviousCheapLocalBoundary(document, position.line);
-    const startLine = boundaryLine === -1 ? 0 : boundaryLine;
-    let endLine = document.lineCount - 1;
-    for (let i = startLine + 1; i < document.lineCount; i++) {
-        const line = document.getText(Range.create(i, 0, i + 1, 0));
-        if (CHEAP_LOCAL_BOUNDARY_REGEX.test(line)) {
-            endLine = i - 1;
-            break;
+    return getCheapLocalLabelDefinitions(document, position).map(labelName => {
+        const item: CompletionItem = {
+            label: labelName,
+            kind: CompletionItemKind.Reference,
+            detail: 'cheap_local_label',
+            textEdit: TextEdit.replace(replacementRange, labelName),
+            sortText: CHEAP_LOCAL_ITEM_PREFIX + labelName.slice(1)
+        };
+        if (!currentWord.startsWith('@')) {
+            item.filterText = labelName.substring(1);
         }
-    }
-
-    for (let i = startLine; i <= endLine; i++) {
-        const lineText = document.getText(Range.create(i, 0, i + 1, 0));
-        const match = lineText.match(cheapLocalDefRegex);
-        if (match) {
-            const labelName = match[1];
-            const item: CompletionItem = {
-                label: labelName,
-                kind: CompletionItemKind.Reference,
-                detail: 'cheap_local_label',
-                textEdit: TextEdit.replace(replacementRange, labelName),
-                sortText: CHEAP_LOCAL_ITEM_PREFIX + labelName.slice(1)
-            };
-            if (!currentWord.startsWith('@')) {
-                item.filterText = labelName.substring(1);
-            }
-            items.push(item);
-        }
-    }
-    return items;
-}
-
-/**
- * Resolves a directive alias to its root definition (guaranteed to be only 1 level deep).
- * @param key The directive key to resolve.
- * @param data The full directive data object.
- * @returns The resolved directive object, or null if not found.
- */
-function resolveDirectiveAlias(key: string, data: typeof directiveData): { type: string; [key: string]: any } | null {
-    let entry = data[key as keyof typeof data];
-
-    // If the entry is a string, it's a single-level alias.
-    if (typeof entry === 'string') {
-        // Look up the real definition using the alias.
-        entry = data[entry as keyof typeof data];
-    }
-
-    // After potentially one level of redirection, it should be an object.
-    if (typeof entry === 'object' && entry !== null) {
-        return entry;
-    }
-
-    return null;
+        return item;
+    });
 }
 
 export function initializeCompletionProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
     connection.onCompletion(async (params: TextDocumentPositionParams): Promise<CompletionItem[]> => {
         await initializationGate.isInitialized;
 
-        performanceMonitor.start("onCompletion");
-        const document = documents.get(params.textDocument.uri);
-        if (!document) {
-            performanceMonitor.stop("onCompletion");
-            return [];
-        }
-        const settings = await getDocumentSettings(document.uri);
-        const position = params.position;
+        return performanceMonitor.timeAsync("onCompletion", async () => {
+            const document = documents.get(params.textDocument.uri);
+            if (!document) {
+                return [];
+            }
+            const settings = await getDocumentSettings(document.uri);
+            const position = params.position;
 
-        const lineToCursor = document.getText({ start: { line: params.position.line, character: 0 }, end: params.position });
+            const lineToCursor = document.getText({ start: { line: params.position.line, character: 0 }, end: params.position });
 
-        const anonLabelRefRegex = /:[-+<>]+$/;
-        if (anonLabelRefRegex.test(lineToCursor)) {
-            // Anonymous labels are considered to be words in language-configuration.json in order
-            // to show them in the document highlights. However, this also results in them being
-            // valid parts of autocompletion, which results in a nuissance autocompletion window
-            // during typing. Suppress this autocompletion if we're in the middle of typing an
-            // anonymous label refrence.
-            return [];
-        }
+            const anonLabelRefRegex = /:[-+<>]+$/;
+            if (anonLabelRefRegex.test(lineToCursor)) {
+                // Anonymous labels are considered to be words in language-configuration.json in order
+                // to show them in the document highlights. However, this also results in them being
+                // valid parts of autocompletion, which results in a nuissance autocompletion window
+                // during typing. Suppress this autocompletion if we're in the middle of typing an
+                // anonymous label refrence.
+                return [];
+            }
 
-        const fullLineUntrimmed = document.getText(Range.create(params.position.line, 0, params.position.line + 1, 0));
-        
-        const wordMatch = lineToCursor.match(/[a-zA-Z0-9_.:@]*$/);
-        const currentWord = wordMatch ? wordMatch[0] : '';
-        const replacementRange = Range.create(
-            params.position.line,
-            params.position.character - currentWord.length,
-            params.position.line,
-            params.position.character
-        );
-
-        // --- CONTEXT DETERMINATION ---
-        const trimmedLine = fullLineUntrimmed.trim();
-        const commandRegex = /^\s*(?:[a-zA-Z_@.][a-zA-Z0-9_@.]*:\s*)?([a-zA-Z_.]+)/;
-        const lineMatch = trimmedLine.match(commandRegex);
-        const commandOnLine = lineMatch ? lineMatch[1] : null;
-
-        let isCommandContext = false;
-        if (!commandOnLine) {
-            // No command found yet, so we must be in command context.
-            isCommandContext = true;
-        } else {
-            // A command exists; check cursor position relative to the command's end.
-            const commandIndexInUntrimmedLine = fullLineUntrimmed.indexOf(commandOnLine);
-            const commandEndPosition = commandIndexInUntrimmedLine + commandOnLine.length;
+            const fullLineUntrimmed = document.getText(Range.create(params.position.line, 0, params.position.line + 1, 0));
             
-            // If the cursor is at or before the end of the command, it's command context.
-            if (params.position.character <= commandEndPosition) {
-                isCommandContext = true;
-            }
-        }
-
-        if (isCommandContext) {
-            // --- COMMAND CONTEXT: Suggest mnemonics, control commands, and macros ---
-            const completionItems: CompletionItem[] = [];
-
-            // 1. Add Mnemonics
-            for (const key in mnemonicData) {
-                const lowerCaseKey = key.toLowerCase();
-                completionItems.push({
-                    label: lowerCaseKey,
-                    kind: CompletionItemKind.Keyword,
-                    detail: 'Mnemonic',
-                    textEdit: TextEdit.replace(replacementRange, key.toLowerCase()),
-                    sortText: MNEMONIC_ITEM_PREFIX + lowerCaseKey
-                });
-            }
-
-            // 2. Add Directives (Control Commands)
-            for (const key in directiveData) {
-                const directive = resolveDirectiveAlias(key, directiveData);
-                if (directive && directive.type === 'Control command') {
-                    const directiveName = `.${key.toLowerCase()}`;
-                    completionItems.push({
-                        label: directiveName,
-                        kind: CompletionItemKind.Keyword,
-                        detail: 'Control Command',
-                        textEdit: TextEdit.replace(replacementRange, directiveName),
-                        sortText: DIRECTIVE_ITEM_PREFIX + directiveName
-                    });
-                }
-            }
-
-            // 3. Add Macros
-            completionItems.push(...await getCompletionMacros(document, symbolTables, settings));
-            performanceMonitor.stop("onCompletion");
-            return completionItems;
-        } else {
-            // --- OPERAND CONTEXT: Suggest labels, constants, variables, and pseudo-functions/variables ---
-            const completionItems: CompletionItem[] = [];
-
-            // 1. Add Workspace Symbols (excluding command macros)
-            const allSymbols = await getCompletionSymbols(
-                document, position, symbolTables, includesGraph, settings
-            );
-            const operands = allSymbols.filter(item => !item.detail?.includes('macro'));
-            completionItems.push(...operands);
-
-            // 2. Add Cheap Local Labels
-            completionItems.push(
-                ...getCheapLocalLabelCompletions(document, params.position, replacementRange, currentWord)
+            const wordMatch = lineToCursor.match(/[a-zA-Z0-9_.:@]*$/);
+            const currentWord = wordMatch ? wordMatch[0] : '';
+            const replacementRange = Range.create(
+                params.position.line,
+                params.position.character - currentWord.length,
+                params.position.line,
+                params.position.character
             );
 
-            // 3. Add Pseudo-functions and Pseudo-variables
-            for (const key in directiveData) {
-                const directive = resolveDirectiveAlias(key, directiveData);
-                if (directive && (directive.type === 'Pseudo-function' || directive.type === 'Pseudo-variable')) {
-                    const directiveName = `.${key.toLowerCase()}`;
-                    const kind = directive.type === 'Pseudo-function' ? CompletionItemKind.Function : CompletionItemKind.Variable;
-                    completionItems.push({
-                        label: directiveName,
-                        kind: kind,
-                        detail: directive.type,
-                        textEdit: TextEdit.replace(replacementRange, directiveName),
-                        sortText: DIRECTIVE_ITEM_PREFIX + directiveName
-                    });
-                }
+            // --- CONTEXT DETERMINATION ---
+            const prefixMatch = fullLineUntrimmed.match(/^\s*(?:(?:[a-zA-Z_@.][a-zA-Z0-9_@.]*)?:(?![:=<>+-])\s*)?/);
+            const prefixLen = prefixMatch ? prefixMatch[0].length : 0;
+            const afterPrefix = fullLineUntrimmed.slice(prefixLen);
+            const cmdMatch = afterPrefix.match(/^([a-zA-Z_.]+)/);
+            const isCommandContext = !cmdMatch || params.position.character <= prefixLen + cmdMatch[1].length;
+
+            const templates = getStaticTemplates();
+
+            if (isCommandContext) {
+                // --- COMMAND CONTEXT: Suggest mnemonics, control commands, and macros ---
+                const completionItems: CompletionItem[] = [
+                    ...templates.mnemonics.map(item => ({
+                        ...item,
+                        textEdit: TextEdit.replace(replacementRange, item.label),
+                    })),
+                    ...templates.controlDirectives.map(item => ({
+                        ...item,
+                        textEdit: TextEdit.replace(replacementRange, item.label),
+                    })),
+                    ...await getCompletionMacros(document, symbolTables, settings),
+                ];
+                return completionItems;
+            } else {
+                // --- OPERAND CONTEXT: Suggest labels, constants, variables, and pseudo-functions/variables ---
+                const completionItems: CompletionItem[] = [
+                    ...await getCompletionSymbols(document, position, symbolTables, includesGraph, settings),
+                    ...getCheapLocalLabelCompletions(document, params.position, replacementRange, currentWord),
+                    ...templates.operandDirectives.map(item => ({
+                        ...item,
+                        textEdit: TextEdit.replace(replacementRange, item.label),
+                    })),
+                ];
+                return completionItems;
             }
-            performanceMonitor.stop("onCompletion");
-            return completionItems;
-        }
+        });
     });
 
     connection.onCompletionResolve(
@@ -319,6 +273,40 @@ export function initializeCompletionProvider(connection: _Connection, documents:
     );
 }
 
+function getVisibleTranslationUnitUris(uri: string, graph: IncludesGraph): readonly string[] {
+    const tuUris = graph.getTranslationUnit(uri);
+    return tuUris.length > 0 ? tuUris : [uri];
+}
+
+function isValueCompletionEntity(entity: SymbolTableEntity): boolean {
+    return (entity instanceof Macro && entity.kind === MacroKind.Define)
+        || entity instanceof Symbol
+        || (entity instanceof Scope && entity.kind === ScopeKind.Proc);
+}
+
+function makeAutoIncludeCompletionItem(
+    documentUri: string,
+    label: string,
+    kind: CompletionItemKind,
+    detail: string | undefined,
+    includePath: string
+): CompletionItem {
+    return {
+        label,
+        kind,
+        detail,
+        labelDetails: {
+            description: `include ${includePath}`
+        },
+        sortText: AUTO_INCLUDE_ITEM_PREFIX + label,
+        data: {
+            uri: documentUri,
+            editAction: 'include',
+            includePath
+        }
+    };
+}
+
 async function getCompletionMacros(
     document: TextDocument,
     allSymbolTables: Map<string, SymbolTable>,
@@ -327,8 +315,8 @@ async function getCompletionMacros(
     const completionItems: CompletionItem[] = [];
 
     const seenUris: Set<string> = new Set();
-        
-    for (const dep of includesGraph.getTransitiveDependencies(document.uri)) {
+
+    for (const dep of getVisibleTranslationUnitUris(document.uri, includesGraph)) {
         if (seenUris.has(dep)) continue;
         seenUris.add(dep);
 
@@ -384,7 +372,7 @@ async function getCompletionMacros(
         }
     }
 
-    return Array.from(completionItems.values());
+    return completionItems;
 }
 
 async function getCompletionSymbols(
@@ -402,42 +390,39 @@ async function getCompletionSymbols(
 
     const completionItems: CompletionItem[] = [];
 
-    // Gather all locally visible symbols
+    // Gather all locally visible symbols across the current translation unit
+    const visibleUris = getVisibleTranslationUnitUris(document.uri, includesGraph);
+    const visibleUriSet = new Set(visibleUris);
     const includedUris: Set<string> = new Set();
     const seenImports: Set<string> = new Set();
     const visibleFqns: Set<string> = new Set();
-    for (const depUri of includesGraph.getTransitiveDependencies(document.uri)) {
+    for (const depUri of visibleUris) {
+        if (includedUris.has(depUri)) continue;
         includedUris.add(depUri);
-        const symbolTable = allSymbolTables.get(depUri);
-        if (!symbolTable) continue;
+        const depSymbolTable = allSymbolTables.get(depUri);
+        if (!depSymbolTable) continue;
 
-        for (const entity of symbolTable.getAllDefinedEntities()) {
-            if (
-                entity instanceof Macro && entity.kind === MacroKind.Define
-                || entity instanceof Symbol
-                || entity instanceof Scope && entity.kind === ScopeKind.Proc
-            ) {
+        for (const entity of depSymbolTable.getAllDefinedEntities()) {
+            if (isValueCompletionEntity(entity)) {
                 visibleFqns.add(entity.getFullyQualifiedName());
-                let label = currentScope.findRelativeName(entity);
-                let kind = getCompletionItemKind(getLSPSymbolKind(entity));
-                let detail = `${getCompletionItemDetail(entity)}`;
+                const label = currentScope.findRelativeName(entity);
+                const kind = getCompletionItemKind(getLSPSymbolKind(entity));
+                const detail = `${getCompletionItemDetail(entity)}`;
 
-                const completionItem = {
+                completionItems.push({
                     label,
                     kind,
                     detail,
                     sortText: VISIBLE_ITEM_PREFIX + label
-                };
-
-                completionItems.push(completionItem);
+                });
             }
         }
 
-        for (const importEntity of symbolTable.imports) {
+        for (const importEntity of depSymbolTable.imports) {
             seenImports.add(importEntity.name);
             visibleFqns.add(importEntity.getFullyQualifiedName());
 
-            let label = currentScope.findRelativeName(importEntity);
+            const label = currentScope.findRelativeName(importEntity);
             let kind = getCompletionItemKind(getLSPSymbolKind(importEntity));
             let detail = `${getCompletionItemDetail(importEntity)}`;
 
@@ -448,18 +433,14 @@ async function getCompletionSymbols(
                 resolveImport(importEntity.name, allSymbolTables, includesGraph);
             if (resolvedImport) {
                 // This may be a global that is acting as an export, which we should ignore.
-                let isExportingGlobal = false;
-                if (importEntity.kind === ImportKind.Global) {
-                    for (const tuUri of includesGraph.getTranslationUnit(importEntity.uri)) {
-                        if (resolvedImport.uri === tuUri) {
-                            isExportingGlobal = true;
-                            break;
-                        }
-                    }
+                if (
+                    importEntity.kind === ImportKind.Global
+                    && includesGraph.getTranslationUnit(importEntity.uri).includes(resolvedImport.uri)
+                ) {
+                    continue;
                 }
-                if (isExportingGlobal) continue;
 
-                if (resolvedImport.uri === document.uri) continue;
+                if (visibleUriSet.has(resolvedImport.uri)) continue;
                 kind = getCompletionItemKind(getLSPSymbolKind(resolvedImport));
                 detail = `${getCompletionItemDetail(resolvedImport)}`;
             }
@@ -474,53 +455,37 @@ async function getCompletionSymbols(
     }
 
     // Search the workspace for symbols that we can auto-include or import
-    for (const [uri, symbolTable] of allSymbolTables) {
+    for (const [uri, otherSymbolTable] of allSymbolTables) {
         if (includedUris.has(uri)) continue;
 
         if (isAutoIncludable(uri, settings)) {
-            let canonicalPath;
-            // Suggest including .inc files that define a symbol
-            for (const entity of symbolTable.getAllDefinedEntities()) {
-                if (
-                    entity instanceof Macro && entity.kind === MacroKind.Define
-                    || entity instanceof Symbol
-                    || entity instanceof Scope && entity.kind === ScopeKind.Proc
-                ) {
-                    if (visibleFqns.has(entity.getFullyQualifiedName())) continue;
-                    if (!canonicalPath) {
-                        canonicalPath =
-                            findCanonicalIncludePath(document.uri, uri, settings.includeDirs);
-                    }
-                    let label = currentScope.findRelativeName(entity);
-                    let kind = getCompletionItemKind(getLSPSymbolKind(entity));
-                    let detail = `${getCompletionItemDetail(entity)}`;
+            let canonicalPath: string | undefined;
+            const getCanonicalPath = () => {
+                if (!canonicalPath) {
+                    canonicalPath = findCanonicalIncludePath(document.uri, uri, settings.includeDirs);
+                }
+                return canonicalPath;
+            };
 
-                    completionItems.push({
-                        label,
-                        kind,
-                        detail,
-                        labelDetails: {
-                            description: `include ${canonicalPath}`
-                        },
-                        sortText: AUTO_INCLUDE_ITEM_PREFIX + label,
-                        data: {
-                            uri: document.uri,
-                            editAction: 'include',
-                            includePath: canonicalPath
-                        }
-                    });
+            // Suggest including .inc files that define a symbol
+            for (const entity of otherSymbolTable.getAllDefinedEntities()) {
+                if (isValueCompletionEntity(entity)) {
+                    if (visibleFqns.has(entity.getFullyQualifiedName())) continue;
+                    completionItems.push(makeAutoIncludeCompletionItem(
+                        document.uri,
+                        currentScope.findRelativeName(entity),
+                        getCompletionItemKind(getLSPSymbolKind(entity)),
+                        `${getCompletionItemDetail(entity)}`,
+                        getCanonicalPath()
+                    ));
                 }
             }
 
             // Suggest including files that import symbols (i.e. headers)
-            for (const importEntity of symbolTable.imports) {
+            for (const importEntity of otherSymbolTable.imports) {
                 if (visibleFqns.has(importEntity.getFullyQualifiedName())) continue;
-                if (!canonicalPath) {
-                    canonicalPath =
-                        findCanonicalIncludePath(document.uri, uri, settings.includeDirs);
-                }
 
-                let label = currentScope.findRelativeName(importEntity);
+                const label = currentScope.findRelativeName(importEntity);
                 let kind = getCompletionItemKind(getLSPSymbolKind(importEntity));
                 let detail = `${getCompletionItemDetail(importEntity)}`;
 
@@ -534,39 +499,32 @@ async function getCompletionSymbols(
                     detail = `${getCompletionItemDetail(resolvedExport)}`;
                 }
 
-                completionItems.push({
+                completionItems.push(makeAutoIncludeCompletionItem(
+                    document.uri,
                     label,
                     kind,
                     detail,
-                    labelDetails: {
-                        description: `include ${canonicalPath}`
-                    },
-                    sortText: AUTO_INCLUDE_ITEM_PREFIX + label,
-                    data: {
-                        uri: document.uri,
-                        editAction: 'include',
-                        includePath: canonicalPath
-                    }
-                });
+                    getCanonicalPath()
+                ));
             }
         }
 
         // Suggest importing symbols that are defined and exported
-        for (const exportEntity of symbolTable.exports) {
+        for (const exportEntity of otherSymbolTable.exports) {
             if (seenImports.has(exportEntity.name)) continue;
             seenImports.add(exportEntity.name);
+            if (visibleFqns.has(exportEntity.getFullyQualifiedName())) continue;
 
             const resolvedExport = resolveExport(exportEntity, allSymbolTables, includesGraph);
             if (!resolvedExport) continue;
 
-            let relativeUri = getWorkspaceRelativePath(resolvedExport.uri);
-
-            let label = currentScope.findRelativeName(exportEntity);
-            let kind = getCompletionItemKind(getLSPSymbolKind(resolvedExport));
-            let detail = `${getCompletionItemDetail(resolvedExport)}`;
+            const label = currentScope.findRelativeName(exportEntity);
+            const kind = getCompletionItemKind(getLSPSymbolKind(resolvedExport));
+            const detail = `${getCompletionItemDetail(resolvedExport)}`;
             let labelDetails;
             let data;
             if (!settings.implicitImports) {
+                const relativeUri = getWorkspaceRelativePath(resolvedExport.uri);
                 labelDetails = {
                     description: `import from ${relativeUri}`
                 };
@@ -575,7 +533,7 @@ async function getCompletionSymbols(
                     uri: document.uri,
                     editAction: 'import',
                     importSymbol: resolvedExport.name
-                }
+                };
             }
 
             completionItems.push({
@@ -589,99 +547,88 @@ async function getCompletionSymbols(
         }
     }
 
-    return Array.from(completionItems.values());
+    return completionItems;
+}
+
+function skipCommentBlock(lines: string[]): number {
+    let top = 0;
+    let foundComment = false;
+    while (top < lines.length && lines[top].trim().startsWith(';')) {
+        foundComment = true;
+        top++;
+    }
+    if (foundComment && top < lines.length && lines[top].trim().length === 0) {
+        top++;
+    }
+    return top;
+}
+
+function insertIntoSortedBlock(
+    lines: string[],
+    startLine: number,
+    directivePrefix: string,
+    newLine: string,
+    extractSortKey: (trimmedLine: string) => string,
+    newSortKey: string,
+): TextEdit {
+    let insertAt = startLine;
+    while (insertAt < lines.length && lines[insertAt].trim().toLowerCase().startsWith(directivePrefix)) {
+        const existingKey = extractSortKey(lines[insertAt].trim());
+        if (existingKey < newSortKey) {
+            insertAt++;
+        } else {
+            break;
+        }
+    }
+
+    // Add empty space if we're at the end of the block and the following line has content.
+    const trimmedLine = insertAt < lines.length ? lines[insertAt].trim().toLowerCase() : '';
+    if (trimmedLine && !trimmedLine.startsWith(directivePrefix)) {
+        newLine += '\n';
+    }
+
+    return TextEdit.insert(Position.create(insertAt, 0), newLine);
 }
 
 function makeIncludeEdit(
     document: TextDocument,
     includeUri: string
 ): TextEdit {
-    let includeLine = `.include "${includeUri}"\n`;
     const lines = document.getText().split(/\r?\n/);
-
-    let top = 0;
-
-    // Skip contiguous comment block
-    let foundComment;
-    while (
-        top < lines.length
-        && lines[top].trim().startsWith(';')
-    ) {
-        foundComment = true;
-        top++;
-    }
-    if (foundComment) top++;
-
-    // Insert in order from the top of the block
-    let insertAt = top;
-    while (insertAt < lines.length && lines[insertAt].trim().toLowerCase().startsWith(".include")) {
-        const existingPath = lines[insertAt]
-            .trim()
-            .slice(8) // remove ".include"
-            .trim()
-            .replace(/^"|"$/g, "");
-        if (existingPath < includeUri) {
-            insertAt++;
-        } else {
-            break;
-        }
-    }
-
-    // Add empty space if we're at the end of the .include block and the line has content.
-    const trimmedLine = lines[insertAt].trim().toLowerCase();
-    if (trimmedLine && !trimmedLine.startsWith(".include")) includeLine = includeLine + `\n`;
-
-    return TextEdit.insert(Position.create(insertAt, 0), includeLine);
+    const top = skipCommentBlock(lines);
+    return insertIntoSortedBlock(
+        lines,
+        top,
+        '.include',
+        `.include "${includeUri}"\n`,
+        line => line.slice(8).trim().replace(/^"|"$/g, ''),
+        includeUri
+    );
 }
 
 function makeImportEdit(
     document: TextDocument,
     importSymbol: string
 ): TextEdit {
-    let importLine = `.import ${importSymbol}\n`;
     const lines = document.getText().split(/\r?\n/);
-
-    let top = 0;
-
-    // Skip contiguous comment block
-    let foundComment;
-    while (
-        top < lines.length
-        && lines[top].trim().startsWith(';')
-    ) {
-        foundComment = true;
-        top++;
-    }
-    if (foundComment && lines[top].trim().length === 0) top++;
+    let top = skipCommentBlock(lines);
 
     // Skip include block
-    let foundInclude;
-    while (
-        top < lines.length
-        && lines[top].trim().toLowerCase().startsWith('.include')
-    ) {
+    let foundInclude = false;
+    while (top < lines.length && lines[top].trim().toLowerCase().startsWith('.include')) {
         foundInclude = true;
         top++;
     }
-    if (foundInclude && lines[top].trim().length === 0) top++;
-
-    // Insert in order from the top of the block
-    let insertAt = top;
-    while (insertAt < lines.length && lines[insertAt].trim().toLowerCase().startsWith(".import")) {
-        const existingImportSymbol = lines[insertAt]
-            .trim()
-            .slice(7) // remove ".import"
-            .trim()
-        if (existingImportSymbol < importSymbol) {
-            insertAt++;
-        } else {
-            break;
-        }
+    if (foundInclude && top < lines.length && lines[top].trim().length === 0) {
+        top++;
     }
 
-    // Add empty space if we're at the end of the .import block and the line has content.
-    const trimmedLine = lines[insertAt].trim().toLowerCase();
-    if (trimmedLine && !trimmedLine.startsWith(".import")) importLine = importLine + `\n`;
-
-    return TextEdit.insert(Position.create(insertAt, 0), importLine);
+    return insertIntoSortedBlock(
+        lines,
+        top,
+        '.import',
+        `.import ${importSymbol}\n`,
+        line => line.slice(7).trim(),
+        importSymbol
+    );
 }

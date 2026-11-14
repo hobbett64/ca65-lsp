@@ -35,20 +35,47 @@ export function activate(context: ExtensionContext) {
 		},
 	};
 
-	// Watch files that match the defined language extensions
+	// Watch files that match the defined language extensions and user overrides
 	const langContribution = context.extension.packageJSON.contributes.languages.find(
-        (lang: any) => lang.id === 'ca65'
-    );
-    const extensions = langContribution?.extensions?.map(
-        (ext: string) => ext.substring(1)
-    ) || ['s', 'asm', 'inc'];
-    const fileWatcherPattern = `**/*.{${extensions.join(',')}}`;
+		(lang: any) => lang.id === 'ca65'
+	);
+	const baseExtensions: string[] = langContribution?.extensions?.length
+		? langContribution.extensions
+		: ['.s', '.asm', '.inc'];
+	const rawAdditional = workspace.getConfiguration('ca65').get<unknown>('additionalExtensions');
+	const additionalExtensions = Array.isArray(rawAdditional)
+		? rawAdditional.filter((ext): ext is string => typeof ext === 'string')
+		: [];
+	const normalizedExtensions = Array.from(new Set(
+		[...baseExtensions, ...additionalExtensions]
+			.map((ext) => ext.trim().replace(/^\./, ''))
+			.filter((ext) => ext.length > 0)
+	));
+
+	const fileWatchers: ReturnType<typeof workspace.createFileSystemWatcher>[] = [];
+	if (normalizedExtensions.length > 0) {
+		const fileWatcherPattern = normalizedExtensions.length === 1
+			? `**/*.${normalizedExtensions[0]}`
+			: `**/*.{${normalizedExtensions.join(',')}}`;
+		fileWatchers.push(workspace.createFileSystemWatcher(fileWatcherPattern));
+	}
+
+	const associations = workspace.getConfiguration('files').get<Record<string, unknown>>('associations');
+	if (associations && typeof associations === 'object') {
+		for (const [pattern, lang] of Object.entries(associations)) {
+			if (lang === 'ca65' && pattern.length > 0) {
+				const glob = pattern.includes('/') ? pattern : `**/${pattern}`;
+				fileWatchers.push(workspace.createFileSystemWatcher(glob));
+			}
+		}
+	}
+	context.subscriptions.push(...fileWatchers);
 
 	const clientOptions: LanguageClientOptions = {
 		documentSelector: [{ scheme: 'file', language: 'ca65' }],
 		synchronize: {
 			configurationSection: 'ca65',
-			fileEvents: workspace.createFileSystemWatcher(fileWatcherPattern)
+			fileEvents: fileWatchers
 		},
 	};
 
@@ -59,38 +86,28 @@ export function activate(context: ExtensionContext) {
 		clientOptions
 	);
 
-	client.start();
+	const clientReady = Promise.resolve(client.start());
 	console.log('ca65 Language Client started.');
 
 	// --- Register the "Show Reference" Command ---
-	const disposable = commands.registerCommand('ca65.showReference', (mnemonicId?: string) => {
-		showReferencePanel(context, mnemonicId);
-	});
-	context.subscriptions.push(disposable);
-
-	context.subscriptions.push(commands.registerCommand('ca65.dumpPerformanceStats', () => {
-		if (client) {
-			client.sendRequest('ca65/dumpPerformanceStats');
-		}
+	context.subscriptions.push(commands.registerCommand('ca65.showReference', () => {
+		return showReferencePanel(context);
 	}));
 
-	context.subscriptions.push(commands.registerCommand('ca65.dumpSymbolTables', () => {
-		if (client) {
-			client.sendRequest('ca65/dumpSymbolTables');
-		}
-	}));
-
-	context.subscriptions.push(commands.registerCommand('ca65.dumpIncludesGraph', () => {
-		if (client) {
-			client.sendRequest('ca65/dumpIncludesGraph');
-		}
-	}));
-
-	context.subscriptions.push(commands.registerCommand('ca65.dumpExportsMap', () => {
-		if (client) {
-			client.sendRequest('ca65/dumpExportsMap');
-		}
-	}));
+	const dumpCommands: ReadonlyArray<[string, string]> = [
+		['ca65.dumpPerformanceStats', 'ca65/dumpPerformanceStats'],
+		['ca65.dumpSymbolTables', 'ca65/dumpSymbolTables'],
+		['ca65.dumpIncludesGraph', 'ca65/dumpIncludesGraph'],
+		['ca65.dumpExportsMap', 'ca65/dumpExportsMap'],
+	];
+	for (const [commandId, requestMethod] of dumpCommands) {
+		context.subscriptions.push(commands.registerCommand(commandId, async () => {
+			if (client) {
+				await clientReady;
+				return client.sendRequest(requestMethod);
+			}
+		}));
+	}
 }
 
 export function deactivate(): Thenable<void> | undefined {
@@ -100,20 +117,24 @@ export function deactivate(): Thenable<void> | undefined {
 	return client.stop();
 }
 
-// --- Implementation for the "Show Reference" Panel ---
-async function showReferencePanel(context: ExtensionContext, mnemonicId?: string) {
-	// 1. Load the JSON data
-	const dataPath = context.asAbsolutePath(path.join('server', 'data', '6502_mnemonics.json'));
-	const rawData = await fs.readFile(dataPath, 'utf8');
-	const jsonData = JSON.parse(rawData);
+let cachedReferenceMarkdown: string | undefined;
 
-	// 2. Generate the full Markdown string
-	const fullMarkdown = generateFullMarkdown(jsonData);
+// --- Implementation for the "Show Reference" Panel ---
+async function showReferencePanel(context: ExtensionContext) {
+	if (!cachedReferenceMarkdown) {
+		// 1. Load the JSON data
+		const dataPath = context.asAbsolutePath(path.join('server', 'data', '6502_mnemonics.json'));
+		const rawData = await fs.readFile(dataPath, 'utf8');
+		const jsonData = JSON.parse(rawData);
+
+		// 2. Generate the full Markdown string
+		cachedReferenceMarkdown = generateFullMarkdown(jsonData);
+	}
 
 	// Save to a temp file
 	const tmpDir = os.tmpdir();
 	const filePath = path.join(tmpDir, 'ca65-reference.md');
-	await fs.writeFile(filePath, fullMarkdown, 'utf-8');
+	await fs.writeFile(filePath, cachedReferenceMarkdown, 'utf-8');
 	const fileUri = Uri.file(filePath);
 
 	// Show the preview (no editor tab)
@@ -207,8 +228,8 @@ function generateFullMarkdown(jsonData: any): string {
 		}
 
 		// See also
-		if (data.see_also && Array.isArray(data.see_also) && data.see_also.length > 0) {
-			const seeAlsoLinks = data.see_also.map(
+		if (data.seeAlso && Array.isArray(data.seeAlso) && data.seeAlso.length > 0) {
+			const seeAlsoLinks = data.seeAlso.map(
 				(link: string) => `[${link}](#${link.toLowerCase()})`
 			).join(', ');
 			fullMarkdown += `**See also:** ${seeAlsoLinks}\n\n`;

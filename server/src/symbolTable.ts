@@ -119,6 +119,7 @@ export class Scope extends SymbolTableEntity {
         definition: Range,
         parentScope: Scope | null,
         public segment?: string,
+        private readonly onMutate?: () => void,
     ) {
         super(uri, name, definition, parentScope, segment);
     }
@@ -134,6 +135,7 @@ export class Scope extends SymbolTableEntity {
         }
         const symbol = new Symbol(this.uri, kind, name, definition, this, segment);
         this.symbols.get(name)?.push(symbol);
+        this.onMutate?.();
         return symbol;
     }
 
@@ -154,8 +156,9 @@ export class Scope extends SymbolTableEntity {
         if (!this.childScopes.has(name)) {  
             this.childScopes.set(name, []);
         }
-        const scope = new Scope(this.uri, kind, name, definition, this, segment);
+        const scope = new Scope(this.uri, kind, name, definition, this, segment, this.onMutate);
         this.childScopes.get(name)?.push(scope);
+        this.onMutate?.();
         return scope;
     }
 
@@ -359,12 +362,14 @@ export class ReferenceInfo {
 export class SymbolTable {
     private rootScope: Scope;
     private macros: Map<string, Macro> = new Map();
+    private cachedDefinedEntities: SymbolTableEntity[] | null = null;
 
     public references: ReferenceInfo[] = [];
     private referencesByName: Map<string, ReferenceInfo[]> = new Map();
     private referencesByLine: Map<number, ReferenceInfo[]> = new Map();
 
     public includedFiles: string[] = [];
+    public unresolvedIncludes: string[] = [];
 
     public anonymousLabelLines: number[] = [];
     public anonymousLabelReferences: Map<number, Range[]> = new Map();
@@ -382,6 +387,8 @@ export class SymbolTable {
                 end: { line: 0, character: 0 },
             },
             null,
+            undefined,
+            () => { this.cachedDefinedEntities = null; },
         );
     }
 
@@ -400,6 +407,7 @@ export class SymbolTable {
     ): Macro {
         const macro = new Macro(this.uri, kind, name, definition);
         this.macros.set(name, macro);
+        this.cachedDefinedEntities = null;
         return macro;
     }
 
@@ -441,11 +449,14 @@ export class SymbolTable {
     }
 
     /**
-     * Traverses the entire tree once to collect all defined items.
-     * @returns An object containing flat lists of all symbols, scopes, and macros. Note that this
-     *          exclues imports and exports.
+     * Traverses the entire tree once to collect all defined items (cached until mutated).
+     * @returns Flat list of all symbols, scopes, and macros (excluding imports and exports).
      */
     getAllDefinedEntities(): SymbolTableEntity[] {
+        if (this.cachedDefinedEntities) {
+            return this.cachedDefinedEntities;
+        }
+
         const symbols: Symbol[] = [];
         const scopes: Scope[] = [];
 
@@ -466,11 +477,12 @@ export class SymbolTable {
 
         traverse(this.rootScope);
 
-        return [
+        this.cachedDefinedEntities = [
             ...symbols,
             ...scopes,
-            ...this.getAllMacros(), // Reuse the existing sorted macro list
+            ...this.getAllMacros(),
         ];
+        return this.cachedDefinedEntities;
     }
 
     getAllReferences(): ReferenceInfo[] {
@@ -478,18 +490,17 @@ export class SymbolTable {
     }
 
     getReferenceAtPosition(position: Position): ReferenceInfo | null {
-        performanceMonitor.start('getReferenceAtPosition');
-        const lineRefs = this.referencesByLine.get(position.line);
-        if (lineRefs) {
-            for (const reference of lineRefs) {
-                if (this.isPositionInRange(position, reference.location)) {
-                    performanceMonitor.stop('getReferenceAtPosition');
-                    return reference;
+        return performanceMonitor.time('getReferenceAtPosition', () => {
+            const lineRefs = this.referencesByLine.get(position.line);
+            if (lineRefs) {
+                for (const reference of lineRefs) {
+                    if (this.isPositionInRange(position, reference.location)) {
+                        return reference;
+                    }
                 }
             }
-        }
-        performanceMonitor.stop('getReferenceAtPosition');
-        return null;
+            return null;
+        });
     }
 
     // A helper function to check if a position is within a range.
@@ -532,20 +543,20 @@ export class SymbolTable {
     }
 
     /**
-     * Pretty-print the entire symbol table: scopes, symbols, macros, and references.
+     * Format the entire symbol table: scopes, symbols, macros, and references.
      */
-    dump(): void {
-        console.log(`=== Symbol Table Dump for ${this.uri} ===`);
+    toString(): string {
+        const lines: string[] = [`=== Symbol Table Dump for ${this.uri} ===`];
 
         // --- Root Scope ---
         const traverseScope = (scope: Scope, indent = 0) => {
             const pad = '  '.repeat(indent);
             const name = scope.name || '<root>';
-            console.log(`${pad} - Scope: ${name} [${scope.kind}] (${scope.range.start.line}:${scope.range.start.character} - ${scope.range.end.line}:${scope.range.end.character})`);
+            lines.push(`${pad} - Scope: ${name} [${scope.kind}] (${scope.range.start.line}:${scope.range.start.character} - ${scope.range.end.line}:${scope.range.end.character})`);
 
             // Symbols
             for (const sym of scope.getSymbols()) {
-                console.log(`${pad}  * Symbol: ${sym.name} [${sym.kind}] (${sym.range.start.line}:${sym.range.start.character} - ${sym.range.end.line}:${sym.range.end.character})${sym.segment ? ' Segment: ' + sym.segment : ''}`);
+                lines.push(`${pad}  * Symbol: ${sym.name} [${sym.kind}] (${sym.range.start.line}:${sym.range.start.character} - ${sym.range.end.line}:${sym.range.end.character})${sym.segment ? ' Segment: ' + sym.segment : ''}`);
             }
 
             // Recurse child scopes
@@ -558,31 +569,32 @@ export class SymbolTable {
 
         // --- Includes ---
         if (this.includedFiles.length > 0) {
-            console.log("\n --- Included Files ---");
+            lines.push('\n --- Included Files ---');
             for (const file of this.includedFiles) {
-                console.log(`  * ${file}`);
+                lines.push(`  * ${file}`);
             }
         }
 
         // --- Macros ---
         const allMacros = this.getAllMacros();
         if (allMacros.length > 0) {
-            console.log("\n --- Macros ---");
+            lines.push('\n --- Macros ---');
             for (const macro of allMacros) {
-                console.log(`  * Macro: ${macro.name} [${macro.kind}] (${macro.range.start.line}:${macro.range.start.character} - ${macro.range.end.line}:${macro.range.end.character})`);
+                lines.push(`  * Macro: ${macro.name} [${macro.kind}] (${macro.range.start.line}:${macro.range.start.character} - ${macro.range.end.line}:${macro.range.end.character})`);
             }
         }
 
         // --- References ---
         if (this.references.length > 0) {
-            console.log("\n --- References ---");
+            lines.push('\n --- References ---');
             for (const ref of this.references) {
                 const qualifiers = [...ref.qualifiers, ref.name].join('::');
                 const scopeStr = ref.scope ? `${ref.scope.getFullyQualifiedName()}` : 'null';
-                console.log(`  * Context: ${ref.context}, Qualified Name: ${qualifiers}, Scope: ${scopeStr}, Location: (${ref.location.start.line}:${ref.location.start.character} - ${ref.location.end.line}:${ref.location.end.character}), Calling Entity: (${ref.callingEntity ? ref.callingEntity.getFullyQualifiedName() : 'undefined'})`);
+                lines.push(`  * Context: ${ref.context}, Qualified Name: ${qualifiers}, Scope: ${scopeStr}, Location: (${ref.location.start.line}:${ref.location.start.character} - ${ref.location.end.line}:${ref.location.end.character}), Calling Entity: (${ref.callingEntity ? ref.callingEntity.getFullyQualifiedName() : 'undefined'})`);
             }
         }
 
-        console.log(`=== End of Symbol Table Dump ===`);
+        lines.push('=== End of Symbol Table Dump ===');
+        return lines.join('\n') + '\n';
     }
 }

@@ -73,12 +73,12 @@ export function getAnonymousLabelIndex(
 ): number | undefined {
     const text = document.getText(Range.create(position.line, 0, position.line + 1, 0));
     const symbolTable = symbolTables.get(document.uri);
-    if (!symbolTable) return -1;
+    if (!symbolTable) return undefined;
 
     const previousAnonLabelIndex = findPreviousAnonymousLabelIndex(document, position.line);
 
     // Check if we're at the definition already
-    if (symbolTable.anonymousLabelLines[previousAnonLabelIndex] === position.line) {
+    if (previousAnonLabelIndex >= 0 && symbolTable.anonymousLabelLines[previousAnonLabelIndex] === position.line) {
         const defPos = text.indexOf(':');
         if (defPos === position.character || defPos + 1 === position.character) {
             return previousAnonLabelIndex;
@@ -86,7 +86,7 @@ export function getAnonymousLabelIndex(
     }
 
     let match;
-    const anonRefRegex = /:([-+<>]+)/g
+    const anonRefRegex = /:([-+<>]+)/g;
     while ((match = anonRefRegex.exec(text)) !== null) {
         const refText = match[0];
         if (position.character < match.index
@@ -95,12 +95,15 @@ export function getAnonymousLabelIndex(
         }
 
         const offset = getAnonLabelRefOffsetFromPreviousLabel(refText);
-        let targetIndex = previousAnonLabelIndex + offset
-        // Not a valid index.
-        if (targetIndex < 0 || targetIndex >= symbolTable.anonymousLabelLines.length) return -1;
+        const targetIndex = previousAnonLabelIndex + offset;
+        if (targetIndex < 0 || targetIndex >= symbolTable.anonymousLabelLines.length) {
+            return undefined;
+        }
 
         return targetIndex;
     }
+
+    return undefined;
 }
 
 export function findAllAnonLabelReferences(
