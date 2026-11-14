@@ -33,6 +33,7 @@ import { initializeDocumentHighlightProvider } from './documentHighlightProvider
 import { initializeCompletionProvider } from './completionProvider';
 import { initializeCodeActionProvider } from './codeActionProvider';
 import { analyzeInstructionRange } from './instructionAnalyzer';
+import { invalidateOverlaySignatures, initializeOverlayProvider } from './overlayProvider';
 import { deleteCachedResolutions } from './symbolResolver';
 import { ExportsMap } from './exportsMap';
 import { Ca65Settings, documentSettings } from './settings';
@@ -381,6 +382,7 @@ connection.onDidChangeConfiguration(async () => {
         documentSettings.clear();
         clearResolvedDirsCache();
         clearExecutablePathCache();
+        invalidateOverlaySignatures();
         await initializationGate.isInitialized;
         abortValidation();
 
@@ -428,6 +430,7 @@ connection.onDidChangeWatchedFiles(async (params: DidChangeWatchedFilesParams) =
 
     connection.console.log('Watched file change detected. Re-scanning affected files.');
     clearResolvedDirsCache();
+    invalidateOverlaySignatures();
     for (const event of params.changes) {
         const openDoc = documents.get(event.uri);
         if (openDoc) {
@@ -504,6 +507,7 @@ initializeCompletionProvider(connection, documents);
 initializeInlayHintProvider(connection, documents);
 initializeDocumentHighlightProvider(connection, documents);
 initializeCodeActionProvider(connection, documents);
+initializeOverlayProvider(connection, documents);
 
 // --- Start the server ---
 documents.listen(connection);

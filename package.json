@@ -134,6 +134,11 @@
                 "title": "ca65: Show Instruction Reference"
             },
             {
+                "command": "ca65.showHexListing",
+                "title": "ca65: Show Hex & Address Listing Side-by-Side",
+                "icon": "$(file-binary)"
+            },
+            {
                 "command": "ca65.dumpPerformanceStats",
                 "title": "ca65: Dump Performance Stats to Output"
             },
@@ -150,6 +155,15 @@
                 "title": "ca65: Dump Exports Map to Output"
             }
         ],
+        "menus": {
+            "editor/title": [
+                {
+                    "command": "ca65.showHexListing",
+                    "when": "editorLangId == ca65",
+                    "group": "navigation"
+                }
+            ]
+        },
         "snippets": [
             {
                 "language": "ca65",

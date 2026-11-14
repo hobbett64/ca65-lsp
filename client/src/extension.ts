@@ -7,6 +7,11 @@ import {
 	StatusBarAlignment,
 	MarkdownString,
 	TextEditor,
+	TextDocumentContentProvider,
+	TextEditorRevealType,
+	EventEmitter,
+	ViewColumn,
+	Range as VscodeRange,
 } from "vscode";
 import {
 	LanguageClient,
@@ -115,6 +120,9 @@ export function activate(context: ExtensionContext) {
 
 	// --- Status Bar Cycle & Byte Estimator ---
 	setupCycleStatusBar(context, clientReady);
+
+	// --- Read-Only Side-by-Side .lst / --dbgfile Listing ---
+	setupSideBySideHexListing(context, clientReady);
 }
 
 interface InstructionAnalysisItem {
@@ -279,6 +287,208 @@ function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<voi
 	);
 
 	updateForEditor(window.activeTextEditor);
+}
+
+interface OverlayLineItem {
+	line: number;
+	addressLabel: string;
+	bytesText?: string;
+	byteCount: number;
+}
+
+interface OverlayDataResponse {
+	source: 'live-lst' | 'none';
+	stale?: boolean;
+	error?: boolean;
+	lines: OverlayLineItem[];
+}
+
+const LISTING_SCHEME = 'ca65-listing';
+
+function formatCompactBytes(bytesText: string, byteCount: number, maxInlineBytes: number = 6): string {
+	const parts = bytesText.split(/\s+/);
+	if (parts.length <= maxInlineBytes) {
+		return parts.join(' ');
+	}
+	return `${parts.slice(0, maxInlineBytes).join(' ')}… (${byteCount}B)`;
+}
+
+function buildListingUri(sourceUri: Uri): Uri {
+	const baseName = path.basename(sourceUri.fsPath) || 'listing';
+	return Uri.from({
+		scheme: LISTING_SCHEME,
+		path: `/${baseName}.lst`,
+		query: encodeURIComponent(sourceUri.toString()),
+	});
+}
+
+function getSourceUriFromListingUri(listingUri: Uri): Uri | null {
+	if (listingUri.scheme !== LISTING_SCHEME || !listingUri.query) {
+		return null;
+	}
+	try {
+		return Uri.parse(decodeURIComponent(listingUri.query));
+	} catch {
+		return null;
+	}
+}
+
+function formatSideBySideListing(
+	sourceLines: string[],
+	data: OverlayDataResponse
+): string {
+	const byLine = new Map<number, OverlayLineItem>();
+	for (const item of data.lines) {
+		if (item.line >= 0 && item.line < sourceLines.length) {
+			byLine.set(item.line, item);
+		}
+	}
+
+	const output: string[] = [];
+	for (let line = 0; line < sourceLines.length; line++) {
+		const item = byLine.get(line);
+		const addrCol = (item ? item.addressLabel : '').padEnd(10, ' ');
+		const bytesText = item?.bytesText
+			? formatCompactBytes(item.bytesText, item.byteCount, 6)
+			: '';
+		const bytesCol = bytesText.length < 20 ? bytesText.padEnd(20, ' ') : `${bytesText} `;
+		output.push(`${addrCol}${bytesCol}| ${sourceLines[line]}`);
+	}
+	return output.join('\n');
+}
+
+function setupSideBySideHexListing(context: ExtensionContext, clientReady: Promise<void>): void {
+	const onDidChangeEmitter = new EventEmitter<Uri>();
+	const lastMetadataByListingUri = new Map<string, OverlayDataResponse>();
+	const overlayStatusBadge = window.createStatusBarItem(StatusBarAlignment.Right, 99);
+	context.subscriptions.push(onDidChangeEmitter, overlayStatusBadge);
+
+	const updateStatusBadge = () => {
+		const active = window.activeTextEditor;
+		if (!active) {
+			overlayStatusBadge.hide();
+			return;
+		}
+
+		let meta: OverlayDataResponse | undefined;
+		if (active.document.uri.scheme === LISTING_SCHEME) {
+			meta = lastMetadataByListingUri.get(active.document.uri.toString());
+		} else if (active.document.languageId === 'ca65') {
+			const expectedListingUri = buildListingUri(active.document.uri).toString();
+			const isListingVisible = window.visibleTextEditors.some(
+				e => e.document.uri.toString() === expectedListingUri
+			);
+			if (isListingVisible) {
+				meta = lastMetadataByListingUri.get(expectedListingUri);
+			}
+		}
+
+		if (!meta) {
+			overlayStatusBadge.hide();
+			return;
+		}
+
+		if (meta.source === 'none') {
+			if (meta.error) {
+				overlayStatusBadge.text = '$(warning) ca65 -l (assembly error)';
+				overlayStatusBadge.tooltip = 'ca65 assembly failed; click to view Problems.';
+				overlayStatusBadge.command = 'workbench.actions.view.problems';
+				overlayStatusBadge.show();
+			} else {
+				overlayStatusBadge.hide();
+			}
+			return;
+		}
+
+		if (meta.stale) {
+			overlayStatusBadge.text = meta.error
+				? '$(warning) ca65 -l (stale — assembly error)'
+				: '$(warning) ca65 -l (stale)';
+			overlayStatusBadge.tooltip = 'Showing last valid ca65 -l listing. Fix errors and save to update (click to open Problems).';
+			overlayStatusBadge.command = 'workbench.actions.view.problems';
+		} else {
+			overlayStatusBadge.text = '$(file-binary) ca65 -l';
+			overlayStatusBadge.tooltip = 'Side-by-side listing from ca65 -l. Click to refresh.';
+			overlayStatusBadge.command = 'ca65.showHexListing';
+		}
+		overlayStatusBadge.show();
+	};
+
+	const provider: TextDocumentContentProvider = {
+		onDidChange: onDidChangeEmitter.event,
+		async provideTextDocumentContent(listingUri: Uri): Promise<string> {
+			const sourceUri = getSourceUriFromListingUri(listingUri);
+			if (!sourceUri) {
+				return '; Invalid ca65 listing URI.';
+			}
+
+			await clientReady;
+			const srcDoc = await workspace.openTextDocument(sourceUri);
+			const data = await client.sendRequest<OverlayDataResponse>('ca65/getOverlayData', {
+				uri: sourceUri.toString(),
+			});
+
+			lastMetadataByListingUri.set(listingUri.toString(), data);
+			updateStatusBadge();
+
+			if (!data || data.source === 'none') {
+				return data?.error
+					? '; Cannot generate ca65 -l listing due to assembly errors. Fix errors and save to update.'
+					: '; ca65 listing unavailable (ensure ca65 is installed or configured via ca65.executablePath).';
+			}
+
+			const sourceLines: string[] = [];
+			for (let i = 0; i < srcDoc.lineCount; i++) {
+				sourceLines.push(srcDoc.lineAt(i).text);
+			}
+			return formatSideBySideListing(sourceLines, data);
+		},
+	};
+
+	const refreshVisibleListings = () => {
+		for (const editor of window.visibleTextEditors) {
+			if (editor.document.uri.scheme === LISTING_SCHEME) {
+				onDidChangeEmitter.fire(editor.document.uri);
+			}
+		}
+		updateStatusBadge();
+	};
+
+	context.subscriptions.push(
+		workspace.registerTextDocumentContentProvider(LISTING_SCHEME, provider),
+		window.onDidChangeActiveTextEditor(() => updateStatusBadge()),
+		window.onDidChangeVisibleTextEditors(() => updateStatusBadge()),
+		workspace.onDidSaveTextDocument((doc) => {
+			if (doc.languageId === 'ca65') {
+				refreshVisibleListings();
+			}
+		}),
+		commands.registerCommand('ca65.showHexListing', async () => {
+			const activeEditor = window.activeTextEditor;
+			if (!activeEditor || activeEditor.document.languageId !== 'ca65') {
+				window.showInformationMessage('Open a ca65 source file to view its hex & address listing.');
+				return;
+			}
+
+			const activeLine = activeEditor.selection.active.line;
+			const listingUri = buildListingUri(activeEditor.document.uri);
+			onDidChangeEmitter.fire(listingUri);
+
+			const listingDoc = await workspace.openTextDocument(listingUri);
+			const shownEditor = await window.showTextDocument(listingDoc, {
+				viewColumn: ViewColumn.Beside,
+				preserveFocus: true,
+				preview: true,
+			});
+
+			const clampedLine = Math.min(activeLine, Math.max(0, listingDoc.lineCount - 1));
+			shownEditor.revealRange(
+				new VscodeRange(clampedLine, 0, clampedLine, 0),
+				TextEditorRevealType.InCenterIfOutsideViewport
+			);
+			updateStatusBadge();
+		}),
+	);
 }
 
 export function deactivate(): Thenable<void> | undefined {

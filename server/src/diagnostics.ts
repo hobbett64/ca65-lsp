@@ -166,32 +166,44 @@ async function getDocumentCached(
     return doc;
 }
 
+export interface Ca65AssembleOptions {
+    generateListing?: boolean;
+    /** When true, runs even if `ca65.enableCa65StdErrDiagnostics` is false. */
+    ignoreDiagnosticSetting?: boolean;
+}
+
+export interface Ca65AssembleResult {
+    stderr: string;
+    hasErrors: boolean;
+    effectiveCwd: string;
+    workspaceRoot: string;
+    shadowDir: string | null;
+    listingContent?: string;
+}
+
 /**
- * Gathers only the ca65 compiler diagnostics for a single translation unit.
- * @param textDocument The root document of the translation unit to validate.
- * @param signal AbortSignal for cancelling the operation.
- * @param docCache Per-validation cache of unopened documents.
- * @returns A Map of URIs to their collected compiler diagnostics.
+ * Runs `ca65` on the given translation unit root (using a shadow directory if any open TU file has unsaved edits).
  */
-async function getCompilerDiagnosticsForUnit(
+export async function assembleTranslationUnit(
     textDocument: TextDocument,
     signal: AbortSignal,
-    docCache: Map<string, TextDocument | null>
-): Promise<Map<string, Diagnostic[]>> {
-    return performanceMonitor.timeAsync("getCompilerDiagnosticsForUnit", async () => {
+    options: Ca65AssembleOptions = {}
+): Promise<Ca65AssembleResult | null> {
+    return performanceMonitor.timeAsync('assembleTranslationUnit', async () => {
         const settings = await getDocumentSettings(textDocument.uri);
-        if (signal.aborted) return new Map();
-        const diagnosticsByUri = new Map<string, Diagnostic[]>();
-        if (!settings.enableCa65StdErrDiagnostics) return diagnosticsByUri;
+        if (signal.aborted) return null;
+        if (!options.ignoreDiagnosticSetting && !settings.enableCa65StdErrDiagnostics) {
+            return null;
+        }
 
         const ca65Path = await findCa65Executable(settings);
-        if (signal.aborted) return new Map();
+        if (signal.aborted) return null;
         if (!ca65Path) {
-            if (!hasShownCa65NotFoundMessage) {
+            if (!hasShownCa65NotFoundMessage && !options.ignoreDiagnosticSetting) {
                 connection.window.showErrorMessage('ca65 executable not found. Please set "ca65.executablePath" or ensure it is in your PATH.');
                 hasShownCa65NotFoundMessage = true;
             }
-            return diagnosticsByUri;
+            return null;
         }
 
         const workspaceFolderUri = getWorkspaceFolderOfFile(textDocument.uri);
@@ -220,12 +232,15 @@ async function getCompilerDiagnosticsForUnit(
                 }
             }
         }
-        if (signal.aborted) return new Map();
+        if (signal.aborted) return null;
 
         let shadowDir: string | null = null;
+        let listingTempDir: string | null = null;
         let effectiveCwd = workspaceRoot;
         const inputArg = path.relative(workspaceRoot, filePath);
         let stderr = '';
+        let hasErrors = false;
+        let listingContent: string | undefined;
 
         try {
             const userIncludeDirs = resolveWorkspaceRelativeDirs(textDocument.uri, settings.includeDirs);
@@ -239,7 +254,7 @@ async function getCompilerDiagnosticsForUnit(
                 const createdTargets = new Set<string>();
 
                 for (const tuUri of tuUris) {
-                    if (signal.aborted) return new Map();
+                    if (signal.aborted) return null;
                     const tuFsPath = URI.parse(tuUri).fsPath;
                     originalSourceDirs.add(path.dirname(tuFsPath));
                     const rel = path.relative(workspaceRoot, tuFsPath);
@@ -271,9 +286,16 @@ async function getCompilerDiagnosticsForUnit(
                     }
                 }
             }
-            if (signal.aborted) return new Map();
+            if (signal.aborted) return null;
 
             const args = [inputArg, '-o', process.platform === 'win32' ? 'NUL' : '/dev/null'];
+
+            let listingPath: string | undefined;
+            if (options.generateListing) {
+                listingTempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ca65-lst-'));
+                listingPath = path.join(listingTempDir, 'output.lst');
+                args.push('-l', listingPath);
+            }
 
             if (settings.implicitImports) args.push('--auto-import');
 
@@ -305,14 +327,53 @@ async function getCompilerDiagnosticsForUnit(
                 const result = await execFileAsync(ca65Path, args, { cwd: effectiveCwd, signal });
                 stderr = result.stderr;
             } catch (err: any) {
+                hasErrors = true;
                 if (err && err.stderr) stderr = err.stderr;
+            }
+
+            if (listingPath && !hasErrors && !signal.aborted) {
+                try {
+                    listingContent = await fs.readFile(listingPath, 'utf-8');
+                } catch {}
             }
         } finally {
             if (shadowDir) {
                 await fs.rm(shadowDir, { recursive: true, force: true }).catch(() => {});
             }
+            if (listingTempDir) {
+                await fs.rm(listingTempDir, { recursive: true, force: true }).catch(() => {});
+            }
         }
-        if (signal.aborted) return new Map();
+
+        return {
+            stderr,
+            hasErrors,
+            effectiveCwd,
+            workspaceRoot,
+            shadowDir,
+            listingContent,
+        };
+    });
+}
+
+/**
+ * Gathers only the ca65 compiler diagnostics for a single translation unit.
+ * @param textDocument The root document of the translation unit to validate.
+ * @param signal AbortSignal for cancelling the operation.
+ * @param docCache Per-validation cache of unopened documents.
+ * @returns A Map of URIs to their collected compiler diagnostics.
+ */
+async function getCompilerDiagnosticsForUnit(
+    textDocument: TextDocument,
+    signal: AbortSignal,
+    docCache: Map<string, TextDocument | null>
+): Promise<Map<string, Diagnostic[]>> {
+    return performanceMonitor.timeAsync("getCompilerDiagnosticsForUnit", async () => {
+        const diagnosticsByUri = new Map<string, Diagnostic[]>();
+        const assembled = await assembleTranslationUnit(textDocument, signal);
+        if (!assembled || signal.aborted) return diagnosticsByUri;
+
+        const { stderr, effectiveCwd, workspaceRoot, shadowDir } = assembled;
 
         if (stderr) {
             const lines = stderr.split(/\r?\n/);
