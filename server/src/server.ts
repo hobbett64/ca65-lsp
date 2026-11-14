@@ -5,6 +5,8 @@ import {
     InitializeParams,
     DidChangeWatchedFilesParams,
     FileChangeType,
+    CodeActionKind,
+    Range,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { URI } from 'vscode-uri';
@@ -29,6 +31,8 @@ import { initializeRenameProvider } from './renameProvider';
 import { initializeCallHierarchyProvider } from './callHierarchyProvider';
 import { initializeDocumentHighlightProvider } from './documentHighlightProvider';
 import { initializeCompletionProvider } from './completionProvider';
+import { initializeCodeActionProvider } from './codeActionProvider';
+import { analyzeInstructionRange } from './instructionAnalyzer';
 import { deleteCachedResolutions } from './symbolResolver';
 import { ExportsMap } from './exportsMap';
 import { Ca65Settings, documentSettings } from './settings';
@@ -78,6 +82,9 @@ connection.onInitialize(async (params: InitializeParams) => {
             },
             inlayHintProvider: { resolveProvider: false },
             documentHighlightProvider: true,
+            codeActionProvider: {
+                codeActionKinds: [CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite],
+            },
             workspace: {
                 workspaceFolders: {
                     supported: true,
@@ -344,6 +351,28 @@ connection.onRequest('ca65/dumpExportsMap', () => {
     connection.console.info(exportsMap.toString());
 });
 
+// Custom request from the client to estimate cycles and byte sizes in a range
+connection.onRequest('ca65/analyzeSelection', async (params: { uri?: string; range?: Range }) => {
+    await initializationGate.isInitialized;
+    if (!params?.uri || !params?.range) {
+        return null;
+    }
+    const document = documents.get(params.uri);
+    if (!document) {
+        return null;
+    }
+    const symbolTable = symbolTables.get(params.uri);
+    const settings = await getDocumentSettings(params.uri);
+    return analyzeInstructionRange(
+        document,
+        params.range,
+        symbolTable,
+        symbolTables,
+        includesGraph,
+        settings.implicitImports
+    );
+});
+
 // --- Event Listeners ---
 const lastDocumentVersions = new Map<string, number>();
 
@@ -474,6 +503,7 @@ initializeWorkspaceSymbolProvider(connection);
 initializeCompletionProvider(connection, documents);
 initializeInlayHintProvider(connection, documents);
 initializeDocumentHighlightProvider(connection, documents);
+initializeCodeActionProvider(connection, documents);
 
 // --- Start the server ---
 documents.listen(connection);

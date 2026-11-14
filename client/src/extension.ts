@@ -3,6 +3,10 @@ import {
 	workspace,
 	ExtensionContext,
 	commands,
+	window,
+	StatusBarAlignment,
+	MarkdownString,
+	TextEditor,
 } from "vscode";
 import {
 	LanguageClient,
@@ -108,6 +112,173 @@ export function activate(context: ExtensionContext) {
 			}
 		}));
 	}
+
+	// --- Status Bar Cycle & Byte Estimator ---
+	setupCycleStatusBar(context, clientReady);
+}
+
+interface InstructionAnalysisItem {
+	line: number;
+	mnemonic: string;
+	mode: string;
+	minBytes: number;
+	maxBytes: number;
+	minCycles: number;
+	maxCycles: number;
+	uncertainMode?: boolean;
+	hasBranchPenalty?: boolean;
+	hasPagePenalty?: boolean;
+}
+
+interface InstructionAnalysisSummary {
+	instructionCount: number;
+	minBytes: number;
+	maxBytes: number;
+	minCycles: number;
+	maxCycles: number;
+	uncertainCount: number;
+	hasBranchPenalty: boolean;
+	hasPagePenalty: boolean;
+	items: InstructionAnalysisItem[];
+}
+
+function formatRangeValue(min: number, max: number, unit: string): string {
+	return min === max ? `${min} ${unit}` : `${min}–${max} ${unit}`;
+}
+
+function buildCycleTooltip(result: InstructionAnalysisSummary, isSelection: boolean): MarkdownString {
+	const header = isSelection ? 'Selection Timing & Size' : 'Instruction Timing & Size';
+	const cycText = formatRangeValue(result.minCycles, result.maxCycles, 'cycles');
+	const byteText = formatRangeValue(result.minBytes, result.maxBytes, 'bytes');
+
+	const lines: string[] = [
+		`**${header}**`,
+		``,
+		`- **Instructions:** ${result.instructionCount}`,
+		`- **Bytes:** ${byteText}`,
+		`- **Cycles:** ${cycText}`,
+	];
+
+	const notes: string[] = [];
+	if (result.hasBranchPenalty) {
+		notes.push('Branch instructions add +1 cycle when taken (+1 more if crossing a page)');
+	}
+	if (result.items.some(item => item.hasPagePenalty && !item.hasBranchPenalty)) {
+		notes.push('Indexed/indirect modes may add +1 cycle when crossing a page boundary');
+	}
+	if (result.uncertainCount > 0) {
+		notes.push(`${result.uncertainCount} instruction(s) have unknown Zero Page vs Absolute width (shown as range)`);
+	}
+	if (notes.length > 0) {
+		lines.push('', ...notes.map(n => `*${n}*`));
+	}
+
+	const maxPreviewRows = 15;
+	if (result.items.length > 0) {
+		lines.push('', '| Line | Instruction | Mode | Bytes | Cycles |', '|---:|---|---|---:|---:|');
+		for (const item of result.items.slice(0, maxPreviewRows)) {
+			const byteCell = item.minBytes === item.maxBytes
+				? `${item.minBytes}`
+				: `${item.minBytes}–${item.maxBytes}`;
+			const cycCell = item.minCycles === item.maxCycles
+				? `${item.minCycles}`
+				: `${item.minCycles}–${item.maxCycles}`;
+			lines.push(`| ${item.line + 1} | \`${item.mnemonic}\` | ${item.mode}${item.uncertainMode ? ' ?' : ''} | ${byteCell} | ${cycCell} |`);
+		}
+		if (result.items.length > maxPreviewRows) {
+			lines.push('', `*…and ${result.items.length - maxPreviewRows} more instruction(s)*`);
+		}
+	}
+
+	return new MarkdownString(lines.join('\n'));
+}
+
+function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<void>): void {
+	const statusBarItem = window.createStatusBarItem(StatusBarAlignment.Right, 100);
+	context.subscriptions.push(statusBarItem);
+
+	let debounceTimer: NodeJS.Timeout | undefined;
+	let latestSeq = 0;
+
+	const updateForEditor = (editor: TextEditor | undefined) => {
+		if (debounceTimer) {
+			clearTimeout(debounceTimer);
+			debounceTimer = undefined;
+		}
+
+		const enabled = workspace.getConfiguration('ca65').get<boolean>('enableStatusBarCycleCount', true);
+		if (!enabled || !editor || editor.document.languageId !== 'ca65') {
+			statusBarItem.hide();
+			return;
+		}
+
+		const seq = ++latestSeq;
+		debounceTimer = setTimeout(async () => {
+			try {
+				await clientReady;
+				if (seq !== latestSeq || window.activeTextEditor !== editor) return;
+
+				const sel = editor.selection;
+				const isSelection = !sel.isEmpty;
+				const targetRange = isSelection
+					? {
+						start: { line: sel.start.line, character: sel.start.character },
+						end: { line: sel.end.line, character: sel.end.character },
+					}
+					: {
+						start: { line: sel.active.line, character: 0 },
+						end: { line: sel.active.line, character: editor.document.lineAt(sel.active.line).text.length },
+					};
+
+				const result = await client.sendRequest<InstructionAnalysisSummary | null>('ca65/analyzeSelection', {
+					uri: editor.document.uri.toString(),
+					range: targetRange,
+				});
+
+				if (seq !== latestSeq || window.activeTextEditor !== editor) return;
+				if (!result || result.instructionCount === 0) {
+					statusBarItem.hide();
+					return;
+				}
+
+				const cycStr = formatRangeValue(result.minCycles, result.maxCycles, 'cyc');
+				const byteStr = formatRangeValue(result.minBytes, result.maxBytes, 'B');
+				const detail = result.instructionCount === 1
+					? `${result.items[0].mnemonic} ${result.items[0].mode}${result.items[0].uncertainMode ? '?' : ''}`
+					: `${result.instructionCount} ops`;
+
+				statusBarItem.text = `$(clock) ${cycStr} · ${byteStr} (${detail})`;
+				statusBarItem.tooltip = buildCycleTooltip(result, isSelection);
+				statusBarItem.show();
+			} catch {
+				if (seq === latestSeq) {
+					statusBarItem.hide();
+				}
+			}
+		}, 80);
+	};
+
+	context.subscriptions.push(
+		window.onDidChangeActiveTextEditor((editor) => updateForEditor(editor)),
+		window.onDidChangeTextEditorSelection((event) => {
+			if (event.textEditor === window.activeTextEditor) {
+				updateForEditor(event.textEditor);
+			}
+		}),
+		workspace.onDidChangeTextDocument((event) => {
+			if (window.activeTextEditor && event.document === window.activeTextEditor.document) {
+				updateForEditor(window.activeTextEditor);
+			}
+		}),
+		workspace.onDidChangeConfiguration((event) => {
+			if (event.affectsConfiguration('ca65.enableStatusBarCycleCount')) {
+				updateForEditor(window.activeTextEditor);
+			}
+		}),
+		{ dispose: () => { if (debounceTimer) clearTimeout(debounceTimer); } },
+	);
+
+	updateForEditor(window.activeTextEditor);
 }
 
 export function deactivate(): Thenable<void> | undefined {

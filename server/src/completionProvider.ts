@@ -18,6 +18,7 @@ import { IncludesGraph } from './includesGraph';
 import { getLSPSymbolKind, resolveExport, resolveImport } from './symbolResolver';
 import { findCanonicalIncludePath, getWorkspaceRelativePath } from './pathUtils';
 import { Ca65Settings } from './settings';
+import { isAutoIncludable, makeImportEdit, makeIncludeEdit } from './editUtils';
 
 const CHEAP_LOCAL_ITEM_PREFIX = 0;
 const VISIBLE_ITEM_PREFIX = 1;
@@ -93,15 +94,6 @@ function getCompletionItemDetail(entity: SymbolTableEntity): string | undefined 
     }
 
     return undefined
-}
-
-function isAutoIncludable(uri: string, settings: Ca65Settings) {
-    if (settings.autoIncludeExtensions) {
-        for (const ext of settings.autoIncludeExtensions) {
-            if (uri.endsWith(ext)) return true;
-        }
-    }
-    return false;
 }
 
 interface StaticCompletionTemplates {
@@ -548,87 +540,4 @@ async function getCompletionSymbols(
     }
 
     return completionItems;
-}
-
-function skipCommentBlock(lines: string[]): number {
-    let top = 0;
-    let foundComment = false;
-    while (top < lines.length && lines[top].trim().startsWith(';')) {
-        foundComment = true;
-        top++;
-    }
-    if (foundComment && top < lines.length && lines[top].trim().length === 0) {
-        top++;
-    }
-    return top;
-}
-
-function insertIntoSortedBlock(
-    lines: string[],
-    startLine: number,
-    directivePrefix: string,
-    newLine: string,
-    extractSortKey: (trimmedLine: string) => string,
-    newSortKey: string,
-): TextEdit {
-    let insertAt = startLine;
-    while (insertAt < lines.length && lines[insertAt].trim().toLowerCase().startsWith(directivePrefix)) {
-        const existingKey = extractSortKey(lines[insertAt].trim());
-        if (existingKey < newSortKey) {
-            insertAt++;
-        } else {
-            break;
-        }
-    }
-
-    // Add empty space if we're at the end of the block and the following line has content.
-    const trimmedLine = insertAt < lines.length ? lines[insertAt].trim().toLowerCase() : '';
-    if (trimmedLine && !trimmedLine.startsWith(directivePrefix)) {
-        newLine += '\n';
-    }
-
-    return TextEdit.insert(Position.create(insertAt, 0), newLine);
-}
-
-function makeIncludeEdit(
-    document: TextDocument,
-    includeUri: string
-): TextEdit {
-    const lines = document.getText().split(/\r?\n/);
-    const top = skipCommentBlock(lines);
-    return insertIntoSortedBlock(
-        lines,
-        top,
-        '.include',
-        `.include "${includeUri}"\n`,
-        line => line.slice(8).trim().replace(/^"|"$/g, ''),
-        includeUri
-    );
-}
-
-function makeImportEdit(
-    document: TextDocument,
-    importSymbol: string
-): TextEdit {
-    const lines = document.getText().split(/\r?\n/);
-    let top = skipCommentBlock(lines);
-
-    // Skip include block
-    let foundInclude = false;
-    while (top < lines.length && lines[top].trim().toLowerCase().startsWith('.include')) {
-        foundInclude = true;
-        top++;
-    }
-    if (foundInclude && top < lines.length && lines[top].trim().length === 0) {
-        top++;
-    }
-
-    return insertIntoSortedBlock(
-        lines,
-        top,
-        '.import',
-        `.import ${importSymbol}\n`,
-        line => line.slice(7).trim(),
-        importSymbol
-    );
 }

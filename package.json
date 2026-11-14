@@ -120,6 +120,11 @@
                     "type": "boolean",
                     "description": "Enables `--feature line_continuations` for ca65 diagnostics. Please ensure that your ca65 executable supports this feature if you enable this setting.",
                     "default": false
+                },
+                "ca65.enableStatusBarCycleCount": {
+                    "type": "boolean",
+                    "description": "Shows estimated 6502 cycle count and byte size for the selected instructions (or current line) in the status bar.",
+                    "default": true
                 }
             }
         },

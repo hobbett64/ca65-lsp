@@ -11,6 +11,7 @@ export interface Ca65Settings {
     smartFolding: boolean;
     implicitImports: boolean;
     lineContinuations: boolean;
+    enableStatusBarCycleCount?: boolean;
 }
 
 export const documentSettings: Map<string, Thenable<Ca65Settings>> = new Map();

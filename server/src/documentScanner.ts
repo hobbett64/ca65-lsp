@@ -694,12 +694,14 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
                             currentScope
                         );
 
+                        const isZeroPage = cmd.endsWith('zp');
                         if (isImport || isGlobal) {
                             symbolTable.imports.push(
                                 currentScope.addImport(
                                     identifier.text,
                                     identifierRange,
                                     isImport ? ImportKind.Import : ImportKind.Global,
+                                    isZeroPage,
                                 )
                             )
                         }
@@ -710,7 +712,8 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
                                     isExport ? ExportKind.Export : ExportKind.Global,
                                     identifier.text,
                                     identifierRange,
-                                    currentScope
+                                    currentScope,
+                                    isZeroPage,
                                 )
                             );
                         }

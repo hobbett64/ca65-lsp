@@ -76,6 +76,7 @@ export class Import extends SymbolTableEntity {
         name: string,
         definition: Range,
         parentScope: Scope | null,
+        public isZeroPage: boolean = false,
     ) {
         super(uri, name, definition, parentScope);
     }
@@ -94,6 +95,7 @@ export class Export extends SymbolTableEntity {
         name: string,
         definition: Range,
         parentScope: Scope | null,
+        public isZeroPage: boolean = false,
     ) {
         super(uri, name, definition, parentScope);
     }
@@ -143,11 +145,12 @@ export class Scope extends SymbolTableEntity {
         name: string,
         definition: Range,
         kind: ImportKind,
+        isZeroPage: boolean = false,
     ): Import {
         if (!this.imports.has(name)) {  
             this.imports.set(name, []);
         }
-        const importEntity = new Import(this.uri, kind, name, definition, this);
+        const importEntity = new Import(this.uri, kind, name, definition, this, isZeroPage);
         this.imports.get(name)?.push(importEntity);
         return importEntity;
     }
@@ -446,6 +449,10 @@ export class SymbolTable {
 
     public getReferencesByName(name: string): ReferenceInfo[] {
         return this.referencesByName.get(name) || [];
+    }
+
+    public getReferencesOnLine(line: number): ReferenceInfo[] {
+        return this.referencesByLine.get(line) || [];
     }
 
     /**
