@@ -8,8 +8,7 @@ import {
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { getDocumentSettings, includesGraph, initializationGate, symbolTables } from './server';
 import { resolveImport } from './symbolResolver';
-import { getRelativePath, getWorkspaceRelativePath } from './pathUtils';
-import { documentSettings } from './settings';
+import { getWorkspaceRelativePath } from './pathUtils';
 
 export function initializeInlayHintProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
     connection.languages.inlayHint.on(async (params: InlayHintParams): Promise<InlayHint[]> => {

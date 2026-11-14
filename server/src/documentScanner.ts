@@ -85,11 +85,44 @@ export function parseQualifiedNames(argsText: string, argsOffset: number = 0): P
     if (!argsText) return [];
 
     const allGroups: ParsedQualifiedName[][] = [];
-    
-    // Use a mutable copy of the text to work with
-    let mutableArgsText = argsText;
 
-    mutableArgsText = mutableArgsText
+    function extractQualifiedGroups(
+        text: string,
+        baseOffset: number,
+        context: ReferenceInfo['context']
+    ) {
+        let currentGroup: ParsedQualifiedName[] = [];
+        const regex = /(::)?\s*([A-Za-z_@][A-Za-z0-9_]*)|(\S)/g;
+        let match: RegExpExecArray | null;
+        while ((match = regex.exec(text))) {
+            const hasDoubleColon = !!match[1];
+            const identifier = match[2];
+            const unexpected = match[3];
+
+            if (unexpected) {
+                if (currentGroup.length > 0) allGroups.push(currentGroup);
+                currentGroup = [];
+                continue;
+            }
+            if (!identifier) continue;
+
+            const index = baseOffset + match.index + match[0].indexOf(identifier);
+
+            if (!hasDoubleColon) {
+                if (currentGroup.length > 0) allGroups.push(currentGroup);
+                currentGroup = [{ text: identifier, index, context }];
+            } else {
+                if (currentGroup.length === 0) {
+                    currentGroup.push({ text: '', index: baseOffset + match.index, context });
+                }
+                currentGroup.push({ text: identifier, index, context });
+            }
+        }
+        if (currentGroup.length > 0) allGroups.push(currentGroup);
+    }
+
+    // Use a mutable copy of the text to work with
+    let mutableArgsText = argsText
         // mask strings
         .replace(/"([^"]*)"/g, (m, inner) => `"${' '.repeat(inner.length)}"`)
         // mask hex numbers
@@ -102,73 +135,15 @@ export function parseQualifiedNames(argsText: string, argsOffset: number = 0): P
     let sizeofMatch: RegExpExecArray | null;
     while ((sizeofMatch = sizeofRegex.exec(mutableArgsText))) {
         const innerContent = sizeofMatch[1];
-        // Calculate the absolute offset of the content within the original string
         const innerOffset = argsOffset + sizeofMatch.index + sizeofMatch[0].indexOf('(') + 1;
-
-        // Run the parsing logic on the inner content with the 'sizeof' context
-        let currentGroup: ParsedQualifiedName[] = [];
-        const regex = /(::)?\s*([A-Za-z_@][A-Za-z0-9_]*)|(\S)/g;
-        let match: RegExpExecArray | null;
-        while ((match = regex.exec(innerContent))) {
-            const hasDoubleColon = !!match[1];
-            const identifier = match[2];
-            const unexpected = match[3];
-
-            if (unexpected) {
-                if (currentGroup.length > 0) allGroups.push(currentGroup);
-                currentGroup = [];
-                continue;
-            }
-            if (!identifier) continue;
-
-            const index = innerOffset + match.index + (identifier ? match[0].indexOf(identifier) : 0);
-
-            if (!hasDoubleColon) {
-                if (currentGroup.length > 0) allGroups.push(currentGroup);
-                currentGroup = [{ text: identifier, index, context: 'sizeof' }];
-            } else {
-                if (currentGroup.length === 0) {
-                    currentGroup.push({ text: '', index: innerOffset + match.index, context: 'sizeof' });
-                }
-                currentGroup.push({ text: identifier, index, context: 'sizeof' });
-            }
-        }
-        if (currentGroup.length > 0) allGroups.push(currentGroup);
+        extractQualifiedGroups(innerContent, innerOffset, 'sizeof');
     }
 
     // Blank out the .sizeof expressions so they aren't parsed again
     mutableArgsText = mutableArgsText.replace(/\.sizeof\s*\(([^)]*)\)/g, (m) => ' '.repeat(m.length));
 
-
     // --- Pass 2: Parse the rest of the text for regular symbols ---
-    let currentGroup: ParsedQualifiedName[] = [];
-    const mainRegex = /(::)?\s*([A-Za-z_@][A-Za-z0-9_]*)|(\S)/g;
-    let mainMatch: RegExpExecArray | null;
-    while ((mainMatch = mainRegex.exec(mutableArgsText))) {
-        const hasDoubleColon = !!mainMatch[1];
-        const identifier = mainMatch[2];
-        const unexpected = mainMatch[3];
-
-        if (unexpected) {
-            if (currentGroup.length > 0) allGroups.push(currentGroup);
-            currentGroup = [];
-            continue;
-        }
-        if (!identifier) continue;
-
-        const index = argsOffset + mainMatch.index + (identifier ? mainMatch[0].indexOf(identifier) : 0);
-
-        if (!hasDoubleColon) {
-            if (currentGroup.length > 0) allGroups.push(currentGroup);
-            currentGroup = [{ text: identifier, index, context: 'symbol' }];
-        } else {
-            if (currentGroup.length === 0) {
-                currentGroup.push({ text: '', index: argsOffset + mainMatch.index, context: 'symbol' }); // Root scope
-            }
-            currentGroup.push({ text: identifier, index, context: 'symbol' });
-        }
-    }
-    if (currentGroup.length > 0) allGroups.push(currentGroup);
+    extractQualifiedGroups(mutableArgsText, argsOffset, 'symbol');
 
     return allGroups;
 }
@@ -647,6 +622,7 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
                 case '.bss':
                 case '.zeropage':
                 case '.rodata': {
+                    currentLabel = undefined;
                     currentSegment = (cmd === '.segment') ? argsText.replace(/"/g, '')
                         : cmd.slice(1).toUpperCase();
                     return true;
@@ -717,6 +693,7 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
                     }
                     return true;
                 case '.include':
+                    currentLabel = undefined;
                     const match = argsText.match(/^(['"])(.*)\1$/);
                     if (match) {
                         const filename = match[2];
@@ -733,25 +710,32 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
             if (currentLabel) {
                 // Consume any un-labeled commands as part of the current label
                 currentLabel.range.end = { line, character: text.length - 1 };
-                // Infer the type of label by the first command
-                if (!pendingLabelKindSet) {
+                // Infer the type of label by the first non-alignment command
+                if (!pendingLabelKindSet && cmd !== '.align') {
                     switch (cmd) {
                         case '.res':
                         case '.tag':
                             currentLabel.kind = SymbolKind.ResLabel;
                             break;
-                        case '.addr':
-                        case '.align':
-                        case '.bankbytes':
                         case '.byt':
                         case '.byte':
+                            currentLabel.kind = /^"[^"]*"(\s*,\s*"[^"]*")*$/.test(argsText)
+                                ? SymbolKind.StringLabel
+                                : SymbolKind.DataLabel;
+                            break;
+                        case '.addr':
+                        case '.bankbytes':
                         case '.dbyt':
                         case '.dword':
                         case '.faraddr':
+                        case '.hibytes':
+                        case '.incbin':
+                        case '.lobytes':
                         case '.word':
                             currentLabel.kind = SymbolKind.DataLabel;
                             break;
                         case '.asciiz':
+                        case '.literal':
                             currentLabel.kind = SymbolKind.StringLabel;
                             break;
                         default:
@@ -788,23 +772,20 @@ export async function scanDocument(document: TextDocument): Promise<SymbolTable>
         return true;
     }
 
+    const lines = document.getText().split(/\r?\n/);
     let hasLineContinuation = false;
     let isPreviousLineContinued = false;
-    for (let lineNumber = 0; lineNumber < document.lineCount; lineNumber++) {
+    for (let lineNumber = 0; lineNumber < lines.length; lineNumber++) {
         isPreviousLineContinued = hasLineContinuation;
         hasLineContinuation = false;
 
-        let text = document.getText(
-            Range.create(
-                lineNumber, 0,
-                lineNumber + 1, 0
-            )
-        );
+        let text = lines[lineNumber];
 
         let hasComment = false;
-        if (text.includes(';')) {
+        const commentIdx = text.indexOf(';');
+        if (commentIdx >= 0) {
             hasComment = true;
-            text = text.slice(0, text.indexOf(`;`));
+            text = text.slice(0, commentIdx);
         }
 
         if (!hasComment && text.trimEnd().endsWith('\\')) {

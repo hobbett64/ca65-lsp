@@ -7,7 +7,7 @@ import {
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { URI } from 'vscode-uri';
-import { resolveIncludeUri } from './pathUtils';
+import { resolveIncbinUri, resolveIncludeUri } from './pathUtils';
 import { getDocumentSettings, initializationGate } from './server';
 
 export function initializeDocumentLinkProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
@@ -22,12 +22,10 @@ export function initializeDocumentLinkProvider(connection: _Connection, document
         const settings = await getDocumentSettings(document.uri);
         const links: DocumentLink[] = [];
         const includeRegex = /^\s*\.(include|incbin)\s+"([^"]+)"/i;
+        const lines = document.getText().split(/\r?\n/);
 
-        for (let i = 0; i < document.lineCount; i++) {
-            const line = document.getText({
-                start: { line: i, character: 0 },
-                end: { line: i + 1, character: 0 }
-            });
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
             const match = line.match(includeRegex);
 
             if (match) {
@@ -42,7 +40,7 @@ export function initializeDocumentLinkProvider(connection: _Connection, document
                 if (directive === "include") {
                     targetUri = resolveIncludeUri(document.uri, filename, settings.includeDirs);
                 } else if (directive === "incbin") {
-                    targetUri = resolveIncludeUri(document.uri, filename, settings.binIncludeDirs);
+                    targetUri = await resolveIncbinUri(document.uri, filename, settings.binIncludeDirs);
                 }
 
                 if (targetUri) {

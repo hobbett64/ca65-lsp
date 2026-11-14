@@ -50,7 +50,7 @@
                 "ca65.enableCa65StdErrDiagnostics": {
                     "type": "boolean",
                     "description": "Enables diagnostics powered by ca65 stderr.",
-                    "default": "true"
+                    "default": true
                 },
                 "ca65.executablePath": {
                     "type": "string",
@@ -59,7 +59,7 @@
                 "ca65.enableUnusedSymbolDiagnostics": {
                     "type": "boolean",
                     "description": "Enables unused symbol diagnostics.",
-                    "default": "true"
+                    "default": true
                 },
                 "ca65.includeDirs": {
                     "type": "array",
@@ -85,18 +85,19 @@
                         "type": "string"
                     },
                     "default": [
-                        ".inc"
+                        ".inc",
+                        ".s"
                     ]
                 },
                 "ca65.anonymousLabelIndexHints": {
                     "type": "boolean",
                     "description": "Enables inlay hints for anonymous label indexes.",
-                    "default": "true"
+                    "default": false
                 },
                 "ca65.importFromHints": {
                     "type": "boolean",
                     "description": "Enables inlay hints for display the origin file of an import.",
-                    "default": "true"
+                    "default": true
                 },
                 "ca65.additionalExtensions": {
                     "type": "array",
@@ -172,7 +173,7 @@
         "typescript": "^5.3.3"
     },
     "dependencies": {
-        "glob": "^11.0.3",
+        "glob": "^14.0.6",
         "vscode-languageclient": "^9.0.1",
         "vscode-languageserver": "^9.0.1",
         "vscode-languageserver-protocol": "^3.17.5",

@@ -34,6 +34,7 @@ import { deleteCachedResolutions } from './symbolResolver';
 import { ExportsMap } from './exportsMap';
 import { Ca65Settings, documentSettings } from './settings';
 import { Performance as PerformanceMonitor } from './performance';
+import { clearResolvedDirsCache } from './pathUtils';
 
 // --- Connection and Document Manager Setup ---
 const connection = createConnection(ProposedFeatures.all);
@@ -140,7 +141,11 @@ connection.onInitialized(async () => {
         for (const folderUri of workspaceFolderUris) {
             const folderPath = URI.parse(folderUri).fsPath;
             // The glob library accepts an array of patterns, so we pass all of them.
-            const files = await glob(allGlobs, { cwd: folderPath, nodir: true });
+            const files = await glob(allGlobs, {
+                cwd: folderPath,
+                nodir: true,
+                ignore: ['**/.git/**', '**/node_modules/**', '**/build/**', '**/dist/**', '**/out/**']
+            });
 
             const docs = [];
             for (const file of files) {
@@ -198,10 +203,39 @@ async function updateAndValidate(document: TextDocument, debounce: boolean = tru
         allAffectedUris.add(uri);
     } 
 
+    const isNewFile = !symbolTables.has(document.uri);
     const newSymbolTable = await scanDocument(document);
     symbolTables.set(document.uri, newSymbolTable);
     includesGraph.updateIncludes(document.uri, newSymbolTable.includedFiles);
     exportsMap.updateExports(document.uri, newSymbolTable.exports);
+
+    // If this is a newly created or discovered file, re-scan existing files that might have an
+    // unresolved .include pointing to it so the includesGraph connects them immediately.
+    if (isNewFile) {
+        const newFileBaseName = path.basename(URI.parse(document.uri).fsPath);
+        for (const [otherUri, otherTable] of symbolTables) {
+            if (otherUri === document.uri) continue;
+            const openDoc = documents.get(otherUri);
+            let docToRescan = openDoc;
+            if (!docToRescan) {
+                try {
+                    const fsPath = URI.parse(otherUri).fsPath;
+                    const content = await fs.readFile(fsPath, 'utf-8');
+                    if (content.includes(newFileBaseName)) {
+                        docToRescan = TextDocument.create(otherUri, 'ca65', 0, content);
+                    }
+                } catch {}
+            } else if (!docToRescan.getText().includes(newFileBaseName)) {
+                docToRescan = undefined;
+            }
+            if (docToRescan) {
+                const updatedOtherTable = await scanDocument(docToRescan);
+                symbolTables.set(otherUri, updatedOtherTable);
+                includesGraph.updateIncludes(otherUri, updatedOtherTable.includedFiles);
+                exportsMap.updateExports(otherUri, updatedOtherTable.exports);
+            }
+        }
+    }
 
     for (const uri of includesGraph.getTranslationUnit(document.uri)) {
         allAffectedUris.add(uri);
@@ -220,7 +254,7 @@ connection.onRequest('ca65/dumpPerformanceStats', () => {
     connection.console.info(performanceMonitor.getReport());
 });
 
-// Custom request from the client to dump performance stats
+// Custom request from the client to dump symbol tables
 connection.onRequest('ca65/dumpSymbolTables', () => {
     for (const [uri, table] of symbolTables) {
         connection.console.info(`Symbol Table for ${uri}:`);
@@ -240,15 +274,20 @@ connection.onRequest('ca65/dumpExportsMap', () => {
     exportsMap.dump();
 });
 
-// Custom request from the client to dump symbol tables
-connection.onRequest('ca65/dumpSymbolTables', () => {
-    for (const [uri, table] of symbolTables) {
-        connection.console.info(`Symbol Table for ${uri}:`);
-        table.dump();
+// --- Event Listeners ---
+connection.onDidChangeConfiguration(async () => {
+    documentSettings.clear();
+    clearResolvedDirsCache();
+    await initializationGate.isInitialized;
+    for (const doc of documents.all()) {
+        await updateAndValidate(doc, false);
     }
 });
 
-// --- Event Listeners ---
+documents.onDidClose((event) => {
+    documentSettings.delete(event.document.uri);
+});
+
 documents.onDidChangeContent(async (change) => {
     await updateAndValidate(change.document);
 });
@@ -261,6 +300,7 @@ connection.onDidChangeWatchedFiles(async (params: DidChangeWatchedFilesParams) =
     await initializationGate.isInitialized;
 
     connection.console.log('Watched file change detected. Re-scanning affected files.');
+    clearResolvedDirsCache();
     for (const event of params.changes) {
         const openDoc = documents.get(event.uri);
         if (openDoc) {

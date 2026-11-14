@@ -239,9 +239,7 @@ export function getAllReferencesForEntity(
     const allRefs: ReferenceInfo[] = [];
 
     for (const symbolTable of allSymbolTables.values()) {
-        for (const ref of symbolTable.getAllReferences()) {
-            if (ref.name !== entity.name) continue;
-
+        for (const ref of symbolTable.getReferencesByName(entity.name)) {
             const refResult = resolveReference(ref, allSymbolTables, includesGraph, implicitImports);
             if (refResult !== entity) continue;
             
@@ -280,7 +278,7 @@ export function getLSPSymbolKind(item: SymbolTableEntity): LSPSymbolKind {
             case SymbolKind.Variable: return LSPSymbolKind.Variable;
             case SymbolKind.StructMember: return LSPSymbolKind.Field;
             case SymbolKind.EnumMember: return LSPSymbolKind.EnumMember;
-            default: return LSPSymbolKind.Key;
+            default: return LSPSymbolKind.Function;
         }
     }
 
@@ -295,20 +293,7 @@ export function getLSPSymbolKind(item: SymbolTableEntity): LSPSymbolKind {
     }
 
     // Fallback if unknown
-    return LSPSymbolKind.Key;
-}
-
-export function getFullyQualifiedName(item: SymbolTableEntity): string {
-    const nameParts: string[] = [item.name];
-    let currentScope = item.scope;
-
-    // Walk up the parent scope chain until we reach the root
-    while (currentScope && currentScope.name !== '') {
-        nameParts.unshift(currentScope.name);
-        currentScope = currentScope.scope;
-    }
-
-    return nameParts.join('::');
+    return LSPSymbolKind.Function;
 }
 
 export function isEntityUsed(
@@ -322,8 +307,7 @@ export function isEntityUsed(
         const symbolTable = allSymbolTables.get(translationUnitUri);
         if (!symbolTable) continue;
 
-        for (const ref of symbolTable.getAllReferences()) {
-            if (ref.name !== entity.name) continue;
+        for (const ref of symbolTable.getReferencesByName(entity.name)) {
             const refResult = resolveReference(ref, allSymbolTables, includesGraph, false);
             if (refResult === entity) {
                 // We found a reference to the entity. Increment the count.

@@ -112,7 +112,7 @@ async function showReferencePanel(context: ExtensionContext, mnemonicId?: string
 
 	// Save to a temp file
 	const tmpDir = os.tmpdir();
-	const filePath = path.join(tmpDir, `ca65-reference-${Date.now()}.md`);
+	const filePath = path.join(tmpDir, 'ca65-reference.md');
 	await fs.writeFile(filePath, fullMarkdown, 'utf-8');
 	const fileUri = Uri.file(filePath);
 

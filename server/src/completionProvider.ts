@@ -16,7 +16,7 @@ import { Export, Import, ImportKind, Macro, MacroKind, Scope, ScopeKind, Symbol,
 import { findPreviousCheapLocalBoundary, CHEAP_LOCAL_BOUNDARY_REGEX } from './cheapLocalLabelUtils';
 import { IncludesGraph } from './includesGraph';
 import { getLSPSymbolKind, resolveExport, resolveImport } from './symbolResolver';
-import { findCanonicalIncludePath, getRelativePath, getWorkspaceRelativePath } from './pathUtils';
+import { findCanonicalIncludePath, getWorkspaceRelativePath } from './pathUtils';
 import { Ca65Settings } from './settings';
 
 const CHEAP_LOCAL_ITEM_PREFIX = 0;
@@ -113,7 +113,8 @@ function getCheapLocalLabelCompletions(
     const items: CompletionItem[] = [];
     const cheapLocalDefRegex = /^\s*(@[a-zA-Z0-9_@]+):/;
 
-    const startLine = findPreviousCheapLocalBoundary(document, position.line);
+    const boundaryLine = findPreviousCheapLocalBoundary(document, position.line);
+    const startLine = boundaryLine === -1 ? 0 : boundaryLine;
     let endLine = document.lineCount - 1;
     for (let i = startLine + 1; i < document.lineCount; i++) {
         const line = document.getText(Range.create(i, 0, i + 1, 0));
@@ -123,7 +124,7 @@ function getCheapLocalLabelCompletions(
         }
     }
 
-    for (let i = startLine + 1; i <= endLine; i++) {
+    for (let i = startLine; i <= endLine; i++) {
         const lineText = document.getText(Range.create(i, 0, i + 1, 0));
         const match = lineText.match(cheapLocalDefRegex);
         if (match) {
@@ -449,14 +450,14 @@ async function getCompletionSymbols(
                 // This may be a global that is acting as an export, which we should ignore.
                 let isExportingGlobal = false;
                 if (importEntity.kind === ImportKind.Global) {
-                    for (const tuUri of includesGraph.getTranslationUnit(importEntity.kind)) {
-                        if (importEntity.uri === tuUri) {
+                    for (const tuUri of includesGraph.getTranslationUnit(importEntity.uri)) {
+                        if (resolvedImport.uri === tuUri) {
                             isExportingGlobal = true;
                             break;
                         }
                     }
                 }
-                if (isExportingGlobal) break;
+                if (isExportingGlobal) continue;
 
                 if (resolvedImport.uri === document.uri) continue;
                 kind = getCompletionItemKind(getLSPSymbolKind(resolvedImport));

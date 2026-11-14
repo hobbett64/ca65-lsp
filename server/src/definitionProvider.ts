@@ -11,7 +11,6 @@ import { getAnonymousLabelDefinition } from './anonymousLabelUtils';
 import { findCheapLocalLabelDefinition } from './cheapLocalLabelUtils';
 import { resolveReferenceAtPosition } from './symbolResolver';
 import { getDocumentSettings, includesGraph, initializationGate, symbolTables } from './server';
-import { documentSettings } from './settings';
 
 export function initializeDefinitionProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
     /**

@@ -361,7 +361,8 @@ export class SymbolTable {
     private macros: Map<string, Macro> = new Map();
 
     public references: ReferenceInfo[] = [];
-    public memoizedReferences: Map<ReferenceInfo, SymbolTableEntity> = new Map();
+    private referencesByName: Map<string, ReferenceInfo[]> = new Map();
+    private referencesByLine: Map<number, ReferenceInfo[]> = new Map();
 
     public includedFiles: string[] = [];
 
@@ -418,6 +419,25 @@ export class SymbolTable {
      */
     public addReference(info: ReferenceInfo): void {
         this.references.push(info);
+
+        let byName = this.referencesByName.get(info.name);
+        if (!byName) {
+            byName = [];
+            this.referencesByName.set(info.name, byName);
+        }
+        byName.push(info);
+
+        const line = info.location.start.line;
+        let byLine = this.referencesByLine.get(line);
+        if (!byLine) {
+            byLine = [];
+            this.referencesByLine.set(line, byLine);
+        }
+        byLine.push(info);
+    }
+
+    public getReferencesByName(name: string): ReferenceInfo[] {
+        return this.referencesByName.get(name) || [];
     }
 
     /**
@@ -459,24 +479,17 @@ export class SymbolTable {
 
     getReferenceAtPosition(position: Position): ReferenceInfo | null {
         performanceMonitor.start('getReferenceAtPosition');
-        // TODO: make this more performant, possibly with binary search.
-        for (const reference of this.references) {
-            // Range includes the character after a reference. This is to allow the cursor at the
-            // end of the reference to still refer to it for highlights.
-            if (
-                this.isPositionInRange(position, reference.location)
-                || position.character > 0
-                && this.isPositionInRange(
-                    {line: position.line, character: position.character - 0},
-                    reference.location
-                )
-            ) {
-                performanceMonitor.stop('getReferenceAtPosition');
-                return reference
+        const lineRefs = this.referencesByLine.get(position.line);
+        if (lineRefs) {
+            for (const reference of lineRefs) {
+                if (this.isPositionInRange(position, reference.location)) {
+                    performanceMonitor.stop('getReferenceAtPosition');
+                    return reference;
+                }
             }
         }
         performanceMonitor.stop('getReferenceAtPosition');
-        return null
+        return null;
     }
 
     // A helper function to check if a position is within a range.

@@ -1,7 +1,12 @@
 import { TextDocument, Location, Position, Range } from 'vscode-languageserver-types';
 
 export const CHEAP_LOCAL_BOUNDARY_REGEX = /^\s*([a-zA-Z_.][a-zA-Z0-9_@.]*:|\.(proc|struct|union))/;
-export const CHEAP_LOCAL_DEF_REGEX = (name: string) => new RegExp(`^\\s*${name}:`);
+
+function escapeRegExp(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export const CHEAP_LOCAL_DEF_REGEX = (name: string) => new RegExp(`^\\s*${escapeRegExp(name)}:`);
 
 /**
  * Finds the previous boundary for a cheap local label.
@@ -27,18 +32,20 @@ export function findPreviousCheapLocalBoundary(document: TextDocument, startLine
  * @returns The Location of the definition, or null if not found.
  */
 export function findCheapLocalLabelDefinition(document: TextDocument, position: Position, name: string): Location | null {
-    const boundaryLine = findPreviousCheapLocalBoundary(document, position.line - 1);
+    const boundaryLine = findPreviousCheapLocalBoundary(document, position.line);
+    const startLine = boundaryLine === -1 ? 0 : boundaryLine;
+    const defRegex = CHEAP_LOCAL_DEF_REGEX(name);
 
     // Scan forward from the boundary to find the definition
-    for (let i = boundaryLine + 1; i < document.lineCount; i++) {
+    for (let i = startLine; i < document.lineCount; i++) {
         const line = document.getText(Range.create(i, 0, i + 1, 0)).replace(/\r?\n$/, '');
         
         // Stop if we hit another parent boundary before finding the definition
-        if (i > boundaryLine && CHEAP_LOCAL_BOUNDARY_REGEX.test(line)) {
+        if (i > startLine && CHEAP_LOCAL_BOUNDARY_REGEX.test(line)) {
             return null;
         }
         
-        if (CHEAP_LOCAL_DEF_REGEX(name).test(line)) {
+        if (defRegex.test(line)) {
             const startChar = line.indexOf(name);
             const endChar = startChar + name.length;
             return Location.create(document.uri, Range.create(i, startChar, i, endChar));
@@ -83,13 +90,14 @@ export function findAllCheapLocalLabelReferences(
     }
 
     const locations: Location[] = [];
-    const referenceRegex = new RegExp(`${name}\\b`, 'g');
-    const startLine = findPreviousCheapLocalBoundary(document, definition.range.start.line - 1) + 1;
+    const referenceRegex = new RegExp(`${escapeRegExp(name)}\\b`, 'g');
+    const boundaryLine = findPreviousCheapLocalBoundary(document, definition.range.start.line);
+    const startLine = boundaryLine === -1 ? 0 : boundaryLine;
 
     let endLine = document.lineCount - 1;
-    for (let i = startLine; i < document.lineCount; i++) {
+    for (let i = startLine + 1; i < document.lineCount; i++) {
         const line = document.getText(Range.create(i, 0, i + 1, 0));
-        if (i > startLine && CHEAP_LOCAL_BOUNDARY_REGEX.test(line)) {
+        if (CHEAP_LOCAL_BOUNDARY_REGEX.test(line)) {
             endLine = i - 1;
             break;
         }

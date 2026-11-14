@@ -32,25 +32,39 @@ export function getWorkspaceFolderOfFile(fileUri: string): string | undefined {
     return sortedFolders.length > 0 ? sortedFolders[0] : undefined;
 }
 
+const resolvedDirsCache: Map<string, string[]> = new Map();
+
+export function clearResolvedDirsCache(): void {
+    resolvedDirsCache.clear();
+}
+
 export function resolveWorkspaceRelativeDirs(
     currentFileUri: string,
     relativeDirs: string[] | undefined
 ): string[] {
     const workspaceFolderUri = getWorkspaceFolderOfFile(currentFileUri);
-    if (!workspaceFolderUri || !relativeDirs) return [];
+    if (!workspaceFolderUri || !relativeDirs || relativeDirs.length === 0) return [];
 
     const workspaceRoot = URI.parse(workspaceFolderUri).fsPath;
+    const cacheKey = `${workspaceRoot}::${relativeDirs.join('|')}`;
+    const cached = resolvedDirsCache.get(cacheKey);
+    if (cached) {
+        return cached;
+    }
+
     const resolvedPaths: string[] = [];
 
     for (const dirPattern of relativeDirs) {
         const expandedDirs = globSync(dirPattern, {
             cwd: workspaceRoot,
             absolute: true,
-            nodir: false
+            nodir: false,
+            ignore: ['**/.git/**', '**/node_modules/**', '**/build/**', '**/dist/**', '**/out/**']
         });
         resolvedPaths.push(...expandedDirs);
     }
-    
+
+    resolvedDirsCache.set(cacheKey, resolvedPaths);
     return resolvedPaths;
 }
 
@@ -60,14 +74,50 @@ export function resolveIncludeUri(
     includeDirs: string[] | undefined,
 ): string | null {
     const currentDir = path.dirname(URI.parse(currentFileUri).fsPath);
+    const workspaceFolderUri = getWorkspaceFolderOfFile(currentFileUri);
+    const workspaceRoot = workspaceFolderUri ? URI.parse(workspaceFolderUri).fsPath : undefined;
     const resolvedIncludeDirs = resolveWorkspaceRelativeDirs(currentFileUri, includeDirs);
-    const directoriesToSearch = [currentDir, ...resolvedIncludeDirs];
+    const directoriesToSearch = [
+        currentDir,
+        ...(workspaceRoot && workspaceRoot !== currentDir ? [workspaceRoot] : []),
+        ...resolvedIncludeDirs
+    ];
 
     for (const dir of directoriesToSearch) {
         const fullPath = path.join(dir, includeFile);
-        const uri = URI.parse(fullPath).toString();
+        const uri = URI.file(fullPath).toString();
         if (symbolTables.has(uri)) {
-            return uri
+            return uri;
+        }
+    }
+
+    return null;
+}
+
+export async function resolveIncbinUri(
+    currentFileUri: string,
+    incbinFile: string,
+    binIncludeDirs: string[] | undefined,
+): Promise<string | null> {
+    const currentDir = path.dirname(URI.parse(currentFileUri).fsPath);
+    const workspaceFolderUri = getWorkspaceFolderOfFile(currentFileUri);
+    const workspaceRoot = workspaceFolderUri ? URI.parse(workspaceFolderUri).fsPath : undefined;
+    const resolvedBinIncludeDirs = resolveWorkspaceRelativeDirs(currentFileUri, binIncludeDirs);
+    const directoriesToSearch = [
+        currentDir,
+        ...(workspaceRoot && workspaceRoot !== currentDir ? [workspaceRoot] : []),
+        ...resolvedBinIncludeDirs
+    ];
+
+    for (const dir of directoriesToSearch) {
+        const fullPath = path.join(dir, incbinFile);
+        try {
+            const stat = await fs.stat(fullPath);
+            if (stat.isFile()) {
+                return URI.file(fullPath).toString();
+            }
+        } catch {
+            // File does not exist in this directory, continue searching
         }
     }
 
