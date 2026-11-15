@@ -11,18 +11,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Side-by-side read-only `ca65 -l` hex & address listing view (`ca65.showHexListing`).
 - Status bar byte-size and cycle-count estimator for the active line or selection (`ca65.enableStatusBarCycleCount`).
 - LSP Semantic Tokens for explicit ca65 constructs (`.proc`, `.macro`, `.define`, `=` constants, `.enum`/members, `.struct`/`.union`, `.scope`, `.set` variables).
-- Diagnostics and Quick Fixes for `.import`/`.importzp` and `.export`/`.exportzp` mismatches across zero-page and direct-page segments (`ZEROPAGE`, `ZP`, `DIRECTPAGE`, `DP`).
+- Code Actions & Quick Fixes for unresolved symbols (auto-`.import`/`.importzp`, `.include`, or cross-file `.export` + `.import`), unused symbol removal/export, `.import`/`.importzp` mismatches, and decimal/hex/binary number base conversions.
+- Diagnostics for `.import`/`.importzp` and `.export`/`.exportzp` mismatches across zero-page and direct-page segments (`ZEROPAGE`, `ZP`, `DIRECTPAGE`, `DP`).
 - Signature help for `.macro` calls and parameterized `.define` macros, plus `Scope::` and `.include`/`.incbin` path completions.
 - Support for `ca65.additionalArgs` (forwarded to `ca65` diagnostics and listing generation).
 - `prepareRename` validation and `@`-prefix preservation for cheap local label renames.
-- In-repo test suite (`npm test` via `test/run_all.js`).
+- In-repo unit and E2E test suite (`npm test` via `test/run_all.js`).
 
 ### Changed
+- **Performance & LSP Architecture Refactor:**
+  - Rewrote hot scanning and lookup paths for large workspaces, including single-pass scanning (`documentScanner`), cached symbol/export/include-graph/path/executable resolutions, and shared unopened-document caching (`documentCache`).
+  - Overhauled live `ca65` validation (`assembleTranslationUnit`) with `AbortController` cancellation, shared compilation for diagnostics and listings, and lightweight on-demand shadow directories created only when open files have unsaved changes.
+  - Added bounded concurrency and refresh-flush barriers (`ensureDocumentRefreshed`) across workspace indexing and LSP providers, plus shared helpers unifying `ZEROPAGE` / `ZP` / `DIRECTPAGE` / `DP` segment handling across diagnostics, Quick Fixes, analyzer, outline symbols, and symbol resolution.
+- Scoped completions to the active translation unit plus workspace exports while suppressing completions in comments, strings, numbers, and declaration names.
 - Revamped hover cards with left-aligned segment/kind badges (`CONST`, `ENUM`, `VAR`, `MACRO`, `DEFINE`), evaluated constant values, verbatim `;` comment blocks, and clickable source links.
 - Updated TextMate grammar to highlight regular labels as declarations, focus mnemonic scopes on control-flow instructions, and support string escapes.
 - Simplified Outline details to `(macro)` and `(zp)` with segment-based label icons and source-order sorting.
 - Moved block snippets (`.proc`, `.macro`, `.scope`, `.struct`, `.union`, `.enum`, `.repeat`, `.if*`) into context-aware LSP completion so snippets only trigger in command position and sort ahead of directives.
-- Removed unused `node` runtime dependency, fixed `.vscodeignore` packaging rules so compiled `client/out` and `server/out` files are included in `.vsix` builds, and updated repository metadata to `hobbett64/ca65-vscode-extension-64`.
+- Removed unused dependencies, fixed `.vscodeignore` packaging rules so compiled `client/out` and `server/out` files are included cleanly in `.vsix` builds, and updated repository metadata to `hobbett64/ca65-vscode-extension-64`.
+
+### Fixed
+- Fixed `.incbin` document link resolution using `ca65.binIncludeDirs`, label kind detection for `.res`/`.byte`/data/string definitions, and cheap local (`@label`) resolution and highlighting across parent scopes.
+- Fixed live `stderr` diagnostic path mapping when validating unsaved files in shadow directories.
 
 ## [1.5.8] - 2025-09-14
 - Fix symbols with the same name but different scopes counting towards each other's reference counts for symbol not used diagnostics.
