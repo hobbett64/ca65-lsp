@@ -9,6 +9,15 @@ const EMPTY_IMPORTS: readonly Import[] = [];
 const EMPTY_SCOPES: readonly Scope[] = [];
 const EMPTY_STRING_ARRAY: readonly string[] = Object.freeze([]);
 const EMPTY_REFS: readonly ReferenceInfo[] = Object.freeze([]);
+const ZERO_PAGE_SEGMENTS = new Set(['ZEROPAGE', 'ZP', 'DIRECTPAGE', 'DP']);
+
+/**
+ * Returns true if `segment` uses a standard zero-page or direct-page segment name.
+ */
+export function isZeroPageSegmentName(segment: string | null | undefined): boolean {
+    if (!segment) return false;
+    return ZERO_PAGE_SEGMENTS.has(segment.trim().toUpperCase());
+}
 
 export interface DocumentLinkDirective {
     line: number;

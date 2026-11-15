@@ -56,6 +56,9 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         '  lda #$00',
         'bank_table:',
         '  .byte $01, $02',
+        '',
+        '.segment "DIRECTPAGE"',
+        'dp_plain:',
     ].join('\n') + '\n';
 
     const mainText = [
@@ -311,6 +314,8 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         const byName = new Map(varsSymbols.map(s => [s.name, s]));
         assert.strictEqual(byName.get('zp_plain').kind, 13, 'Plain label in ZEROPAGE should use Variable (13)');
         assert.strictEqual(byName.get('zp_plain').detail, '(zp)', 'ZEROPAGE label should have (zp) outline detail');
+        assert.strictEqual(byName.get('dp_plain').kind, 13, 'Plain label in DIRECTPAGE should use Variable (13)');
+        assert.strictEqual(byName.get('dp_plain').detail, '(zp)', 'DIRECTPAGE label should have (zp) outline detail');
         assert.strictEqual(byName.get('ro_incbin').kind, 18, 'Plain label in RODATA without direct .byte should fall back to Array (18)');
         assert.strictEqual(byName.get('ro_incbin').detail, undefined, 'RODATA label should not repeat segment detail');
         assert.strictEqual(byName.get('bank_plain').kind, 15, 'Plain label in custom segment should fall back to String/abc (15)');

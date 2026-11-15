@@ -6,7 +6,7 @@ import { getLineText } from './editUtils';
 import { IncludesGraph } from './includesGraph';
 import { Ca65Cpu, normalizeCpu } from './settings';
 import { resolveImport, resolveReference } from './symbolResolver';
-import { Import, Scope, ScopeKind, Symbol, SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
+import { Import, isZeroPageSegmentName, Scope, ScopeKind, Symbol, SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
 
 export interface InstructionAnalysisItem {
     line: number;
@@ -541,10 +541,7 @@ function classifyEntityWidth(
     }
 
     if (entity.segment) {
-        const segUpper = entity.segment.toUpperCase();
-        return (segUpper === 'ZEROPAGE' || segUpper === 'ZP' || segUpper === 'DIRECTPAGE' || segUpper === 'DP')
-            ? 'zp'
-            : 'abs';
+        return isZeroPageSegmentName(entity.segment) ? 'zp' : 'abs';
     }
 
     if (entity instanceof Symbol && entity.kind === SymbolKind.Constant) {

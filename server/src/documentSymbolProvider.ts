@@ -4,15 +4,14 @@ import {
     DocumentSymbol,
 } from 'vscode-languageserver/node';
 import { ensureDocumentRefreshed, initializationGate, symbolTables } from './server';
-import { Macro, MacroKind, Scope } from './symbolTable';
+import { isZeroPageSegmentName, Macro, MacroKind, Scope } from './symbolTable';
 import { getLSPSymbolKind } from './symbolResolver';
 
 function formatSegmentDetail(segment: string | null | undefined, parentSegment: string): string | undefined {
     if (!segment || segment === parentSegment) {
         return undefined;
     }
-    const upper = segment.toUpperCase();
-    return (upper === 'ZEROPAGE' || upper === 'ZP') ? '(zp)' : undefined;
+    return isZeroPageSegmentName(segment) ? '(zp)' : undefined;
 }
 
 function formatMacroDetail(macro: Macro): string | undefined {

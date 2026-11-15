@@ -139,6 +139,8 @@ function makeLspClient(workspaceDir) {
         '    nop',
         '    rts',
         '.endproc',
+        '.segment "DIRECTPAGE"',
+        'dp_unexported: .res 1',
     ].join('\n');
 
     const mainSContent = [
@@ -174,6 +176,9 @@ function makeLspClient(workspaceDir) {
         '    lda #INC_CONST',
         '    jsr unexported_helper',
         'msg: .byte "123"',
+        '    lda dp_unexported',
+        '.segment "DP"',
+        'dp_unused: .res 1',
     ].join('\n');
 
     fs.writeFileSync(defsIncPath, defsIncContent);
@@ -289,6 +294,37 @@ function makeLspClient(workspaceDir) {
         assert(exportAndImport, 'Expected multi-file export+import quick fix: ' + JSON.stringify(caHelper.map(a => a.title)));
         assert(exportAndImport.edit.changes[pathToFileURL(helperAsmPath).toString()], 'Edit targets helper.asm');
         assert(exportAndImport.edit.changes[mainUri], 'Edit targets main.s');
+
+        // Line 32: `    lda dp_unexported` -> DIRECTPAGE symbol in helper.asm without .export
+        const caDpHelper = await client.request('textDocument/codeAction', {
+            textDocument: { uri: mainUri },
+            range: { start: { line: 32, character: 10 }, end: { line: 32, character: 10 } },
+            context: { diagnostics: [] },
+        });
+        const exportAndImportDp = caDpHelper.find(a => a.title.includes("Export 'dp_unexported'") && a.title.includes('import here'));
+        assert(exportAndImportDp, 'Expected multi-file export+import quick fix for DIRECTPAGE symbol');
+        const helperDpEdit = exportAndImportDp.edit.changes[pathToFileURL(helperAsmPath).toString()][0];
+        const mainDpEdit = exportAndImportDp.edit.changes[mainUri][0];
+        assert(helperDpEdit.newText.includes('.exportzp dp_unexported'), `Expected .exportzp for DIRECTPAGE symbol, got ${helperDpEdit.newText}`);
+        assert(mainDpEdit.newText.includes('.importzp dp_unexported'), `Expected .importzp for DIRECTPAGE symbol, got ${mainDpEdit.newText}`);
+
+        // Line 34: `dp_unused: .res 1` in `.segment "DP"` -> Export (.exportzp) quick fix
+        const caUnusedDp = await client.request('textDocument/codeAction', {
+            textDocument: { uri: mainUri },
+            range: { start: { line: 34, character: 2 }, end: { line: 34, character: 2 } },
+            context: {
+                diagnostics: [{
+                    source: 'ca65-lsp',
+                    severity: 4,
+                    range: { start: { line: 34, character: 0 }, end: { line: 34, character: 9 } },
+                    message: "Symbol 'dp_unused' is defined but never used.",
+                }],
+            },
+        });
+        assert(
+            caUnusedDp.some(a => a.title === "Export 'dp_unused' (.exportzp)"),
+            'Expected Export (.exportzp) quick fix for DP symbol: ' + JSON.stringify(caUnusedDp.map(a => a.title))
+        );
 
         // --- Test 3: Unused Symbol Quick Fixes ---
         // Line 26: `inline_unused: lda #42 ; comment 99`

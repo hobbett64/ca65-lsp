@@ -24,7 +24,7 @@ import {
 } from './server';
 import { Ca65Settings } from './settings';
 import { resolveExport, resolveReference } from './symbolResolver';
-import { Macro, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
+import { isZeroPageSegmentName, Macro, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
 import { getCachedTextDocument } from './documentCache';
 
 function rangesOverlap(a: Range, b: Range): boolean {
@@ -42,9 +42,7 @@ function rangesEqual(a: Range, b: Range): boolean {
 }
 
 function isZeroPageEntity(entity: SymbolTableEntity | undefined, explicitZp: boolean = false): boolean {
-    if (explicitZp) return true;
-    const seg = entity?.segment?.toUpperCase();
-    return seg === 'ZEROPAGE' || seg === 'ZP';
+    return explicitZp || isZeroPageSegmentName(entity?.segment);
 }
 
 function deleteLinesRange(document: TextDocument, startLine: number, endLine: number): Range {

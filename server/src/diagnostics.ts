@@ -22,7 +22,7 @@ import { Ca65Settings, normalizeCpu } from './settings';
 import which from "which";
 import { fsPathToUri, getWorkspaceFolderOfFile, resolveWorkspaceRelativeDirs, uriToFsPath } from './pathUtils';
 import { countReferencesByFile, isEntityUsed, resolveImport } from './symbolResolver';
-import { ImportKind, Scope, ScopeKind, Symbol as Ca65Symbol, SymbolKind as Ca65SymbolKind, SymbolTableEntity } from './symbolTable';
+import { ImportKind, isZeroPageSegmentName, Scope, ScopeKind, Symbol as Ca65Symbol, SymbolKind as Ca65SymbolKind, SymbolTableEntity } from './symbolTable';
 import { findCommentStart } from './documentScanner';
 import { getCachedTextDocument, isOpenDocumentPotentiallyDirty } from './documentCache';
 
@@ -113,12 +113,6 @@ async function findUnusedSymbolDiagnostics(
         }
         return lspDiagnostics;
     });
-}
-
-function isZeroPageSegmentName(segment: string | null | undefined): boolean {
-    if (!segment) return false;
-    const upper = segment.toUpperCase();
-    return upper === 'ZEROPAGE' || upper === 'ZP' || upper === 'DIRECTPAGE' || upper === 'DP';
 }
 
 function entityCarriesSegmentAddress(entity: SymbolTableEntity): boolean {
