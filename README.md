@@ -85,6 +85,10 @@ npm run package-lsp:win     # Windows
 npm run package-lsp:macos   # MacOS
 npm run package-lsp         # All Three
 ```
+## AI Usage Disclosure
+
+Most of this project was vibe coded with AI assistance. Bug reports, issues, and pull requests are welcome!
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
