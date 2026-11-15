@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.6.0] - 2026-11-15
+## [2.0.0] - 2026-11-15
 ### Added
 - Target CPU selection via `ca65.cpu` (`6502`, `65SC02`, `65C02`, `W65C02`, and `65816`) updating `ca65` diagnostics, hover cards, autocompletion, status-bar byte/cycle estimates (including min–max `M`/`X` ranges for `65816`), `jsl`/`jml` call hierarchy, and the `ca65: Show Instruction Reference` panel.
 - Side-by-side read-only `ca65 -l` hex & address listing view (`ca65.showHexListing`).
