@@ -216,7 +216,6 @@
     },
     "dependencies": {
         "glob": "^14.0.6",
-        "vsce": "^1.25.1",
         "vscode-languageclient": "^9.0.1",
         "vscode-languageserver": "^9.0.1",
         "vscode-languageserver-protocol": "^3.17.5",
