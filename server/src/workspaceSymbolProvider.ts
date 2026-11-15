@@ -3,7 +3,7 @@ import {
     WorkspaceSymbolParams,
     SymbolInformation,
 } from 'vscode-languageserver/node';
-import { initializationGate, symbolTables } from './server';
+import { ensureDocumentRefreshed, initializationGate, symbolTables } from './server';
 import { getLSPSymbolKind } from './symbolResolver';
 
 export function initializeWorkspaceSymbolProvider(connection: _Connection) {
@@ -12,6 +12,7 @@ export function initializeWorkspaceSymbolProvider(connection: _Connection) {
      */
     connection.onWorkspaceSymbol(async (params: WorkspaceSymbolParams): Promise<SymbolInformation[]> => {
         await initializationGate.isInitialized;
+        await ensureDocumentRefreshed?.();
 
         const query = params.query.toLowerCase();
         const lspSymbols: SymbolInformation[] = [];

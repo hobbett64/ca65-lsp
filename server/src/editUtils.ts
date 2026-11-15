@@ -26,34 +26,59 @@ export function isAutoIncludable(uri: string, settings: Ca65Settings): boolean {
     return false;
 }
 
-function skipCommentBlock(lines: string[]): number {
+class DocumentLineReader {
+    private readonly text: string;
+    private readonly lineCache: string[] = [];
+    private nextOffset = 0;
+
+    constructor(document: TextDocument) {
+        this.text = document.getText();
+    }
+
+    getLine(lineIndex: number): string | undefined {
+        while (this.lineCache.length <= lineIndex && this.nextOffset <= this.text.length) {
+            const nl = this.text.indexOf('\n', this.nextOffset);
+            const rawEnd = nl === -1 ? this.text.length : nl;
+            const end = (rawEnd > this.nextOffset && this.text.charCodeAt(rawEnd - 1) === 13)
+                ? rawEnd - 1
+                : rawEnd;
+            this.lineCache.push(this.text.slice(this.nextOffset, end));
+            this.nextOffset = nl === -1 ? this.text.length + 1 : nl + 1;
+        }
+        return this.lineCache[lineIndex];
+    }
+}
+
+function skipCommentBlock(reader: DocumentLineReader): number {
     let top = 0;
     let foundComment = false;
-    while (top < lines.length && lines[top].trim().startsWith(';')) {
+    let line: string | undefined;
+    while ((line = reader.getLine(top)) !== undefined && line.trim().startsWith(';')) {
         foundComment = true;
         top++;
     }
-    if (foundComment && top < lines.length && lines[top].trim().length === 0) {
+    if (foundComment && (line = reader.getLine(top)) !== undefined && line.trim().length === 0) {
         top++;
     }
     return top;
 }
 
-function skipDirectiveBlock(lines: string[], startLine: number, directivePrefix: string): number {
+function skipDirectiveBlock(reader: DocumentLineReader, startLine: number, directivePrefix: string): number {
     let top = startLine;
     let found = false;
-    while (top < lines.length && lines[top].trim().toLowerCase().startsWith(directivePrefix)) {
+    let line: string | undefined;
+    while ((line = reader.getLine(top)) !== undefined && line.trim().toLowerCase().startsWith(directivePrefix)) {
         found = true;
         top++;
     }
-    if (found && top < lines.length && lines[top].trim().length === 0) {
+    if (found && (line = reader.getLine(top)) !== undefined && line.trim().length === 0) {
         top++;
     }
     return top;
 }
 
 function insertIntoSortedBlock(
-    lines: string[],
+    reader: DocumentLineReader,
     startLine: number,
     directivePrefix: string,
     newLine: string,
@@ -61,8 +86,9 @@ function insertIntoSortedBlock(
     newSortKey: string,
 ): TextEdit {
     let insertAt = startLine;
-    while (insertAt < lines.length && lines[insertAt].trim().toLowerCase().startsWith(directivePrefix)) {
-        const existingKey = extractSortKey(lines[insertAt].trim());
+    let line: string | undefined;
+    while ((line = reader.getLine(insertAt)) !== undefined && line.trim().toLowerCase().startsWith(directivePrefix)) {
+        const existingKey = extractSortKey(line.trim());
         if (existingKey < newSortKey) {
             insertAt++;
         } else {
@@ -71,7 +97,8 @@ function insertIntoSortedBlock(
     }
 
     // Add empty space if we're at the end of the block and the following line has content.
-    const trimmedLine = insertAt < lines.length ? lines[insertAt].trim().toLowerCase() : '';
+    const nextLine = reader.getLine(insertAt);
+    const trimmedLine = nextLine !== undefined ? nextLine.trim().toLowerCase() : '';
     if (trimmedLine && !trimmedLine.startsWith(directivePrefix)) {
         newLine += '\n';
     }
@@ -86,10 +113,10 @@ export function makeIncludeEdit(
     document: TextDocument,
     includePath: string
 ): TextEdit {
-    const lines = document.getText().split(/\r?\n/);
-    const top = skipCommentBlock(lines);
+    const reader = new DocumentLineReader(document);
+    const top = skipCommentBlock(reader);
     return insertIntoSortedBlock(
-        lines,
+        reader,
         top,
         '.include',
         `.include "${includePath}"\n`,
@@ -106,12 +133,12 @@ export function makeImportEdit(
     importSymbol: string,
     directive: '.import' | '.importzp' = '.import'
 ): TextEdit {
-    const lines = document.getText().split(/\r?\n/);
-    let top = skipCommentBlock(lines);
-    top = skipDirectiveBlock(lines, top, '.include');
+    const reader = new DocumentLineReader(document);
+    let top = skipCommentBlock(reader);
+    top = skipDirectiveBlock(reader, top, '.include');
 
     return insertIntoSortedBlock(
-        lines,
+        reader,
         top,
         '.import',
         `${directive} ${importSymbol}\n`,
@@ -128,13 +155,13 @@ export function makeExportEdit(
     exportSymbol: string,
     directive: '.export' | '.exportzp' = '.export'
 ): TextEdit {
-    const lines = document.getText().split(/\r?\n/);
-    let top = skipCommentBlock(lines);
-    top = skipDirectiveBlock(lines, top, '.include');
-    top = skipDirectiveBlock(lines, top, '.import');
+    const reader = new DocumentLineReader(document);
+    let top = skipCommentBlock(reader);
+    top = skipDirectiveBlock(reader, top, '.include');
+    top = skipDirectiveBlock(reader, top, '.import');
 
     return insertIntoSortedBlock(
-        lines,
+        reader,
         top,
         '.export',
         `${directive} ${exportSymbol}\n`,

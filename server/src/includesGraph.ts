@@ -1,4 +1,3 @@
-
 class FileNode {
   uri: string;
   includes: Set<FileNode>;   // Files that this file includes
@@ -11,23 +10,35 @@ class FileNode {
   }
 }
 
+interface TranslationUnitCacheEntry {
+    uris: readonly string[];
+    uriSet: ReadonlySet<string>;
+}
+
+const EMPTY_URI_ARRAY: readonly string[] = Object.freeze([]);
+const EMPTY_URI_SET: ReadonlySet<string> = new Set();
+
 export class IncludesGraph {
     private nodes: Map<string, FileNode> = new Map();
-    private translationUnitCache: Map<string, readonly string[]> = new Map();
+    private translationUnitCache: Map<string, TranslationUnitCacheEntry> = new Map();
+    private includingRootsCache: Map<string, readonly string[]> = new Map();
 
     private getOrCreateNode(uri: string): FileNode {
-        if (!this.nodes.has(uri)) {
-            this.nodes.set(uri, new FileNode(uri));
+        let node = this.nodes.get(uri);
+        if (!node) {
+            node = new FileNode(uri);
+            this.nodes.set(uri, node);
         }
-        return this.nodes.get(uri)!;
+        return node;
     }
 
-    public updateIncludes(uri: string, newIncludeUris: string[]) {
+    public updateIncludes(uri: string, newIncludeUris: string[]): void {
         const sourceNode = this.getOrCreateNode(uri);
         const oldIncludes = sourceNode.includes;
-        const newIncludes = new Set(
-            newIncludeUris.map(depUri => this.getOrCreateNode(depUri))
-        );
+        const newIncludes = new Set<FileNode>();
+        for (const depUri of newIncludeUris) {
+            newIncludes.add(this.getOrCreateNode(depUri));
+        }
 
         let changed = oldIncludes.size !== newIncludes.size;
         if (!changed) {
@@ -54,6 +65,7 @@ export class IncludesGraph {
 
         sourceNode.includes = newIncludes;
         this.translationUnitCache.clear();
+        this.includingRootsCache.clear();
     }
 
     // -----------------------------
@@ -75,45 +87,100 @@ export class IncludesGraph {
     }
 
     public *getIncludingRoots(uri: string): Generator<string> {
-        // The loop will check every file that depends on the given uri,
-        // including the file itself.
-        for (const dependentUri of this.getTransitiveDependents(uri)) {
-            const node = this.nodes.get(dependentUri);
-            // A node is a root if nothing includes it.
-            if (node && node.includedBy.size === 0) {
-                yield node.uri;
+        yield* this.getIncludingRootsArray(uri);
+    }
+
+    /**
+     * Returns all root files (in-degree 0) that transitively include `uri`, cached until graph changes.
+     */
+    public getIncludingRootsArray(uri: string): readonly string[] {
+        const cached = this.includingRootsCache.get(uri);
+        if (cached) return cached;
+
+        const startNode = this.nodes.get(uri);
+        if (!startNode) return EMPTY_URI_ARRAY;
+
+        const roots: string[] = [];
+        const visited = new Set<FileNode>();
+        const stack: FileNode[] = [startNode];
+
+        while (stack.length > 0) {
+            const node = stack.pop()!;
+            if (visited.has(node)) continue;
+            visited.add(node);
+
+            if (node.includedBy.size === 0) {
+                roots.push(node.uri);
+            } else {
+                for (const parent of node.includedBy) {
+                    if (!visited.has(parent)) {
+                        stack.push(parent);
+                    }
+                }
             }
         }
+
+        const result = roots.length === 0 ? EMPTY_URI_ARRAY : roots;
+        this.includingRootsCache.set(uri, result);
+        return result;
+    }
+
+    private getTranslationUnitEntry(uri: string): TranslationUnitCacheEntry {
+        const cached = this.translationUnitCache.get(uri);
+        if (cached) return cached;
+
+        const startNode = this.nodes.get(uri);
+        if (!startNode) {
+            return { uris: EMPTY_URI_ARRAY, uriSet: EMPTY_URI_SET };
+        }
+
+        const visitedNodes = new Set<FileNode>();
+        const uriSet = new Set<string>();
+        const uris: string[] = [];
+
+        const pushSubtree = (rootNode: FileNode) => {
+            const stack: FileNode[] = [rootNode];
+            while (stack.length > 0) {
+                const node = stack.pop()!;
+                if (visitedNodes.has(node)) continue;
+                visitedNodes.add(node);
+                uriSet.add(node.uri);
+                uris.push(node.uri);
+                for (const dep of node.includes) {
+                    if (!visitedNodes.has(dep)) {
+                        stack.push(dep);
+                    }
+                }
+            }
+        };
+
+        const roots = this.getIncludingRootsArray(uri);
+        for (const rootUri of roots) {
+            const rootNode = this.nodes.get(rootUri);
+            if (rootNode) {
+                pushSubtree(rootNode);
+            }
+        }
+
+        // Fallback if an include cycle leaves no root with in-degree 0
+        if (uris.length === 0) {
+            pushSubtree(startNode);
+        }
+
+        const entry: TranslationUnitCacheEntry = { uris, uriSet };
+        this.translationUnitCache.set(uri, entry);
+        return entry;
     }
 
     public getTranslationUnit(uri: string): readonly string[] {
-        const cached = this.translationUnitCache.get(uri);
-        if (cached) {
-            return cached;
-        }
+        return this.getTranslationUnitEntry(uri).uris;
+    }
 
-        const visitedUris = new Set<string>();
-        const result: string[] = [];
-        for (const root of this.getIncludingRoots(uri)) {
-            for (const dependencyUri of this.getTransitiveDependencies(root)) {
-                if (!visitedUris.has(dependencyUri)) {
-                    visitedUris.add(dependencyUri);
-                    result.push(dependencyUri);
-                }
-            }
-        }
-        // Fallback if an include cycle leaves no root with in-degree 0
-        if (result.length === 0 && this.nodes.has(uri)) {
-            for (const dependencyUri of this.getTransitiveDependencies(uri)) {
-                if (!visitedUris.has(dependencyUri)) {
-                    visitedUris.add(dependencyUri);
-                    result.push(dependencyUri);
-                }
-            }
-        }
-
-        this.translationUnitCache.set(uri, result);
-        return result;
+    /**
+     * Returns a cached ReadonlySet of all URIs in `uri`'s translation unit(s) for O(1) membership checks.
+     */
+    public getTranslationUnitSet(uri: string): ReadonlySet<string> {
+        return this.getTranslationUnitEntry(uri).uriSet;
     }
 
     public isTranslationUnitRoot(uri: string): boolean {
@@ -134,7 +201,7 @@ export class IncludesGraph {
 
         while (stack.length > 0) {
             const node = stack.pop()!;
-            if (visited.has(node)) continue;            
+            if (visited.has(node)) continue;
             yield node.uri;
             visited.add(node);
 
@@ -158,6 +225,7 @@ export class IncludesGraph {
 
         this.nodes.delete(uri);
         this.translationUnitCache.clear();
+        this.includingRootsCache.clear();
     }
 
     public toString(): string {
@@ -176,4 +244,3 @@ export class IncludesGraph {
         return result.join('\n') + '\n';
     }
 }
-

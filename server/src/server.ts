@@ -9,13 +9,19 @@ import {
     Range,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { URI } from 'vscode-uri';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { glob } from 'glob';
 
 import { loadAllData } from './dataManager';
-import { abortValidation, clearExecutablePathCache, initializeDiagnostics, triggerValidation } from './diagnostics';
+import {
+    abortValidation,
+    addPendingValidationFiles,
+    clearExecutablePathCache,
+    hasPendingValidation,
+    initializeDiagnostics,
+    triggerValidation,
+} from './diagnostics';
 import { initializeDocumentSymbolProvider } from './documentSymbolProvider';
 import { scanDocument } from './documentScanner';
 import { initializeFoldingRangeProvider } from './foldingRangeProvider';
@@ -31,6 +37,8 @@ import { initializeRenameProvider } from './renameProvider';
 import { initializeCallHierarchyProvider } from './callHierarchyProvider';
 import { initializeDocumentHighlightProvider } from './documentHighlightProvider';
 import { initializeCompletionProvider } from './completionProvider';
+import { initializeCodeLensProvider } from './codeLensProvider';
+import { initializeSignatureHelpProvider } from './signatureHelpProvider';
 import { initializeCodeActionProvider } from './codeActionProvider';
 import { analyzeInstructionRange } from './instructionAnalyzer';
 import { invalidateOverlaySignatures, initializeOverlayProvider } from './overlayProvider';
@@ -38,7 +46,21 @@ import { deleteCachedResolutions } from './symbolResolver';
 import { ExportsMap } from './exportsMap';
 import { Ca65Settings, documentSettings } from './settings';
 import { Performance as PerformanceMonitor } from './performance';
-import { clearResolvedDirsCache, resolveIncludeUri } from './pathUtils';
+import {
+    clearResolvedDirsCache,
+    fsPathToUri,
+    getWorkspaceFolderOfFile,
+    resolveIncludeUri,
+    uriToFsPath,
+} from './pathUtils';
+import {
+    clearDocumentDirtyState,
+    clearUnopenedDocumentCache,
+    getCachedTextDocument,
+    invalidateCachedDocument,
+    markDocumentModifiedSinceSave,
+    markDocumentSaved,
+} from './documentCache';
 
 // --- Connection and Document Manager Setup ---
 const connection = createConnection(ProposedFeatures.all);
@@ -64,6 +86,7 @@ export const initializationGate = (() => {
 connection.onInitialize(async (params: InitializeParams) => {
     if (params.workspaceFolders) {
         workspaceFolderUris = params.workspaceFolders.map(folder => folder.uri);
+        clearResolvedDirsCache();
     }
 
     return {
@@ -78,8 +101,15 @@ connection.onInitialize(async (params: InitializeParams) => {
             renameProvider: true,
             workspaceSymbolProvider: true,
             completionProvider: {
-                triggerCharacters: ['.', '@'],
+                triggerCharacters: ['.', '@', ':', '"', '/'],
                 resolveProvider: true,
+            },
+            codeLensProvider: {
+                resolveProvider: false,
+            },
+            signatureHelpProvider: {
+                triggerCharacters: [' ', '(', ','],
+                retriggerCharacters: [','],
             },
             inlayHintProvider: { resolveProvider: false },
             documentHighlightProvider: true,
@@ -116,9 +146,14 @@ async function getDiscoveryGlobs(): Promise<string[]> {
     const configuredGlobs: string[] = [];
 
     try {
-        const config = await connection.workspace.getConfiguration({ section: 'files' });
-        const associations = config?.associations || {};
+        const configs = await connection.workspace.getConfiguration([
+            { section: 'files' },
+            { section: 'ca65' },
+        ]);
+        const config = Array.isArray(configs) ? configs[0] : undefined;
+        const ca65Config = Array.isArray(configs) ? configs[1] : undefined;
 
+        const associations = config?.associations || {};
         for (const [pattern, langId] of Object.entries(associations)) {
             if (langId !== 'ca65') continue;
             configuredGlobs.push(
@@ -127,12 +162,7 @@ async function getDiscoveryGlobs(): Promise<string[]> {
                     : pattern
             );
         }
-    } catch (e) {
-        connection.console.error(`Could not fetch 'files.associations' from client: ${e}`);
-    }
 
-    try {
-        const ca65Config = await connection.workspace.getConfiguration({ section: 'ca65' });
         const customExtensions = Array.isArray(ca65Config?.additionalExtensions)
             ? ca65Config.additionalExtensions
             : [];
@@ -142,14 +172,14 @@ async function getDiscoveryGlobs(): Promise<string[]> {
             configuredGlobs.push(`**/*${cleanExt}`);
         }
     } catch (e) {
-        connection.console.error(`Could not fetch 'ca65.additionalExtensions' from client: ${e}`);
+        connection.console.error(`Could not fetch workspace discovery configuration from client: ${e}`);
     }
 
     return [...new Set([...defaultGlobs, ...configuredGlobs])];
 }
 
 async function indexWorkspaceFolder(folderUri: string, globs: string[]): Promise<void> {
-    const folderPath = URI.parse(folderUri).fsPath;
+    const folderPath = uriToFsPath(folderUri);
     const files = await glob(globs, {
         cwd: folderPath,
         nodir: true,
@@ -160,7 +190,7 @@ async function indexWorkspaceFolder(folderUri: string, globs: string[]): Promise
     await mapWithConcurrency(files, 32, async (file) => {
         try {
             const filePath = path.join(folderPath, file);
-            const uri = URI.file(filePath).toString();
+            const uri = fsPathToUri(filePath);
             const openDoc = documents.get(uri);
             const doc = openDoc ?? TextDocument.create(uri, 'ca65', 0, await fs.readFile(filePath, 'utf-8'));
 
@@ -211,11 +241,14 @@ connection.onInitialized(async () => {
 
                 for (const removed of event.removed) {
                     workspaceFolderUris = workspaceFolderUris.filter(uri => uri !== removed.uri);
+                    documentSettings.delete(removed.uri);
                     const prefix = removed.uri.endsWith('/') ? removed.uri : `${removed.uri}/`;
                     for (const uri of Array.from(symbolTables.keys())) {
                         if ((uri === removed.uri || uri.startsWith(prefix)) && !documents.get(uri)) {
                             deleteCachedResolutions(uri);
                             documentSettings.delete(uri);
+                            invalidateCachedDocument(uri);
+                            clearDocumentDirtyState(uri);
                             symbolTables.delete(uri);
                             includesGraph.removeFile(uri);
                             exportsMap.removeUri(uri);
@@ -244,25 +277,26 @@ connection.onInitialized(async () => {
 
 // Helper function to get the setting for a document
 export function getDocumentSettings(resource: string): Thenable<Ca65Settings> {
-    let result = documentSettings.get(resource);
+    const scopeKey = getWorkspaceFolderOfFile(resource) ?? resource;
+    let result = documentSettings.get(scopeKey);
     if (!result) {
         result = connection.workspace.getConfiguration({
-            scopeUri: resource,
+            scopeUri: scopeKey,
             section: 'ca65'
         }).then(
             settings => settings,
             err => {
-                documentSettings.delete(resource);
+                documentSettings.delete(scopeKey);
                 throw err;
             }
         );
-        documentSettings.set(resource, result);
+        documentSettings.set(scopeKey, result);
     }
     return result;
 }
 
 async function refreshDocumentSymbolTable(document: TextDocument): Promise<Set<string>> {
-    const allAffectedUris: Set<string> = new Set(includesGraph.getTranslationUnit(document.uri));
+    const allAffectedUris: Set<string> = new Set(includesGraph.getTranslationUnitSet(document.uri));
 
     const isNewFile = !symbolTables.has(document.uri);
     const newSymbolTable = await scanDocument(document);
@@ -271,45 +305,42 @@ async function refreshDocumentSymbolTable(document: TextDocument): Promise<Set<s
     exportsMap.updateExports(document.uri, newSymbolTable.exports);
 
     allAffectedUris.add(document.uri);
-    for (const uri of includesGraph.getTranslationUnit(document.uri)) {
+    for (const uri of includesGraph.getTranslationUnitSet(document.uri)) {
         allAffectedUris.add(uri);
     }
 
     // If this is a newly created or discovered file, re-scan existing files that had an
     // unresolved .include matching it so the includesGraph connects them immediately.
     if (isNewFile) {
-        const newFileBaseName = path.basename(URI.parse(document.uri).fsPath);
+        const newFileBaseName = path.basename(uriToFsPath(document.uri));
+        const candidates: Array<{ otherUri: string; otherTable: SymbolTable }> = [];
         for (const [otherUri, otherTable] of symbolTables) {
             if (otherUri === document.uri) continue;
-            if (!otherTable.unresolvedIncludes.some(inc => path.basename(inc) === newFileBaseName)) {
-                continue;
+            if (otherTable.unresolvedIncludes.some(inc => path.basename(inc) === newFileBaseName)) {
+                candidates.push({ otherUri, otherTable });
             }
-
-            const otherSettings = await getDocumentSettings(otherUri);
-            const resolvesToNewFile = otherTable.unresolvedIncludes.some(
-                inc => resolveIncludeUri(otherUri, inc, otherSettings.includeDirs) === document.uri
-            );
-            if (!resolvesToNewFile) continue;
-
-            let docToRescan = documents.get(otherUri);
-            if (!docToRescan) {
-                try {
-                    const fsPath = URI.parse(otherUri).fsPath;
-                    const content = await fs.readFile(fsPath, 'utf-8');
-                    docToRescan = TextDocument.create(otherUri, 'ca65', 0, content);
-                } catch {
-                    continue;
-                }
-            }
-            const updatedOtherTable = await scanDocument(docToRescan);
-            symbolTables.set(otherUri, updatedOtherTable);
-            includesGraph.updateIncludes(otherUri, updatedOtherTable.includedFiles);
-            exportsMap.updateExports(otherUri, updatedOtherTable.exports);
         }
-    }
 
-    for (const uri of includesGraph.getTranslationUnit(document.uri)) {
-        allAffectedUris.add(uri);
+        if (candidates.length > 0) {
+            await mapWithConcurrency(candidates, 16, async ({ otherUri, otherTable }) => {
+                const otherSettings = await getDocumentSettings(otherUri);
+                const resolvesToNewFile = otherTable.unresolvedIncludes.some(
+                    inc => resolveIncludeUri(otherUri, inc, otherSettings.includeDirs) === document.uri
+                );
+                if (!resolvesToNewFile) return;
+
+                const docToRescan = await getCachedTextDocument(otherUri, documents);
+                if (!docToRescan) return;
+
+                const updatedOtherTable = await scanDocument(docToRescan);
+                symbolTables.set(otherUri, updatedOtherTable);
+                includesGraph.updateIncludes(otherUri, updatedOtherTable.includedFiles);
+                exportsMap.updateExports(otherUri, updatedOtherTable.exports);
+            });
+            for (const uri of includesGraph.getTranslationUnitSet(document.uri)) {
+                allAffectedUris.add(uri);
+            }
+        }
     }
 
     for (const uri of allAffectedUris) {
@@ -319,12 +350,102 @@ async function refreshDocumentSymbolTable(document: TextDocument): Promise<Set<s
     return allAffectedUris;
 }
 
+const REFRESH_DEBOUNCE_MS = 80;
+const pendingRefreshDocs = new Map<string, TextDocument>();
+const pendingScanTimers = new Map<string, NodeJS.Timeout>();
+const pendingPreRefreshAffected = new Map<string, Set<string>>();
+const inFlightRefreshes = new Map<string, Promise<void>>();
+
+async function executeRefreshForDoc(doc: TextDocument): Promise<void> {
+    const preAffected = pendingPreRefreshAffected.get(doc.uri);
+    pendingPreRefreshAffected.delete(doc.uri);
+
+    const allAffectedUris = await performanceMonitor.timeAsync('refreshDocumentSymbolTable', async () => {
+        const affected = await refreshDocumentSymbolTable(doc);
+        if (preAffected) {
+            for (const u of preAffected) affected.add(u);
+        }
+        return affected;
+    });
+    if (hasPendingValidation(doc.uri)) {
+        addPendingValidationFiles(doc.uri, allAffectedUris);
+    } else {
+        triggerValidation(doc.uri, true, allAffectedUris);
+    }
+}
+
+/**
+ * Flushes any pending debounced or in-flight document refreshes so callers
+ * (hover, completion, diagnostics, etc.) observe up-to-date symbol tables.
+ */
+export async function ensureDocumentRefreshed(_uri?: string): Promise<void> {
+    await initializationGate.isInitialized;
+    while (pendingScanTimers.size > 0 || pendingRefreshDocs.size > 0 || inFlightRefreshes.size > 0) {
+        for (const [uri, timer] of pendingScanTimers) {
+            clearTimeout(timer);
+            pendingScanTimers.delete(uri);
+        }
+
+        const inflight = Array.from(inFlightRefreshes.values());
+        if (inflight.length > 0) {
+            await Promise.all(inflight);
+        }
+
+        const pendingEntries = Array.from(pendingRefreshDocs.entries());
+        if (pendingEntries.length === 0) {
+            continue;
+        }
+        pendingRefreshDocs.clear();
+
+        await Promise.all(pendingEntries.map(([uri, doc]) => {
+            const p = executeRefreshForDoc(doc).finally(() => {
+                if (inFlightRefreshes.get(uri) === p) {
+                    inFlightRefreshes.delete(uri);
+                }
+            });
+            inFlightRefreshes.set(uri, p);
+            return p;
+        }));
+    }
+}
+
+function scheduleDocumentRefresh(doc: TextDocument): void {
+    if (!pendingPreRefreshAffected.has(doc.uri)) {
+        pendingPreRefreshAffected.set(doc.uri, new Set(includesGraph.getTranslationUnitSet(doc.uri)));
+    }
+    pendingRefreshDocs.set(doc.uri, doc);
+    triggerValidation(doc.uri, true, pendingPreRefreshAffected.get(doc.uri));
+
+    const existingTimer = pendingScanTimers.get(doc.uri);
+    if (existingTimer) {
+        clearTimeout(existingTimer);
+    }
+    pendingScanTimers.set(doc.uri, setTimeout(() => {
+        pendingScanTimers.delete(doc.uri);
+        void ensureDocumentRefreshed(doc.uri).catch((err) => {
+            connection.console.error(`Failed to refresh document ${doc.uri}: ${err}`);
+        });
+    }, REFRESH_DEBOUNCE_MS));
+}
+
 // --- Central Document Update and Validation Logic ---
 async function updateAndValidate(document: TextDocument, debounce: boolean = true) {
     await initializationGate.isInitialized;
     abortValidation();
+    const timer = pendingScanTimers.get(document.uri);
+    if (timer) {
+        clearTimeout(timer);
+        pendingScanTimers.delete(document.uri);
+    }
+    pendingRefreshDocs.delete(document.uri);
+    const preAffected = pendingPreRefreshAffected.get(document.uri);
+    pendingPreRefreshAffected.delete(document.uri);
+
     await performanceMonitor.timeAsync('updateAndValidate', async () => {
         const allAffectedUris = await refreshDocumentSymbolTable(document);
+        if (preAffected) {
+            for (const u of preAffected) allAffectedUris.add(u);
+        }
         triggerValidation(document.uri, debounce, allAffectedUris);
     });
 }
@@ -358,6 +479,7 @@ connection.onRequest('ca65/analyzeSelection', async (params: { uri?: string; ran
     if (!params?.uri || !params?.range) {
         return null;
     }
+    await ensureDocumentRefreshed(params.uri);
     const document = documents.get(params.uri);
     if (!document) {
         return null;
@@ -382,20 +504,21 @@ connection.onDidChangeConfiguration(async () => {
         documentSettings.clear();
         clearResolvedDirsCache();
         clearExecutablePathCache();
+        clearUnopenedDocumentCache();
         invalidateOverlaySignatures();
-        await initializationGate.isInitialized;
+        await ensureDocumentRefreshed();
         abortValidation();
 
         const openDocs = documents.all();
-        for (const doc of openDocs) {
+        await mapWithConcurrency(openDocs, 16, async (doc) => {
             await refreshDocumentSymbolTable(doc);
-        }
+        });
 
         const validatedRoots = new Set<string>();
         for (const doc of openDocs) {
-            const roots = Array.from(includesGraph.getIncludingRoots(doc.uri));
-            const unvalidatedRoots = roots.filter(root => !validatedRoots.has(root));
-            if (roots.length === 0 || unvalidatedRoots.length > 0) {
+            const roots = includesGraph.getIncludingRootsArray(doc.uri);
+            const hasUnvalidatedRoot = roots.some(root => !validatedRoots.has(root));
+            if (roots.length === 0 || hasUnvalidatedRoot) {
                 for (const root of roots) validatedRoots.add(root);
                 triggerValidation(doc.uri, false);
             }
@@ -405,9 +528,24 @@ connection.onDidChangeConfiguration(async () => {
     }
 });
 
+documents.onDidSave((event) => {
+    markDocumentSaved(event.document.uri, event.document.version);
+    invalidateCachedDocument(event.document.uri);
+});
+
 documents.onDidClose((event) => {
-    documentSettings.delete(event.document.uri);
-    lastDocumentVersions.delete(event.document.uri);
+    const uri = event.document.uri;
+    const timer = pendingScanTimers.get(uri);
+    if (timer) {
+        clearTimeout(timer);
+        pendingScanTimers.delete(uri);
+    }
+    pendingRefreshDocs.delete(uri);
+    pendingPreRefreshAffected.delete(uri);
+    documentSettings.delete(uri);
+    lastDocumentVersions.delete(uri);
+    clearDocumentDirtyState(uri);
+    invalidateCachedDocument(uri);
 });
 
 documents.onDidChangeContent(async (change) => {
@@ -419,7 +557,12 @@ documents.onDidChangeContent(async (change) => {
     lastDocumentVersions.set(doc.uri, doc.version);
 
     try {
-        await updateAndValidate(doc, !isInitialOpen);
+        if (isInitialOpen) {
+            await updateAndValidate(doc, false);
+        } else {
+            markDocumentModifiedSinceSave(doc.uri);
+            scheduleDocumentRefresh(doc);
+        }
     } catch (err) {
         connection.console.error(`Failed to update document ${doc.uri}: ${err}`);
     }
@@ -432,16 +575,26 @@ connection.onDidChangeWatchedFiles(async (params: DidChangeWatchedFilesParams) =
     clearResolvedDirsCache();
     invalidateOverlaySignatures();
     for (const event of params.changes) {
+        invalidateCachedDocument(event.uri);
         const openDoc = documents.get(event.uri);
         if (openDoc) {
             // Already handled via onDidSave or onDidChangeContent
             continue;
         }
+        clearDocumentDirtyState(event.uri);
 
         // Handle files not currently open
         try {
             if (event.type === FileChangeType.Deleted) {
-                const affectedUris = new Set(includesGraph.getTranslationUnit(event.uri));
+                const timer = pendingScanTimers.get(event.uri);
+                if (timer) {
+                    clearTimeout(timer);
+                    pendingScanTimers.delete(event.uri);
+                }
+                pendingRefreshDocs.delete(event.uri);
+                pendingPreRefreshAffected.delete(event.uri);
+
+                const affectedUris = new Set(includesGraph.getTranslationUnitSet(event.uri));
                 affectedUris.delete(event.uri);
 
                 for (const uri of affectedUris) {
@@ -455,24 +608,18 @@ connection.onDidChangeWatchedFiles(async (params: DidChangeWatchedFilesParams) =
                 exportsMap.removeUri(event.uri);
                 connection.sendDiagnostics({ uri: event.uri, diagnostics: [] });
 
-                for (const otherUri of affectedUris) {
+                const rescannableUris = Array.from(affectedUris).filter(otherUri => {
                     const otherTable = symbolTables.get(otherUri);
-                    if (otherTable?.includedFiles.includes(event.uri)) {
-                        let docToRescan = documents.get(otherUri);
-                        if (!docToRescan) {
-                            try {
-                                const content = await fs.readFile(URI.parse(otherUri).fsPath, 'utf-8');
-                                docToRescan = TextDocument.create(otherUri, 'ca65', 0, content);
-                            } catch {
-                                continue;
-                            }
-                        }
-                        const updatedTable = await scanDocument(docToRescan);
-                        symbolTables.set(otherUri, updatedTable);
-                        includesGraph.updateIncludes(otherUri, updatedTable.includedFiles);
-                        exportsMap.updateExports(otherUri, updatedTable.exports);
-                    }
-                }
+                    return otherTable?.includedFiles.includes(event.uri);
+                });
+                await mapWithConcurrency(rescannableUris, 16, async (otherUri) => {
+                    const docToRescan = await getCachedTextDocument(otherUri, documents);
+                    if (!docToRescan) return;
+                    const updatedTable = await scanDocument(docToRescan);
+                    symbolTables.set(otherUri, updatedTable);
+                    includesGraph.updateIncludes(otherUri, updatedTable.includedFiles);
+                    exportsMap.updateExports(otherUri, updatedTable.exports);
+                });
 
                 for (const remainingUri of affectedUris) {
                     if (includesGraph.isTranslationUnitRoot(remainingUri)) {
@@ -482,7 +629,7 @@ connection.onDidChangeWatchedFiles(async (params: DidChangeWatchedFilesParams) =
                 continue;
             }
 
-            const filePath = URI.parse(event.uri).fsPath;
+            const filePath = uriToFsPath(event.uri);
             const content = await fs.readFile(filePath, 'utf-8');
             const doc = TextDocument.create(event.uri, 'ca65', 0, content);
             await updateAndValidate(doc);
@@ -504,9 +651,11 @@ initializeCallHierarchyProvider(connection, documents);
 initializeRenameProvider(connection, documents);
 initializeWorkspaceSymbolProvider(connection);
 initializeCompletionProvider(connection, documents);
+initializeSignatureHelpProvider(connection, documents);
 initializeInlayHintProvider(connection, documents);
 initializeDocumentHighlightProvider(connection, documents);
 initializeCodeActionProvider(connection, documents);
+initializeCodeLensProvider(connection, documents);
 initializeOverlayProvider(connection, documents);
 
 // --- Start the server ---

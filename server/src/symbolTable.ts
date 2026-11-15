@@ -4,8 +4,26 @@ import {
 } from 'vscode-languageserver-types';
 import { performanceMonitor } from './server';
 
+const EMPTY_SYMBOLS: readonly Symbol[] = [];
+const EMPTY_IMPORTS: readonly Import[] = [];
+const EMPTY_SCOPES: readonly Scope[] = [];
+const EMPTY_STRING_ARRAY: readonly string[] = Object.freeze([]);
+const EMPTY_REFS: readonly ReferenceInfo[] = Object.freeze([]);
+
+export interface DocumentLinkDirective {
+    line: number;
+    startChar: number;
+    endChar: number;
+    filename: string;
+    isBinary: boolean;
+    resolvedUri?: string | null;
+}
+
 export class SymbolTableEntity {
     range: Range;
+    private cachedScopeStack?: readonly string[];
+    private cachedQualifiedName?: string;
+    private cachedFullyQualifiedName?: string;
 
     constructor(
         public uri: string,
@@ -21,26 +39,45 @@ export class SymbolTableEntity {
     }
 
     getFullyQualifiedName(): string {
-        return `::` + [...this.getScopeStack(), this.name].join('::');
+        if (this.cachedFullyQualifiedName === undefined) {
+            this.cachedFullyQualifiedName = `::${this.getQualifiedName()}`;
+        }
+        return this.cachedFullyQualifiedName;
     }
 
     getQualifiedName(): string {
-        return [...this.getScopeStack(), this.name].join('::');
+        if (this.cachedQualifiedName === undefined) {
+            const stack = this.getScopeStack();
+            this.cachedQualifiedName = stack.length === 0
+                ? this.name
+                : `${stack.join('::')}::${this.name}`;
+        }
+        return this.cachedQualifiedName;
     }
 
-    getScopeStack(): string[] {
-        const scopeStack = [];
-        let scope = this.scope;
-        while (scope && scope.name !== '') {
-            scopeStack.unshift(scope.name);
-            scope = scope.scope
+    getScopeStack(): readonly string[] {
+        if (this.cachedScopeStack !== undefined) {
+            return this.cachedScopeStack;
         }
+        if (!this.scope || this.scope.name === '') {
+            this.cachedScopeStack = EMPTY_STRING_ARRAY;
+            return this.cachedScopeStack;
+        }
+
+        const scopeStack: string[] = [];
+        let scope: Scope | null = this.scope;
+        while (scope && scope.name !== '') {
+            scopeStack.push(scope.name);
+            scope = scope.scope;
+        }
+        scopeStack.reverse();
+        this.cachedScopeStack = scopeStack;
         return scopeStack;
     }
 }
 
 export enum SymbolKind {
-    Label = "label",    
+    Label = "label",
     ResLabel = "res label",
     DataLabel = "data label",
     StringLabel = "string label",
@@ -82,7 +119,6 @@ export class Import extends SymbolTableEntity {
     }
 }
 
-
 export enum ExportKind {
     Export = "export",
     Global = "global export"
@@ -110,9 +146,12 @@ export enum ScopeKind {
 }
 
 export class Scope extends SymbolTableEntity {
-    private childScopes: Map<string, Scope[]> = new Map();
-    private symbols: Map<string, Symbol[]> = new Map();
-    private imports: Map<string, Import[]> = new Map();
+    private symbols?: Map<string, Symbol>;
+    private duplicateSymbols?: Symbol[];
+    private imports?: Map<string, Import>;
+    private duplicateImports?: Import[];
+    private childScopes?: Map<string, Scope>;
+    private orderedChildScopes?: Scope[];
 
     constructor(
         uri: string,
@@ -121,7 +160,7 @@ export class Scope extends SymbolTableEntity {
         definition: Range,
         parentScope: Scope | null,
         public segment?: string,
-        private readonly onMutate?: () => void,
+        private readonly ownerTable?: SymbolTable,
     ) {
         super(uri, name, definition, parentScope, segment);
     }
@@ -132,12 +171,16 @@ export class Scope extends SymbolTableEntity {
         kind: SymbolKind,
         segment?: string
     ): Symbol {
-        if (!this.symbols.has(name)) {  
-            this.symbols.set(name, []);
-        }
         const symbol = new Symbol(this.uri, kind, name, definition, this, segment);
-        this.symbols.get(name)?.push(symbol);
-        this.onMutate?.();
+        if (!this.symbols) {
+            this.symbols = new Map();
+            this.symbols.set(name, symbol);
+        } else if (!this.symbols.has(name)) {
+            this.symbols.set(name, symbol);
+        } else {
+            (this.duplicateSymbols ??= []).push(symbol);
+        }
+        this.ownerTable?.invalidateDefinedEntities();
         return symbol;
     }
 
@@ -147,71 +190,69 @@ export class Scope extends SymbolTableEntity {
         kind: ImportKind,
         isZeroPage: boolean = false,
     ): Import {
-        if (!this.imports.has(name)) {  
-            this.imports.set(name, []);
-        }
         const importEntity = new Import(this.uri, kind, name, definition, this, isZeroPage);
-        this.imports.get(name)?.push(importEntity);
+        if (!this.imports) {
+            this.imports = new Map();
+            this.imports.set(name, importEntity);
+        } else if (!this.imports.has(name)) {
+            this.imports.set(name, importEntity);
+        } else {
+            (this.duplicateImports ??= []).push(importEntity);
+        }
         return importEntity;
     }
 
     addChildScope(name: string, definition: Range, kind: ScopeKind, segment?: string): Scope {
-        if (!this.childScopes.has(name)) {  
-            this.childScopes.set(name, []);
+        const scope = new Scope(this.uri, kind, name, definition, this, segment, this.ownerTable);
+        if (!this.childScopes) {
+            this.childScopes = new Map();
         }
-        const scope = new Scope(this.uri, kind, name, definition, this, segment, this.onMutate);
-        this.childScopes.get(name)?.push(scope);
-        this.onMutate?.();
+        if (!this.childScopes.has(name)) {
+            this.childScopes.set(name, scope);
+        }
+        (this.orderedChildScopes ??= []).push(scope);
+        this.ownerTable?.invalidateDefinedEntities();
         return scope;
     }
 
     getSymbol(name: string): Symbol | undefined {
-        const arr = this.symbols.get(name);
-        if (!arr) return undefined;
-
-        // Prefer exports and global last in case the symbol is defined in the same scope.
-        return arr[0];
+        return this.symbols?.get(name);
     }
 
     getSymbols(): Iterable<Symbol> {
-        return (function* (values: Iterable<Symbol[]>) {
-            for (const arr of values) {
-                yield* arr;
-            }
-        })(this.symbols.values());
+        if (!this.symbols) return EMPTY_SYMBOLS;
+        if (!this.duplicateSymbols) return this.symbols.values();
+        return [...this.symbols.values(), ...this.duplicateSymbols];
     }
 
     getImport(name: string): Import | undefined {
-        const arr = this.imports.get(name);
-        if (!arr) return undefined;
-
-        // Prefer exports and global last in case the symbol is defined in the same scope.
-        return arr[0];
+        return this.imports?.get(name);
     }
 
     getImports(): Iterable<Import> {
-        return (function* (values: Iterable<Import[]>) {
-            for (const arr of values) {
-                yield* arr;
-            }
-        })(this.imports.values());
+        if (!this.imports) return EMPTY_IMPORTS;
+        if (!this.duplicateImports) return this.imports.values();
+        return [...this.imports.values(), ...this.duplicateImports];
     }
 
     getChildScope(name: string): Scope | undefined {
-        return this.childScopes.get(name)?.[0];
+        return this.childScopes?.get(name);
     }
 
     getChildScopes(): Iterable<Scope> {
-        return (function* (values: Iterable<Scope[]>) {
-            for (const arr of values) {
-                yield* arr;
-            }
-        })(this.childScopes.values());
+        return this.orderedChildScopes ?? EMPTY_SCOPES;
+    }
+
+    /**
+     * Returns direct child scopes ordered monotonically by source start position.
+     */
+    getOrderedChildScopes(): readonly Scope[] {
+        return this.orderedChildScopes ?? EMPTY_SCOPES;
     }
 
     private findName(
         name: string,
-        qualifiers: string[],
+        qualifiers: readonly string[],
         context: ReferenceInfo['context'],
         allowImports: boolean
     ): SymbolTableEntity | undefined {
@@ -236,7 +277,7 @@ export class Scope extends SymbolTableEntity {
                     resolvedScope
                     && (
                         context === 'scope'
-                        || context === `sizeof`
+                        || context === 'sizeof'
                         || resolvedScope.kind === ScopeKind.Proc
                     )
                 ) {
@@ -244,7 +285,7 @@ export class Scope extends SymbolTableEntity {
                 }
 
                 const resolvedSymbol = nextScope.getSymbol(name);
-                if (resolvedSymbol && (context === 'symbol' || context === `sizeof`)) {
+                if (resolvedSymbol && (context === 'symbol' || context === 'sizeof')) {
                     return resolvedSymbol;
                 }
 
@@ -261,13 +302,8 @@ export class Scope extends SymbolTableEntity {
      * Finds the shortest, unambiguous name for a given entity, relative to the current scope.
      * It does this by testing progressively more qualified names until one resolves back
      * to the original entity.
-     * @param entity The entity to find a name for.
-     * @param context The resolution context (symbol, scope, etc.).
-     * @returns The shortest relative name as a string (e.g., "Loop" or "Player::Loop").
      */
-    public findRelativeName(
-        entity: SymbolTableEntity,
-    ): string {
+    public findRelativeName(entity: SymbolTableEntity): string {
         // Macro is unaffected by scopes
         if (entity instanceof Macro) {
             return entity.name;
@@ -275,47 +311,46 @@ export class Scope extends SymbolTableEntity {
 
         const name = entity.name;
         const entityScopeStack = entity.getScopeStack();
+        const context: ReferenceInfo['context'] = entity instanceof Scope ? 'scope' : 'symbol';
+
+        // Fast path for external top-level entities: only check unqualified collision in this file.
+        if (entityScopeStack.length === 0 && entity.uri !== this.uri) {
+            const resolvedEntity = this.findDefinitionOrImport(name, EMPTY_STRING_ARRAY, context);
+            if (!resolvedEntity || resolvedEntity === entity) {
+                return name;
+            }
+            return entity.getFullyQualifiedName();
+        }
 
         // Test names from least qualified (just the name) to most qualified.
         let foundConflict = false;
-        for (let i = 0; i <= entityScopeStack.length; i++) {
-            // On i=0, testQualifiers is []. We test just "name".
-            // On i=1, we take the last element of the stack. We test "parentScope::name".
-            // And so on, until we test the full path.
-            const testQualifiers = entityScopeStack.slice(entityScopeStack.length - i);
-            
-            let context: ReferenceInfo[`context`] = `symbol`;
-            if (entity instanceof Scope) {
-                context = `scope`
-            }
+        const stackLen = entityScopeStack.length;
+        for (let i = 0; i <= stackLen; i++) {
+            const testQualifiers = i === 0
+                ? EMPTY_STRING_ARRAY
+                : (i === stackLen ? entityScopeStack : entityScopeStack.slice(stackLen - i));
             const resolvedEntity = this.findDefinitionOrImport(name, testQualifiers, context);
             if (!resolvedEntity) continue;
 
-            // If resolving this test name from our current scope gives us back
-            // the original entity, we've found the shortest unambiguous name.
-
             if (resolvedEntity === entity) {
-                return [...testQualifiers, name].join('::');
+                if (i === 0) return name;
+                if (i === stackLen) return entity.getQualifiedName();
+                return `${testQualifiers.join('::')}::${name}`;
             }
 
             foundConflict = true;
         }
 
-        // If we didn't find our entity or any entity with the same same, the symbol may be defined
-        // in a different file. If so, we don't need the '::' leader since the other file's symbols
-        // will always be searched from the root scope and won't be shadowed by a local symbol.
         if (!foundConflict) {
-            return [...entityScopeStack, name].join('::')
+            return entity.getQualifiedName();
         }
 
-        // As a final fallback, if no relative name works (e.g., for a global symbol
-        // shadowed by a local one), use the absolute fully qualified name.
         return entity.getFullyQualifiedName();
     }
 
     findDefinitionOrImport(
         name: string,
-        qualifiers: string[],
+        qualifiers: readonly string[],
         context: ReferenceInfo['context']
     ): SymbolTableEntity | undefined {
         return this.findName(name, qualifiers, context, true);
@@ -323,7 +358,7 @@ export class Scope extends SymbolTableEntity {
 
     findDefinition(
         name: string,
-        qualifiers: string[],
+        qualifiers: readonly string[],
         context: ReferenceInfo['context']
     ): SymbolTableEntity | undefined {
         return this.findName(name, qualifiers, context, false);
@@ -341,6 +376,7 @@ export class Macro extends SymbolTableEntity {
         public kind: MacroKind,
         name: string,
         definition: Range,
+        public params: string[] = [],
     ) {
         super(uri, name, definition, null);
     }
@@ -350,13 +386,18 @@ export class ReferenceInfo {
     constructor(
         public uri: string,
         public name: string,
-        public qualifiers: string[], // Partially qualified parts of the referenced name
+        public qualifiers: readonly string[], // Partially qualified parts of the referenced name
         public context: 'symbol' | 'scope' | 'macro' | 'sizeof',
         public location: Range,
         public scope: Scope,
         // Effective calling entity for call hierarchy analysis.
         public callingEntity?: SymbolTableEntity,
     ) {}
+}
+
+function comparePosToStart(position: Position, start: Position): number {
+    if (position.line !== start.line) return position.line - start.line;
+    return position.character - start.character;
 }
 
 /**
@@ -370,15 +411,21 @@ export class SymbolTable {
     public references: ReferenceInfo[] = [];
     private referencesByName: Map<string, ReferenceInfo[]> = new Map();
     private referencesByLine: Map<number, ReferenceInfo[]> = new Map();
+    private referencesByCaller?: Map<SymbolTableEntity, ReferenceInfo[]>;
 
     public includedFiles: string[] = [];
     public unresolvedIncludes: string[] = [];
+    public documentLinkDirectives: DocumentLinkDirective[] = [];
 
     public anonymousLabelLines: number[] = [];
     public anonymousLabelReferences: Map<number, Range[]> = new Map();
 
     public imports: Import[] = [];
     public exports: Export[] = [];
+    private cachedImportNames?: Set<string>;
+    private cachedImportCount = -1;
+    private cachedExportNames?: Set<string>;
+    private cachedExportCount = -1;
 
     constructor(public uri: string) {
         this.rootScope = new Scope(
@@ -391,8 +438,36 @@ export class SymbolTable {
             },
             null,
             undefined,
-            () => { this.cachedDefinedEntities = null; },
+            this,
         );
+    }
+
+    public hasImport(name: string): boolean {
+        if (this.imports.length === 0) return false;
+        if (!this.cachedImportNames || this.cachedImportCount !== this.imports.length) {
+            const set = new Set<string>();
+            for (const imp of this.imports) set.add(imp.name);
+            this.cachedImportNames = set;
+            this.cachedImportCount = this.imports.length;
+        }
+        return this.cachedImportNames.has(name);
+    }
+
+    public hasExport(name: string): boolean {
+        if (this.exports.length === 0) return false;
+        if (!this.cachedExportNames || this.cachedExportCount !== this.exports.length) {
+            const set = new Set<string>();
+            for (const exp of this.exports) set.add(exp.name);
+            this.cachedExportNames = set;
+            this.cachedExportCount = this.exports.length;
+        }
+        return this.cachedExportNames.has(name);
+    }
+
+    public invalidateDefinedEntities(): void {
+        if (this.cachedDefinedEntities !== null) {
+            this.cachedDefinedEntities = null;
+        }
     }
 
     getUri(): string {
@@ -407,16 +482,15 @@ export class SymbolTable {
         name: string,
         definition: Range,
         kind: MacroKind,
+        params: string[] = [],
     ): Macro {
-        const macro = new Macro(this.uri, kind, name, definition);
+        const macro = new Macro(this.uri, kind, name, definition, params);
         this.macros.set(name, macro);
-        this.cachedDefinedEntities = null;
+        this.invalidateDefinedEntities();
         return macro;
     }
 
-    getMacro(
-        name: string,
-    ): Macro | undefined {
+    getMacro(name: string): Macro | undefined {
         return this.macros.get(name);
     }
 
@@ -426,7 +500,6 @@ export class SymbolTable {
 
     /**
      * Adds a record of a symbol/scope/macro usage found during parsing.
-     * @param info A detailed object describing the reference.
      */
     public addReference(info: ReferenceInfo): void {
         this.references.push(info);
@@ -445,6 +518,16 @@ export class SymbolTable {
             this.referencesByLine.set(line, byLine);
         }
         byLine.push(info);
+
+        if (info.callingEntity) {
+            this.referencesByCaller ??= new Map();
+            let byCaller = this.referencesByCaller.get(info.callingEntity);
+            if (!byCaller) {
+                byCaller = [];
+                this.referencesByCaller.set(info.callingEntity, byCaller);
+            }
+            byCaller.push(info);
+        }
     }
 
     public getReferencesByName(name: string): ReferenceInfo[] {
@@ -455,8 +538,12 @@ export class SymbolTable {
         return this.referencesByLine.get(line) || [];
     }
 
+    public getReferencesByCaller(caller: SymbolTableEntity): readonly ReferenceInfo[] {
+        return this.referencesByCaller?.get(caller) ?? EMPTY_REFS;
+    }
+
     /**
-     * Traverses the entire tree once to collect all defined items (cached until mutated).
+     * Traverses the scope tree once to collect all defined items (cached until mutated).
      * @returns Flat list of all symbols, scopes, and macros (excluding imports and exports).
      */
     getAllDefinedEntities(): SymbolTableEntity[] {
@@ -464,32 +551,27 @@ export class SymbolTable {
             return this.cachedDefinedEntities;
         }
 
-        const symbols: Symbol[] = [];
-        const scopes: Scope[] = [];
+        const out: SymbolTableEntity[] = [];
 
         function traverse(scope: Scope) {
-            // Add the scope itself (excluding the unnamed root)
             if (scope.name !== '') {
-                scopes.push(scope);
+                out.push(scope);
             }
-
-            // Add all symbols from the current scope
-            symbols.push(...scope.getSymbols());
-
-            // Recurse into children
-            for (const child of scope.getChildScopes()) {
+            for (const sym of scope.getSymbols()) {
+                out.push(sym);
+            }
+            for (const child of scope.getOrderedChildScopes()) {
                 traverse(child);
             }
         }
 
         traverse(this.rootScope);
+        for (const macro of this.macros.values()) {
+            out.push(macro);
+        }
 
-        this.cachedDefinedEntities = [
-            ...symbols,
-            ...scopes,
-            ...this.getAllMacros(),
-        ];
-        return this.cachedDefinedEntities;
+        this.cachedDefinedEntities = out;
+        return out;
     }
 
     getAllReferences(): ReferenceInfo[] {
@@ -510,7 +592,6 @@ export class SymbolTable {
         });
     }
 
-    // A helper function to check if a position is within a range.
     isPositionInRange(position: Position, range: Range): boolean {
         if (position.line < range.start.line || position.line > range.end.line) {
             return false;
@@ -525,28 +606,38 @@ export class SymbolTable {
     }
 
     /**
-     * Recursively finds the most specific scope at a given position.
-     * @param scope The scope to search within (start with the file's root scope).
-     * @param position The cursor's position.
-     * @returns The most specific scope containing the position, or undefined.
+     * Finds the innermost scope containing a given position using binary search across sibling scopes.
      */
     getScopeAtPosition(position: Position, scope: Scope = this.rootScope): Scope | undefined {
-        // TODO: Make this function more expedient, possibly using binary search.
-        // 1. First, check if the position is even within this scope. If not, we're done.
-        if (!this.isPositionInRange(position, scope.range)) return;
+        if (!this.isPositionInRange(position, scope.range)) return undefined;
 
-        // 2. Recursively search the child scopes. A child is always more specific.
-        for (const childScope of scope.getChildScopes()) {
-            const foundInChild = this.getScopeAtPosition(position, childScope);
-            if (foundInChild) {
-                // We found a more specific scope inside a child, so that's our answer.
-                return foundInChild;
+        let current: Scope = scope;
+        while (true) {
+            const children = current.getOrderedChildScopes();
+            if (children.length === 0) {
+                return current;
+            }
+
+            // Find the rightmost child whose start <= position.
+            let lo = 0;
+            let hi = children.length - 1;
+            let candidateIdx = -1;
+            while (lo <= hi) {
+                const mid = (lo + hi) >>> 1;
+                if (comparePosToStart(position, children[mid].range.start) >= 0) {
+                    candidateIdx = mid;
+                    lo = mid + 1;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+
+            if (candidateIdx >= 0 && this.isPositionInRange(position, children[candidateIdx].range)) {
+                current = children[candidateIdx];
+            } else {
+                return current;
             }
         }
-
-        // 3. The position is in this scope, but not in any of its children.
-        //    Therefore, this is the most specific scope.
-        return scope;
     }
 
     /**
@@ -555,26 +646,22 @@ export class SymbolTable {
     toString(): string {
         const lines: string[] = [`=== Symbol Table Dump for ${this.uri} ===`];
 
-        // --- Root Scope ---
         const traverseScope = (scope: Scope, indent = 0) => {
             const pad = '  '.repeat(indent);
             const name = scope.name || '<root>';
             lines.push(`${pad} - Scope: ${name} [${scope.kind}] (${scope.range.start.line}:${scope.range.start.character} - ${scope.range.end.line}:${scope.range.end.character})`);
 
-            // Symbols
             for (const sym of scope.getSymbols()) {
                 lines.push(`${pad}  * Symbol: ${sym.name} [${sym.kind}] (${sym.range.start.line}:${sym.range.start.character} - ${sym.range.end.line}:${sym.range.end.character})${sym.segment ? ' Segment: ' + sym.segment : ''}`);
             }
 
-            // Recurse child scopes
-            for (const child of scope.getChildScopes()) {
+            for (const child of scope.getOrderedChildScopes()) {
                 traverseScope(child, indent + 1);
             }
         };
 
         traverseScope(this.getRootScope());
 
-        // --- Includes ---
         if (this.includedFiles.length > 0) {
             lines.push('\n --- Included Files ---');
             for (const file of this.includedFiles) {
@@ -582,16 +669,13 @@ export class SymbolTable {
             }
         }
 
-        // --- Macros ---
-        const allMacros = this.getAllMacros();
-        if (allMacros.length > 0) {
+        if (this.macros.size > 0) {
             lines.push('\n --- Macros ---');
-            for (const macro of allMacros) {
+            for (const macro of this.macros.values()) {
                 lines.push(`  * Macro: ${macro.name} [${macro.kind}] (${macro.range.start.line}:${macro.range.start.character} - ${macro.range.end.line}:${macro.range.end.character})`);
             }
         }
 
-        // --- References ---
         if (this.references.length > 0) {
             lines.push('\n --- References ---');
             for (const ref of this.references) {

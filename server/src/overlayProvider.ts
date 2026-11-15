@@ -1,11 +1,11 @@
 import { _Connection, TextDocuments } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { URI } from 'vscode-uri';
-import * as fs from 'fs/promises';
 import { assembleTranslationUnit } from './diagnostics';
+import { getCachedTextDocument } from './documentCache';
 import { LstLineInfo, parseLstContent } from './lstParser';
 import { resolveWorkspaceRelativeDirs } from './pathUtils';
 import {
+    ensureDocumentRefreshed,
     getDocumentSettings,
     includesGraph,
     initializationGate,
@@ -32,6 +32,17 @@ export interface OverlayDataResponse {
 interface ValidLstCacheEntry {
     signature: string;
     byUri: Map<string, Map<number, LstLineInfo>>;
+    mappedByUri: Map<string, OverlayLineItem[]>;
+}
+
+function getMappedOverlayLines(entry: ValidLstCacheEntry, uri: string): OverlayLineItem[] {
+    let mapped = entry.mappedByUri.get(uri);
+    if (!mapped) {
+        const lstLines = entry.byUri.get(uri);
+        mapped = lstLines ? mapLstLinesToOverlay(lstLines) : [];
+        entry.mappedByUri.set(uri, mapped);
+    }
+    return mapped;
 }
 
 const lastValidLstCache = new Map<string, ValidLstCacheEntry>();
@@ -88,7 +99,8 @@ function getTuSignature(
     }
     const includeDirsKey = Array.isArray(settings?.includeDirs) ? settings.includeDirs.join(',') : '';
     const binIncludeDirsKey = Array.isArray(settings?.binIncludeDirs) ? settings.binIncludeDirs.join(',') : '';
-    return `${rootUri}|${Boolean(settings?.implicitImports)}|${Boolean(settings?.lineContinuations)}|${includeDirsKey}|${binIncludeDirsKey}|${docVersions.join(';')}`;
+    const additionalArgsKey = Array.isArray(settings?.additionalArgs) ? settings.additionalArgs.join(' ') : '';
+    return `${rootUri}|${Boolean(settings?.implicitImports)}|${Boolean(settings?.lineContinuations)}|${includeDirsKey}|${binIncludeDirsKey}|${additionalArgsKey}|${docVersions.join(';')}`;
 }
 
 export function initializeOverlayProvider(connection: _Connection, documents: TextDocuments<TextDocument>): void {
@@ -97,6 +109,7 @@ export function initializeOverlayProvider(connection: _Connection, documents: Te
         if (!params?.uri) return { source: 'none', lines: [] };
 
         const targetUri = params.uri;
+        await ensureDocumentRefreshed?.(targetUri);
 
         // Abort any previous listing run for the same URI
         activeOverlayControllers.get(targetUri)?.abort();
@@ -109,32 +122,23 @@ export function initializeOverlayProvider(connection: _Connection, documents: Te
                 const settings = await getDocumentSettings(targetUri);
                 if (signal.aborted) return { source: 'none', lines: [] };
 
-                const roots = Array.from(includesGraph.getIncludingRoots(targetUri));
+                const roots = includesGraph.getIncludingRootsArray(targetUri);
                 const rootUri = roots[0] ?? targetUri;
-                const tuUris = new Set<string>(includesGraph.getTranslationUnit(targetUri));
+                const tuUris = new Set<string>(includesGraph.getTranslationUnitSet(targetUri));
                 tuUris.add(targetUri);
                 tuUris.add(rootUri);
 
                 const signature = getTuSignature(rootUri, tuUris, documents, settings);
                 const cached = lastValidLstCache.get(rootUri);
                 if (cached && cached.signature === signature) {
-                    const cachedLines = cached.byUri.get(targetUri) ?? new Map();
                     return {
                         source: 'live-lst',
                         stale: false,
-                        lines: mapLstLinesToOverlay(cachedLines),
+                        lines: getMappedOverlayLines(cached, targetUri),
                     };
                 }
 
-                let rootDoc = documents.get(rootUri) ?? null;
-                if (!rootDoc) {
-                    try {
-                        const content = await fs.readFile(URI.parse(rootUri).fsPath, 'utf-8');
-                        rootDoc = TextDocument.create(rootUri, 'ca65', 0, content);
-                    } catch {
-                        rootDoc = null;
-                    }
-                }
+                const rootDoc = await getCachedTextDocument(rootUri, documents);
 
                 const assembled = rootDoc
                     ? await assembleTranslationUnit(rootDoc, signal, {
@@ -148,24 +152,27 @@ export function initializeOverlayProvider(connection: _Connection, documents: Te
                 if (assembled && !assembled.hasErrors && assembled.listingContent) {
                     const includeDirs = resolveWorkspaceRelativeDirs(rootUri, settings?.includeDirs);
                     const byUri = parseLstContent(assembled.listingContent, rootUri, includeDirs);
-                    lastValidLstCache.set(rootUri, { signature, byUri });
-                    const targetLines = byUri.get(targetUri) ?? new Map();
+                    const newEntry: ValidLstCacheEntry = {
+                        signature,
+                        byUri,
+                        mappedByUri: new Map(),
+                    };
+                    lastValidLstCache.set(rootUri, newEntry);
                     return {
                         source: 'live-lst',
                         stale: false,
-                        lines: mapLstLinesToOverlay(targetLines),
+                        lines: getMappedOverlayLines(newEntry, targetUri),
                     };
                 }
 
                 // Assembly failed or ca65 was unavailable: keep last valid output marked stale if available.
                 const hasErrors = Boolean(assembled?.hasErrors);
                 if (cached) {
-                    const prevLines = cached.byUri.get(targetUri) ?? new Map();
                     return {
                         source: 'live-lst',
                         stale: true,
                         error: hasErrors,
-                        lines: mapLstLinesToOverlay(prevLines),
+                        lines: getMappedOverlayLines(cached, targetUri),
                     };
                 }
 

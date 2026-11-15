@@ -1,5 +1,15 @@
 import { Export } from "./symbolTable";
 
+const EMPTY_EXPORTS: Export[] = [];
+
+function exportsEquivalent(a: Export, b: Export): boolean {
+    return a.name === b.name
+        && a.kind === b.kind
+        && a.isZeroPage === b.isZeroPage
+        && a.definition.start.line === b.definition.start.line
+        && a.definition.start.character === b.definition.start.character;
+}
+
 export class ExportsMap {
     /** Per-URI export maps */
     private perUri: Map<string, Map<string, Export>> = new Map();
@@ -9,24 +19,71 @@ export class ExportsMap {
 
     /**
      * Update the exports for a given URI.
-     * Replaces the old exports from that URI with the new set.
+     * Replaces the old exports from that URI with the new set, returning true if the export signatures changed.
      */
-    updateExports(uri: string, newExports: Export[]): void {
-        // Remove old exports from this URI
+    updateExports(uri: string, newExports: Export[]): boolean {
         const oldMap = this.perUri.get(uri);
-        if (oldMap) {
+
+        if (!oldMap && newExports.length === 0) {
+            return false;
+        }
+
+        if (newExports.length === 0 && oldMap) {
             for (const [baseName, exp] of oldMap) {
                 this.removeFromGlobal(baseName, exp);
             }
+            this.perUri.delete(uri);
+            return true;
         }
 
-        // Build new per-URI map
+        // Fast equality check: if names, kinds, zero-page flags, and lines all match, swap refs in-place if needed.
+        if (oldMap && oldMap.size === newExports.length) {
+            let allMatch = true;
+            for (const exp of newExports) {
+                const prev = oldMap.get(exp.name);
+                if (!prev || !exportsEquivalent(prev, exp)) {
+                    allMatch = false;
+                    break;
+                }
+            }
+            if (allMatch) {
+                for (const exp of newExports) {
+                    const prev = oldMap.get(exp.name)!;
+                    if (prev !== exp) {
+                        oldMap.set(exp.name, exp);
+                        this.replaceInGlobal(exp.name, prev, exp);
+                    }
+                }
+                return false;
+            }
+        }
+
         const newMap = new Map<string, Export>();
         for (const exp of newExports) {
             newMap.set(exp.name, exp);
-            this.addToGlobal(exp.name, exp);
         }
+
+        // Remove exports no longer present and update retained names in place.
+        if (oldMap) {
+            for (const [baseName, prev] of oldMap) {
+                const next = newMap.get(baseName);
+                if (!next) {
+                    this.removeFromGlobal(baseName, prev);
+                } else {
+                    this.replaceInGlobal(baseName, prev, next);
+                }
+            }
+        }
+
+        // Add newly introduced exports
+        for (const [baseName, next] of newMap) {
+            if (!oldMap || !oldMap.has(baseName)) {
+                this.addToGlobal(baseName, next);
+            }
+        }
+
         this.perUri.set(uri, newMap);
+        return true;
     }
 
     /**
@@ -46,8 +103,7 @@ export class ExportsMap {
      * Get the "active" list of exports by base name.
      */
     get(baseName: string): Export[] {
-        const exports = this.global.get(baseName);
-        return exports ? exports : [];
+        return this.global.get(baseName) ?? EMPTY_EXPORTS;
     }
 
     // --- Internals ---
@@ -59,6 +115,20 @@ export class ExportsMap {
             this.global.set(baseName, stack);
         }
         stack.push(exp);
+    }
+
+    private replaceInGlobal(baseName: string, prev: Export, next: Export) {
+        const stack = this.global.get(baseName);
+        if (!stack) {
+            this.addToGlobal(baseName, next);
+            return;
+        }
+        const idx = stack.lastIndexOf(prev);
+        if (idx >= 0) {
+            stack[idx] = next;
+        } else {
+            stack.push(next);
+        }
     }
 
     private removeFromGlobal(baseName: string, exp: Export) {

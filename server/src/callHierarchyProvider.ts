@@ -9,7 +9,7 @@ import {
     CallHierarchyOutgoingCall,
 } from 'vscode-languageserver/node';
 import { Range, TextDocument } from 'vscode-languageserver-textdocument';
-import { getDocumentSettings, includesGraph, initializationGate, symbolTables } from './server';
+import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, symbolTables } from './server';
 import { getAllReferencesForEntity, resolveReferenceAtPosition, getLSPSymbolKind, resolveReference } from './symbolResolver';
 import { Scope, ScopeKind, Symbol, SymbolTableEntity } from './symbolTable';
 
@@ -37,6 +37,7 @@ export function initializeCallHierarchyProvider(
             params: CallHierarchyPrepareParams
         ): Promise<CallHierarchyItem[] | null> => {
             await initializationGate.isInitialized;
+            await ensureDocumentRefreshed?.(params.textDocument.uri);
 
             const document = documents.get(params.textDocument.uri);
             if (!document) {
@@ -65,6 +66,7 @@ export function initializeCallHierarchyProvider(
             params: CallHierarchyIncomingCallsParams
         ): Promise<CallHierarchyIncomingCall[] | null> => {
             await initializationGate.isInitialized;
+            await ensureDocumentRefreshed?.(params.item.uri);
 
             const settings = await getDocumentSettings(params.item.uri);
 
@@ -115,6 +117,7 @@ export function initializeCallHierarchyProvider(
             params: CallHierarchyOutgoingCallsParams
         ): Promise<CallHierarchyOutgoingCall[] | null> => {
             await initializationGate.isInitialized;
+            await ensureDocumentRefreshed?.(params.item.uri);
 
             const settings = await getDocumentSettings(params.item.uri);
 
@@ -128,8 +131,7 @@ export function initializeCallHierarchyProvider(
             const entity = symbolTable.getRootScope().findDefinitionOrImport(name, scopeStack, 'symbol');
             if (!entity) return null;
 
-            const outgoingReferences =
-                symbolTable.references.filter(ref => ref.callingEntity === entity);
+            const outgoingReferences = symbolTable.getReferencesByCaller(entity);
 
             // 3. Resolve each outgoing reference and group them by what they call (the definition).
             const callsByDefinition = new Map<SymbolTableEntity, Range[]>();

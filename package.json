@@ -85,8 +85,7 @@
                         "type": "string"
                     },
                     "default": [
-                        ".inc",
-                        ".s"
+                        ".inc"
                     ]
                 },
                 "ca65.anonymousLabelIndexHints": {
@@ -121,9 +120,22 @@
                     "description": "Enables `--feature line_continuations` for ca65 diagnostics. Please ensure that your ca65 executable supports this feature if you enable this setting.",
                     "default": false
                 },
+                "ca65.additionalArgs": {
+                    "type": "array",
+                    "description": "Additional command-line arguments to pass to `ca65` during diagnostics and side-by-side listing generation (e.g. `\"-D\"`, `\"DEBUG=1\"`, `\"--cpu\"`, `\"65C02\"`). Output flags (`-o`, `-l`, `--listing`) are ignored.",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": []
+                },
                 "ca65.enableStatusBarCycleCount": {
                     "type": "boolean",
                     "description": "Shows estimated 6502 cycle count and byte size for the selected instructions (or current line) in the status bar.",
+                    "default": true
+                },
+                "ca65.enableProcCodeLens": {
+                    "type": "boolean",
+                    "description": "Shows byte size, cycle estimate, and reference count CodeLens annotations above `.proc` definitions.",
                     "default": true
                 }
             }
@@ -163,13 +175,7 @@
                     "group": "navigation"
                 }
             ]
-        },
-        "snippets": [
-            {
-                "language": "ca65",
-                "path": "./snippets/ca65.json"
-            }
-        ]
+        }
     },
     "scripts": {
         "vscode:prepublish": "npm run compile",
@@ -189,10 +195,11 @@
         "@types/node": "^24.3.0",
         "@types/vscode": "^1.85.0",
         "@types/which": "^3.0.4",
-        "typescript": "^5.3.3"
+        "typescript": "^5.9.3"
     },
     "dependencies": {
         "glob": "^14.0.6",
+        "node": "^27.0.0-alpha.0.1.0",
         "vscode-languageclient": "^9.0.1",
         "vscode-languageserver": "^9.0.1",
         "vscode-languageserver-protocol": "^3.17.5",

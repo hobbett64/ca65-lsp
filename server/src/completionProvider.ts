@@ -1,8 +1,11 @@
+import * as path from 'path';
+import * as fs from 'fs/promises';
 import {
     _Connection,
     TextDocuments,
     CompletionItem,
     CompletionItemKind,
+    MarkupKind,
     TextDocumentPositionParams,
     Range,
     TextEdit,
@@ -10,15 +13,23 @@ import {
     Position,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
+import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
 import { directiveData, mnemonicData, resolveDirectiveAlias } from './dataManager';
 import { Export, Import, ImportKind, Macro, MacroKind, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
-import { getCheapLocalLabelDefinitions } from './cheapLocalLabelUtils';
+import { findCheapLocalLabelDefinition, getCheapLocalLabelDefinitions } from './cheapLocalLabelUtils';
 import { IncludesGraph } from './includesGraph';
 import { getLSPSymbolKind, resolveExport, resolveImport } from './symbolResolver';
-import { findCanonicalIncludePath, getWorkspaceRelativePath } from './pathUtils';
+import { findCanonicalIncludePath, getSearchDirectories, getWorkspaceRelativePath, uriToFsPath } from './pathUtils';
 import { Ca65Settings } from './settings';
 import { isAutoIncludable, makeImportEdit, makeIncludeEdit } from './editUtils';
+import { getCachedTextDocument } from './documentCache';
+import {
+    extractLeadingDocInfo,
+    formatSourceLink,
+    generateDirectiveHoverMarkdown,
+    generateMnemonicHoverMarkdown,
+    generateSymbolTableEntityMarkdown,
+} from './hoverProvider';
 
 const CHEAP_LOCAL_ITEM_PREFIX = 0;
 const VISIBLE_ITEM_PREFIX = 1;
@@ -83,17 +94,25 @@ function getCompletionItemKind(kind: LSPSymbolKind): CompletionItemKind {
 }
 
 function getCompletionItemDetail(entity: SymbolTableEntity): string | undefined {
+    if (entity instanceof Macro) {
+        if (entity.kind === MacroKind.Define) {
+            return entity.params.length > 0 ? `.define (${entity.params.join(', ')})` : entity.kind;
+        }
+        return entity.params.length > 0 ? `.macro ${entity.params.join(', ')}` : entity.kind;
+    }
     if (
-        entity instanceof Macro
-        || entity instanceof Symbol
+        entity instanceof Symbol
         || entity instanceof Scope
         || entity instanceof Import
         || entity instanceof Export
     ) {
-        return entity.kind
+        if (entity.segment && entity.segment !== 'CODE') {
+            return `${entity.kind} · ${entity.segment}`;
+        }
+        return entity.kind;
     }
 
-    return undefined
+    return undefined;
 }
 
 interface StaticCompletionTemplates {
@@ -116,7 +135,8 @@ function getStaticTemplates(): StaticCompletionTemplates {
             label: lowerCaseKey,
             kind: CompletionItemKind.Keyword,
             detail: 'Mnemonic',
-            sortText: MNEMONIC_ITEM_PREFIX + lowerCaseKey
+            sortText: MNEMONIC_ITEM_PREFIX + lowerCaseKey,
+            data: { staticKind: 'mnemonic', key },
         });
     }
 
@@ -132,14 +152,16 @@ function getStaticTemplates(): StaticCompletionTemplates {
                 label: directiveName,
                 kind: CompletionItemKind.Keyword,
                 detail: 'Control Command',
-                sortText: DIRECTIVE_ITEM_PREFIX + directiveName
+                sortText: DIRECTIVE_ITEM_PREFIX + directiveName,
+                data: { staticKind: 'directive', key },
             });
         } else if (directive.type === 'Pseudo-function' || directive.type === 'Pseudo-variable') {
             operandDirectives.push({
                 label: directiveName,
                 kind: directive.type === 'Pseudo-function' ? CompletionItemKind.Function : CompletionItemKind.Variable,
                 detail: directive.type,
-                sortText: DIRECTIVE_ITEM_PREFIX + directiveName
+                sortText: DIRECTIVE_ITEM_PREFIX + directiveName,
+                data: { staticKind: 'directive', key },
             });
         }
     }
@@ -155,12 +177,19 @@ function getCheapLocalLabelCompletions(
     currentWord: string
 ): CompletionItem[] {
     return getCheapLocalLabelDefinitions(document, position).map(labelName => {
+        const defLoc = findCheapLocalLabelDefinition(document, position, labelName);
         const item: CompletionItem = {
             label: labelName,
             kind: CompletionItemKind.Reference,
             detail: 'cheap_local_label',
             textEdit: TextEdit.replace(replacementRange, labelName),
-            sortText: CHEAP_LOCAL_ITEM_PREFIX + labelName.slice(1)
+            sortText: CHEAP_LOCAL_ITEM_PREFIX + labelName.slice(1),
+            data: defLoc ? {
+                uri: document.uri,
+                targetUri: defLoc.uri,
+                targetLine: defLoc.range.start.line,
+                targetName: labelName,
+            } : undefined,
         };
         if (!currentWord.startsWith('@')) {
             item.filterText = labelName.substring(1);
@@ -169,9 +198,102 @@ function getCheapLocalLabelCompletions(
     });
 }
 
+interface TargetResolveRef {
+    uri: string;
+    targetUri: string;
+    targetLine: number;
+    targetName: string;
+}
+
+interface CachedMacroCompletionMeta {
+    entity: Macro;
+    label: string;
+    kind: CompletionItemKind;
+    detail: string | undefined;
+    sortText: string;
+}
+
+interface CachedValueEntityMeta {
+    entity: SymbolTableEntity;
+    fqn: string;
+    kind: CompletionItemKind;
+    detail: string | undefined;
+}
+
+interface CachedTableCompletionMeta {
+    macroCommands: CachedMacroCompletionMeta[];
+    valueEntities: CachedValueEntityMeta[];
+}
+
+const tableCompletionCache = new WeakMap<SymbolTable, CachedTableCompletionMeta>();
+
+function makeTargetData(documentUri: string, entity: SymbolTableEntity): TargetResolveRef {
+    return {
+        uri: documentUri,
+        targetUri: entity.uri,
+        targetLine: entity.definition.start.line,
+        targetName: entity.name,
+    };
+}
+
+function getTableCompletionMeta(symbolTable: SymbolTable): CachedTableCompletionMeta {
+    let cached = tableCompletionCache.get(symbolTable);
+    if (cached) {
+        return cached;
+    }
+
+    const macroCommands: CachedMacroCompletionMeta[] = [];
+    for (const macro of symbolTable.getAllMacros()) {
+        if (macro.kind === MacroKind.Macro) {
+            macroCommands.push({
+                entity: macro,
+                label: macro.name,
+                kind: getCompletionItemKind(getLSPSymbolKind(macro)),
+                detail: getCompletionItemDetail(macro),
+                sortText: VISIBLE_ITEM_PREFIX + macro.name,
+            });
+        }
+    }
+
+    const valueEntities: CachedValueEntityMeta[] = [];
+    for (const entity of symbolTable.getAllDefinedEntities()) {
+        if (isValueCompletionEntity(entity)) {
+            valueEntities.push({
+                entity,
+                fqn: entity.getFullyQualifiedName(),
+                kind: getCompletionItemKind(getLSPSymbolKind(entity)),
+                detail: getCompletionItemDetail(entity),
+            });
+        }
+    }
+
+    cached = { macroCommands, valueEntities };
+    tableCompletionCache.set(symbolTable, cached);
+    return cached;
+}
+
+function appendStaticTemplates(
+    target: CompletionItem[],
+    templates: readonly Omit<CompletionItem, 'textEdit'>[],
+    replacementRange: Range
+): void {
+    for (let i = 0; i < templates.length; i++) {
+        const t = templates[i];
+        target.push({
+            label: t.label,
+            kind: t.kind,
+            detail: t.detail,
+            sortText: t.sortText,
+            data: t.data,
+            textEdit: TextEdit.replace(replacementRange, t.label),
+        });
+    }
+}
+
 export function initializeCompletionProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
     connection.onCompletion(async (params: TextDocumentPositionParams): Promise<CompletionItem[]> => {
         await initializationGate.isInitialized;
+        await ensureDocumentRefreshed?.(params.textDocument.uri);
 
         return performanceMonitor.timeAsync("onCompletion", async () => {
             const document = documents.get(params.textDocument.uri);
@@ -183,20 +305,45 @@ export function initializeCompletionProvider(connection: _Connection, documents:
 
             const lineToCursor = document.getText({ start: { line: params.position.line, character: 0 }, end: params.position });
 
+            // --- INCLUDE / INCBIN FILE PATH CONTEXT ---
+            const includePathMatch = lineToCursor.match(/^\s*\.(include|incbin)\s+"([^"]*)$/i);
+            if (includePathMatch) {
+                const isIncbin = includePathMatch[1].toLowerCase() === 'incbin';
+                const partialPath = includePathMatch[2];
+                return getIncludePathCompletions(document.uri, position, partialPath, isIncbin, settings);
+            }
+
             const anonLabelRefRegex = /:[-+<>]+$/;
             if (anonLabelRefRegex.test(lineToCursor)) {
-                // Anonymous labels are considered to be words in language-configuration.json in order
-                // to show them in the document highlights. However, this also results in them being
-                // valid parts of autocompletion, which results in a nuissance autocompletion window
-                // during typing. Suppress this autocompletion if we're in the middle of typing an
-                // anonymous label refrence.
+                // Suppress nuisance completion while typing anonymous label references
                 return [];
             }
 
             const fullLineUntrimmed = document.getText(Range.create(params.position.line, 0, params.position.line + 1, 0));
-            
+
             const wordMatch = lineToCursor.match(/[a-zA-Z0-9_.:@]*$/);
             const currentWord = wordMatch ? wordMatch[0] : '';
+
+            // --- SCOPE-QUALIFIED CONTEXT (`Scope::...` or `::...`) ---
+            const lastDoubleColonIdx = currentWord.lastIndexOf('::');
+            if (lastDoubleColonIdx >= 0) {
+                const afterColon = currentWord.slice(lastDoubleColonIdx + 2);
+                const memberRange = Range.create(
+                    params.position.line,
+                    params.position.character - afterColon.length,
+                    params.position.line,
+                    params.position.character
+                );
+                return getScopeQualifiedCompletions(
+                    document,
+                    position,
+                    currentWord.slice(0, lastDoubleColonIdx),
+                    memberRange,
+                    symbolTables,
+                    includesGraph
+                );
+            }
+
             const replacementRange = Range.create(
                 params.position.line,
                 params.position.character - currentWord.length,
@@ -215,28 +362,24 @@ export function initializeCompletionProvider(connection: _Connection, documents:
 
             if (isCommandContext) {
                 // --- COMMAND CONTEXT: Suggest mnemonics, control commands, and macros ---
-                const completionItems: CompletionItem[] = [
-                    ...templates.mnemonics.map(item => ({
-                        ...item,
-                        textEdit: TextEdit.replace(replacementRange, item.label),
-                    })),
-                    ...templates.controlDirectives.map(item => ({
-                        ...item,
-                        textEdit: TextEdit.replace(replacementRange, item.label),
-                    })),
-                    ...await getCompletionMacros(document, symbolTables, settings),
-                ];
+                const completionItems: CompletionItem[] = [];
+                appendStaticTemplates(completionItems, templates.mnemonics, replacementRange);
+                appendStaticTemplates(completionItems, templates.controlDirectives, replacementRange);
+                const macroItems = await getCompletionMacros(document, symbolTables, settings);
+                for (let i = 0; i < macroItems.length; i++) {
+                    completionItems.push(macroItems[i]);
+                }
                 return completionItems;
             } else {
                 // --- OPERAND CONTEXT: Suggest labels, constants, variables, and pseudo-functions/variables ---
-                const completionItems: CompletionItem[] = [
-                    ...await getCompletionSymbols(document, position, symbolTables, includesGraph, settings),
-                    ...getCheapLocalLabelCompletions(document, params.position, replacementRange, currentWord),
-                    ...templates.operandDirectives.map(item => ({
-                        ...item,
-                        textEdit: TextEdit.replace(replacementRange, item.label),
-                    })),
-                ];
+                const completionItems: CompletionItem[] = await getCompletionSymbols(
+                    document, position, symbolTables, includesGraph, settings
+                );
+                const cheapLocalItems = getCheapLocalLabelCompletions(document, params.position, replacementRange, currentWord);
+                for (let i = 0; i < cheapLocalItems.length; i++) {
+                    completionItems.push(cheapLocalItems[i]);
+                }
+                appendStaticTemplates(completionItems, templates.operandDirectives, replacementRange);
                 return completionItems;
             }
         });
@@ -245,19 +388,66 @@ export function initializeCompletionProvider(connection: _Connection, documents:
     connection.onCompletionResolve(
         async (item: CompletionItem): Promise<CompletionItem> => {
             const data = item.data;
-            if (!data || !data.uri) {
+            if (!data) {
                 return item;
             }
 
-            const document = documents.get(data.uri);
-            if (!document) {
+            if (data.staticKind === 'mnemonic' && data.key) {
+                const info = mnemonicData[data.key];
+                if (info) {
+                    item.documentation = {
+                        kind: MarkupKind.Markdown,
+                        value: generateMnemonicHoverMarkdown(data.key, info),
+                    };
+                }
                 return item;
             }
 
-            if (data.editAction === 'include' && data.includePath) {
-                item.additionalTextEdits = [makeIncludeEdit(document, data.includePath)];
-            } else if (data.editAction === 'import' && data.importSymbol) {
-                item.additionalTextEdits = [makeImportEdit(document, data.importSymbol)];
+            if (data.staticKind === 'directive' && data.key) {
+                const info = resolveDirectiveAlias(data.key);
+                if (info) {
+                    item.documentation = {
+                        kind: MarkupKind.Markdown,
+                        value: generateDirectiveHoverMarkdown(`.${data.key}`, info),
+                    };
+                }
+                return item;
+            }
+
+            const sourceDoc = data.uri ? documents.get(data.uri) : undefined;
+            if (sourceDoc) {
+                if (data.editAction === 'include' && data.includePath) {
+                    item.additionalTextEdits = [makeIncludeEdit(sourceDoc, data.includePath)];
+                } else if (data.editAction === 'import' && data.importSymbol) {
+                    item.additionalTextEdits = [makeImportEdit(sourceDoc, data.importSymbol)];
+                }
+            }
+
+            if (data.targetUri && typeof data.targetLine === 'number') {
+                const targetDoc = await getCachedTextDocument(data.targetUri, documents);
+                if (targetDoc) {
+                    const settingsUri = data.uri || data.targetUri;
+                    const settings = await getDocumentSettings(settingsUri);
+                    const targetTable = symbolTables.get(data.targetUri);
+                    const targetEntity = findResolvedEntity(targetTable, data.targetLine, data.targetName);
+                    if (targetEntity) {
+                        item.documentation = {
+                            kind: MarkupKind.Markdown,
+                            value: generateSymbolTableEntityMarkdown(targetEntity, targetDoc, settings.implicitImports),
+                        };
+                    } else {
+                        const { docCommentBlock } = extractLeadingDocInfo(targetDoc, data.targetLine);
+                        const parts = [`\`\`\`ca65\n${data.targetName || ''}\n\`\`\``];
+                        if (docCommentBlock) {
+                            parts.push(`\`\`\`ca65\n${docCommentBlock}\n\`\`\``);
+                        }
+                        parts.push(`Defined in ${formatSourceLink(data.targetUri, data.targetLine + 1)}`);
+                        item.documentation = {
+                            kind: MarkupKind.Markdown,
+                            value: parts.join('\n\n'),
+                        };
+                    }
+                }
             }
 
             return item;
@@ -265,9 +455,228 @@ export function initializeCompletionProvider(connection: _Connection, documents:
     );
 }
 
-function getVisibleTranslationUnitUris(uri: string, graph: IncludesGraph): readonly string[] {
-    const tuUris = graph.getTranslationUnit(uri);
-    return tuUris.length > 0 ? tuUris : [uri];
+function findResolvedEntity(
+    symbolTable: SymbolTable | undefined,
+    targetLine: number,
+    targetName?: string
+): SymbolTableEntity | undefined {
+    if (!symbolTable) return undefined;
+    for (const entity of symbolTable.getAllDefinedEntities()) {
+        if (entity.definition.start.line === targetLine && (!targetName || entity.name === targetName)) {
+            return entity;
+        }
+    }
+    return undefined;
+}
+
+async function getIncludePathCompletions(
+    currentFileUri: string,
+    position: Position,
+    partialPath: string,
+    isIncbin: boolean,
+    settings: Ca65Settings
+): Promise<CompletionItem[]> {
+    const slashIdx = partialPath.lastIndexOf('/');
+    const subDirPrefix = slashIdx >= 0 ? partialPath.slice(0, slashIdx + 1) : '';
+    const replaceRange = Range.create(
+        position.line,
+        position.character - (partialPath.length - (slashIdx + 1)),
+        position.line,
+        position.character
+    );
+
+    const currentFileFsPath = uriToFsPath(currentFileUri);
+    const dirs = getSearchDirectories(
+        currentFileUri,
+        isIncbin ? settings.binIncludeDirs : settings.includeDirs
+    );
+    const items: CompletionItem[] = [];
+    const seenNames = new Set<string>();
+    const includeSourceExts = new Set(['.inc', '.s', '.asm', '.h', '.mac', '.ca65']);
+
+    for (const baseDir of dirs) {
+        const searchDir = subDirPrefix ? path.resolve(baseDir, subDirPrefix) : baseDir;
+        let entries;
+        try {
+            entries = await fs.readdir(searchDir, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+
+        for (const entry of entries) {
+            if (entry.name.startsWith('.') || entry.name === 'node_modules') {
+                continue;
+            }
+            const isDir = entry.isDirectory();
+            if (!isDir && !entry.isFile()) continue;
+            // Do not suggest the current file including itself
+            if (!isDir && path.resolve(searchDir, entry.name) === currentFileFsPath) {
+                continue;
+            }
+
+            const insertLabel = isDir ? `${entry.name}/` : entry.name;
+            if (seenNames.has(insertLabel)) continue;
+            seenNames.add(insertLabel);
+
+            const ext = path.extname(entry.name).toLowerCase();
+            let sortGroup = '2';
+            if (isDir) {
+                sortGroup = '0';
+            } else if (!isIncbin && includeSourceExts.has(ext)) {
+                sortGroup = '1';
+            }
+
+            items.push({
+                label: insertLabel,
+                kind: isDir ? CompletionItemKind.Folder : CompletionItemKind.File,
+                detail: isDir ? 'Folder' : (isIncbin ? 'Binary file' : 'Include file'),
+                sortText: sortGroup + insertLabel.toLowerCase(),
+                textEdit: TextEdit.replace(replaceRange, insertLabel),
+            });
+        }
+    }
+
+    return items;
+}
+
+function resolveScopesForQualifier(
+    currentScope: Scope | undefined,
+    rawQualifier: string,
+    visibleUriSet: ReadonlySet<string>,
+    allSymbolTables: Map<string, SymbolTable>
+): { scopes: Scope[]; isGlobalRoot: boolean } {
+    if (rawQualifier === '') {
+        // Bare `::` -> root scopes across translation unit
+        const roots: Scope[] = [];
+        for (const depUri of visibleUriSet) {
+            const st = allSymbolTables.get(depUri);
+            if (st) roots.push(st.getRootScope());
+        }
+        return { scopes: roots, isGlobalRoot: true };
+    }
+
+    const isGlobal = rawQualifier.startsWith('::');
+    const segments = (isGlobal ? rawQualifier.slice(2) : rawQualifier).split('::').filter(Boolean);
+    if (segments.length === 0) {
+        return { scopes: [], isGlobalRoot: false };
+    }
+
+    const matched = new Set<Scope>();
+
+    const descendFrom = (startScope: Scope): Scope | undefined => {
+        let cur: Scope | undefined = startScope;
+        for (const seg of segments) {
+            cur = cur.getChildScope(seg);
+            if (!cur) return undefined;
+        }
+        return cur;
+    };
+
+    if (!isGlobal && currentScope) {
+        let walk: Scope | null = currentScope;
+        while (walk) {
+            const hit = descendFrom(walk);
+            if (hit) {
+                matched.add(hit);
+            }
+            walk = walk.scope;
+        }
+    }
+
+    for (const depUri of visibleUriSet) {
+        const st = allSymbolTables.get(depUri);
+        if (!st) continue;
+        const hit = descendFrom(st.getRootScope());
+        if (hit) {
+            matched.add(hit);
+        }
+    }
+
+    return { scopes: Array.from(matched), isGlobalRoot: false };
+}
+
+function getScopeQualifiedCompletions(
+    document: TextDocument,
+    position: Position,
+    rawQualifier: string,
+    replacementRange: Range,
+    allSymbolTables: Map<string, SymbolTable>,
+    graph: IncludesGraph
+): CompletionItem[] {
+    const symbolTable = allSymbolTables.get(document.uri);
+    if (!symbolTable) return [];
+
+    const currentScope = symbolTable.getScopeAtPosition(position);
+    const visibleUriSet = getVisibleTranslationUnitSet(document.uri, graph);
+    const { scopes, isGlobalRoot } = resolveScopesForQualifier(
+        currentScope,
+        rawQualifier,
+        visibleUriSet,
+        allSymbolTables
+    );
+
+    const items: CompletionItem[] = [];
+    const seenKeys = new Set<string>();
+
+    const pushEntity = (entity: SymbolTableEntity, overrideKind?: CompletionItemKind, overrideDetail?: string) => {
+        const key = `${entity.name}\0${entity.uri}\0${entity.definition.start.line}`;
+        if (seenKeys.has(key)) return;
+        seenKeys.add(key);
+
+        items.push({
+            label: entity.name,
+            kind: overrideKind ?? getCompletionItemKind(getLSPSymbolKind(entity)),
+            detail: overrideDetail ?? getCompletionItemDetail(entity),
+            sortText: VISIBLE_ITEM_PREFIX + entity.name,
+            textEdit: TextEdit.replace(replacementRange, entity.name),
+            data: makeTargetData(document.uri, entity),
+        });
+    };
+
+    for (const scope of scopes) {
+        for (const sym of scope.getSymbols()) {
+            pushEntity(sym);
+        }
+        for (const childScope of scope.getOrderedChildScopes()) {
+            if (!childScope.name) continue;
+            pushEntity(childScope);
+        }
+        for (const imp of scope.getImports()) {
+            const resolved = resolveImport(imp.name, allSymbolTables, graph);
+            if (resolved) {
+                if (imp.kind === ImportKind.Global && visibleUriSet.has(resolved.uri)) {
+                    continue;
+                }
+                pushEntity(
+                    resolved,
+                    getCompletionItemKind(getLSPSymbolKind(resolved)),
+                    getCompletionItemDetail(resolved)
+                );
+            } else {
+                pushEntity(imp);
+            }
+        }
+    }
+
+    if (isGlobalRoot) {
+        for (const depUri of visibleUriSet) {
+            const st = allSymbolTables.get(depUri);
+            if (!st) continue;
+            for (const macro of st.getAllMacros()) {
+                if (macro.kind === MacroKind.Define) {
+                    pushEntity(macro);
+                }
+            }
+        }
+    }
+
+    return items;
+}
+
+function getVisibleTranslationUnitSet(uri: string, graph: IncludesGraph): ReadonlySet<string> {
+    const tuSet = graph.getTranslationUnitSet(uri);
+    if (tuSet.size > 0) return tuSet;
+    return new Set([uri]);
 }
 
 function isValueCompletionEntity(entity: SymbolTableEntity): boolean {
@@ -281,7 +690,8 @@ function makeAutoIncludeCompletionItem(
     label: string,
     kind: CompletionItemKind,
     detail: string | undefined,
-    includePath: string
+    includePath: string,
+    targetEntity: SymbolTableEntity
 ): CompletionItem {
     return {
         label,
@@ -294,7 +704,10 @@ function makeAutoIncludeCompletionItem(
         data: {
             uri: documentUri,
             editAction: 'include',
-            includePath
+            includePath,
+            targetUri: targetEntity.uri,
+            targetLine: targetEntity.definition.start.line,
+            targetName: targetEntity.name,
         }
     };
 }
@@ -305,29 +718,22 @@ async function getCompletionMacros(
     settings: Ca65Settings
 ): Promise<CompletionItem[]> {
     const completionItems: CompletionItem[] = [];
+    const seenUris = getVisibleTranslationUnitSet(document.uri, includesGraph);
 
-    const seenUris: Set<string> = new Set();
-
-    for (const dep of getVisibleTranslationUnitUris(document.uri, includesGraph)) {
-        if (seenUris.has(dep)) continue;
-        seenUris.add(dep);
-
+    for (const dep of seenUris) {
         const symbolTable = allSymbolTables.get(dep);
         if (!symbolTable) continue;
 
-        for (const macro of symbolTable.getAllMacros()) {
-            if (macro.kind === MacroKind.Macro) {
-                let label = macro.name;
-                let kind = getCompletionItemKind(getLSPSymbolKind(macro));
-                let detail = `${getCompletionItemDetail(macro)}`;
-
-                completionItems.push({
-                    label,
-                    kind,
-                    detail,
-                    sortText: VISIBLE_ITEM_PREFIX + label
-                });
-            }
+        const { macroCommands } = getTableCompletionMeta(symbolTable);
+        for (let i = 0; i < macroCommands.length; i++) {
+            const m = macroCommands[i];
+            completionItems.push({
+                label: m.label,
+                kind: m.kind,
+                detail: m.detail,
+                sortText: m.sortText,
+                data: makeTargetData(document.uri, m.entity),
+            });
         }
     }
 
@@ -335,30 +741,29 @@ async function getCompletionMacros(
     for (const [otherUri, symbolTable] of allSymbolTables) {
         if (seenUris.has(otherUri)) continue;
         if (!isAutoIncludable(otherUri, settings)) continue;
-        let canonicalPath;
-        for (const macro of symbolTable.getAllMacros()) {
-            if (macro.kind !== MacroKind.Macro) continue;
-            if (!canonicalPath) {
-                canonicalPath =
-                    findCanonicalIncludePath(document.uri, otherUri, settings.includeDirs);
-            }
 
-            let label = macro.name;
-            let kind = getCompletionItemKind(getLSPSymbolKind(macro));
-            let detail = `${getCompletionItemDetail(macro)}`;
+        const { macroCommands } = getTableCompletionMeta(symbolTable);
+        if (macroCommands.length === 0) continue;
 
+        const canonicalPath = findCanonicalIncludePath(document.uri, otherUri, settings.includeDirs);
+        const autoSortPrefix = AUTO_INCLUDE_ITEM_PREFIX;
+        for (let i = 0; i < macroCommands.length; i++) {
+            const m = macroCommands[i];
             completionItems.push({
-                label,
-                kind,
-                detail,
+                label: m.label,
+                kind: m.kind,
+                detail: m.detail,
                 labelDetails: {
                     description: `include ${canonicalPath}`
                 },
-                sortText: AUTO_INCLUDE_ITEM_PREFIX + label,
+                sortText: autoSortPrefix + m.label,
                 data: {
                     uri: document.uri,
                     editAction: 'include',
-                    includePath: canonicalPath
+                    includePath: canonicalPath,
+                    targetUri: m.entity.uri,
+                    targetLine: m.entity.definition.start.line,
+                    targetName: m.entity.name,
                 }
             });
         }
@@ -383,31 +788,26 @@ async function getCompletionSymbols(
     const completionItems: CompletionItem[] = [];
 
     // Gather all locally visible symbols across the current translation unit
-    const visibleUris = getVisibleTranslationUnitUris(document.uri, includesGraph);
-    const visibleUriSet = new Set(visibleUris);
-    const includedUris: Set<string> = new Set();
+    const visibleUriSet = getVisibleTranslationUnitSet(document.uri, includesGraph);
     const seenImports: Set<string> = new Set();
     const visibleFqns: Set<string> = new Set();
-    for (const depUri of visibleUris) {
-        if (includedUris.has(depUri)) continue;
-        includedUris.add(depUri);
+    for (const depUri of visibleUriSet) {
         const depSymbolTable = allSymbolTables.get(depUri);
         if (!depSymbolTable) continue;
 
-        for (const entity of depSymbolTable.getAllDefinedEntities()) {
-            if (isValueCompletionEntity(entity)) {
-                visibleFqns.add(entity.getFullyQualifiedName());
-                const label = currentScope.findRelativeName(entity);
-                const kind = getCompletionItemKind(getLSPSymbolKind(entity));
-                const detail = `${getCompletionItemDetail(entity)}`;
+        const { valueEntities } = getTableCompletionMeta(depSymbolTable);
+        for (let i = 0; i < valueEntities.length; i++) {
+            const entry = valueEntities[i];
+            visibleFqns.add(entry.fqn);
+            const label = currentScope.findRelativeName(entry.entity);
 
-                completionItems.push({
-                    label,
-                    kind,
-                    detail,
-                    sortText: VISIBLE_ITEM_PREFIX + label
-                });
-            }
+            completionItems.push({
+                label,
+                kind: entry.kind,
+                detail: entry.detail,
+                sortText: VISIBLE_ITEM_PREFIX + label,
+                data: makeTargetData(document.uri, entry.entity),
+            });
         }
 
         for (const importEntity of depSymbolTable.imports) {
@@ -416,7 +816,8 @@ async function getCompletionSymbols(
 
             const label = currentScope.findRelativeName(importEntity);
             let kind = getCompletionItemKind(getLSPSymbolKind(importEntity));
-            let detail = `${getCompletionItemDetail(importEntity)}`;
+            let detail = getCompletionItemDetail(importEntity);
+            let targetEntity: SymbolTableEntity = importEntity;
 
             // Try to resolve it to a definition we can use for the details. Otherwise, treat
             // it as an opaque import, which may be the case if it is a header for a library
@@ -427,28 +828,30 @@ async function getCompletionSymbols(
                 // This may be a global that is acting as an export, which we should ignore.
                 if (
                     importEntity.kind === ImportKind.Global
-                    && includesGraph.getTranslationUnit(importEntity.uri).includes(resolvedImport.uri)
+                    && includesGraph.getTranslationUnitSet(importEntity.uri).has(resolvedImport.uri)
                 ) {
                     continue;
                 }
 
                 if (visibleUriSet.has(resolvedImport.uri)) continue;
                 kind = getCompletionItemKind(getLSPSymbolKind(resolvedImport));
-                detail = `${getCompletionItemDetail(resolvedImport)}`;
+                detail = getCompletionItemDetail(resolvedImport);
+                targetEntity = resolvedImport;
             }
 
             completionItems.push({
                 label,
                 kind,
                 detail,
-                sortText: VISIBLE_ITEM_PREFIX + label
+                sortText: VISIBLE_ITEM_PREFIX + label,
+                data: makeTargetData(document.uri, targetEntity),
             });
         }
     }
 
     // Search the workspace for symbols that we can auto-include or import
     for (const [uri, otherSymbolTable] of allSymbolTables) {
-        if (includedUris.has(uri)) continue;
+        if (visibleUriSet.has(uri)) continue;
 
         if (isAutoIncludable(uri, settings)) {
             let canonicalPath: string | undefined;
@@ -460,17 +863,18 @@ async function getCompletionSymbols(
             };
 
             // Suggest including .inc files that define a symbol
-            for (const entity of otherSymbolTable.getAllDefinedEntities()) {
-                if (isValueCompletionEntity(entity)) {
-                    if (visibleFqns.has(entity.getFullyQualifiedName())) continue;
-                    completionItems.push(makeAutoIncludeCompletionItem(
-                        document.uri,
-                        currentScope.findRelativeName(entity),
-                        getCompletionItemKind(getLSPSymbolKind(entity)),
-                        `${getCompletionItemDetail(entity)}`,
-                        getCanonicalPath()
-                    ));
-                }
+            const { valueEntities } = getTableCompletionMeta(otherSymbolTable);
+            for (let i = 0; i < valueEntities.length; i++) {
+                const entry = valueEntities[i];
+                if (visibleFqns.has(entry.fqn)) continue;
+                completionItems.push(makeAutoIncludeCompletionItem(
+                    document.uri,
+                    currentScope.findRelativeName(entry.entity),
+                    entry.kind,
+                    entry.detail,
+                    getCanonicalPath(),
+                    entry.entity
+                ));
             }
 
             // Suggest including files that import symbols (i.e. headers)
@@ -479,7 +883,8 @@ async function getCompletionSymbols(
 
                 const label = currentScope.findRelativeName(importEntity);
                 let kind = getCompletionItemKind(getLSPSymbolKind(importEntity));
-                let detail = `${getCompletionItemDetail(importEntity)}`;
+                let detail = getCompletionItemDetail(importEntity);
+                let targetEntity: SymbolTableEntity = importEntity;
 
                 // Try to resolve it to a definition we can use for the details. Otherwise, treat
                 // it as an opaque import, which may be the case if it is a header for a library
@@ -488,7 +893,8 @@ async function getCompletionSymbols(
                     resolveImport(importEntity.name, allSymbolTables, includesGraph);
                 if (resolvedExport) {
                     kind = getCompletionItemKind(getLSPSymbolKind(resolvedExport));
-                    detail = `${getCompletionItemDetail(resolvedExport)}`;
+                    detail = getCompletionItemDetail(resolvedExport);
+                    targetEntity = resolvedExport;
                 }
 
                 completionItems.push(makeAutoIncludeCompletionItem(
@@ -496,7 +902,8 @@ async function getCompletionSymbols(
                     label,
                     kind,
                     detail,
-                    getCanonicalPath()
+                    getCanonicalPath(),
+                    targetEntity
                 ));
             }
         }
@@ -512,20 +919,21 @@ async function getCompletionSymbols(
 
             const label = currentScope.findRelativeName(exportEntity);
             const kind = getCompletionItemKind(getLSPSymbolKind(resolvedExport));
-            const detail = `${getCompletionItemDetail(resolvedExport)}`;
+            const detail = getCompletionItemDetail(resolvedExport);
             let labelDetails;
-            let data;
+            const data: Record<string, any> = {
+                uri: document.uri,
+                targetUri: resolvedExport.uri,
+                targetLine: resolvedExport.definition.start.line,
+                targetName: resolvedExport.name,
+            };
             if (!settings.implicitImports) {
                 const relativeUri = getWorkspaceRelativePath(resolvedExport.uri);
                 labelDetails = {
                     description: `import from ${relativeUri}`
                 };
-
-                data = {
-                    uri: document.uri,
-                    editAction: 'import',
-                    importSymbol: resolvedExport.name
-                };
+                data.editAction = 'import';
+                data.importSymbol = resolvedExport.name;
             }
 
             completionItems.push({

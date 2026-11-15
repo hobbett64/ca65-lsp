@@ -10,12 +10,11 @@ import {
     TextEdit,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { URI } from 'vscode-uri';
-import * as fs from 'fs/promises';
 import { findCommentStart } from './documentScanner';
 import { getLineText, isAutoIncludable, makeExportEdit, makeImportEdit, makeIncludeEdit } from './editUtils';
 import { findCanonicalIncludePath, getWorkspaceRelativePath } from './pathUtils';
 import {
+    ensureDocumentRefreshed,
     exportsMap,
     getDocumentSettings,
     includesGraph,
@@ -26,6 +25,7 @@ import {
 import { Ca65Settings } from './settings';
 import { resolveExport, resolveReference } from './symbolResolver';
 import { Macro, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
+import { getCachedTextDocument } from './documentCache';
 
 function rangesOverlap(a: Range, b: Range): boolean {
     if (a.end.line < b.start.line || b.end.line < a.start.line) return false;
@@ -67,21 +67,7 @@ async function getDocumentForEdit(
     documents: TextDocuments<TextDocument>,
     cache: Map<string, TextDocument | null>
 ): Promise<TextDocument | null> {
-    if (cache.has(uri)) return cache.get(uri) ?? null;
-    const openDoc = documents.get(uri);
-    if (openDoc) {
-        cache.set(uri, openDoc);
-        return openDoc;
-    }
-    try {
-        const content = await fs.readFile(URI.parse(uri).fsPath, 'utf-8');
-        const tempDoc = TextDocument.create(uri, 'ca65', 0, content);
-        cache.set(uri, tempDoc);
-        return tempDoc;
-    } catch {
-        cache.set(uri, null);
-        return null;
-    }
+    return getCachedTextDocument(uri, documents, cache);
 }
 
 async function buildUnresolvedSymbolQuickFixes(
@@ -99,9 +85,8 @@ async function buildUnresolvedSymbolQuickFixes(
         return;
     }
 
-    const tuUris = new Set(includesGraph.getTranslationUnit(document.uri));
-    tuUris.add(document.uri);
-    const alreadyImported = symbolTable.imports.some(imp => imp.name === symbolName);
+    const tuUris = includesGraph.getTranslationUnitSet(document.uri);
+    const alreadyImported = symbolTable.hasImport(symbolName);
     const importCandidates: CodeAction[] = [];
 
     // 1. Exported in another workspace file -> `.import` / `.importzp`
@@ -109,7 +94,7 @@ async function buildUnresolvedSymbolQuickFixes(
         const matchingExports = exportsMap.get(symbolName);
         const seenExportUris = new Set<string>();
         for (const exp of matchingExports) {
-            if (tuUris.has(exp.uri)) continue;
+            if (exp.uri === document.uri || tuUris.has(exp.uri)) continue;
             const resolved = resolveExport(exp, symbolTables, includesGraph);
             const targetUri = resolved?.uri ?? exp.uri;
             if (seenExportUris.has(targetUri)) continue;
@@ -138,12 +123,12 @@ async function buildUnresolvedSymbolQuickFixes(
     // 2. Defined / macro-declared / imported in an auto-includable file -> `.include`
     const includeCandidates: CodeAction[] = [];
     for (const [otherUri, otherTable] of symbolTables) {
-        if (tuUris.has(otherUri) || !isAutoIncludable(otherUri, settings)) {
+        if (otherUri === document.uri || tuUris.has(otherUri) || !isAutoIncludable(otherUri, settings)) {
             continue;
         }
         const hasRootSymbol = Boolean(otherTable.getRootScope().findDefinition(symbolName, [], 'symbol'));
         const hasMacro = Boolean(otherTable.getMacro(symbolName));
-        const hasImport = otherTable.imports.some(imp => imp.name === symbolName);
+        const hasImport = otherTable.hasImport(symbolName);
         if (!hasRootSymbol && !hasMacro && !hasImport) {
             continue;
         }
@@ -169,7 +154,7 @@ async function buildUnresolvedSymbolQuickFixes(
     const exportAndImportCandidates: CodeAction[] = [];
     if (!alreadyImported && !settings.implicitImports && importCandidates.length === 0) {
         for (const [otherUri, otherTable] of symbolTables) {
-            if (tuUris.has(otherUri) || isAutoIncludable(otherUri, settings)) {
+            if (otherUri === document.uri || tuUris.has(otherUri) || isAutoIncludable(otherUri, settings)) {
                 continue;
             }
             const defEntity = otherTable.getRootScope().findDefinition(symbolName, [], 'symbol');
@@ -246,9 +231,34 @@ function buildUnusedSymbolQuickFixes(
     if (!match) return;
 
     const symName = match[1];
-    const entity = symbolTable.getAllDefinedEntities().find(
-        e => e.name === symName && (rangesEqual(e.definition, diag.range) || rangesOverlap(e.definition, diag.range))
-    );
+    const matchesDiagRange = (e: SymbolTableEntity): boolean =>
+        e.name === symName && (rangesEqual(e.definition, diag.range) || rangesOverlap(e.definition, diag.range));
+
+    let entity: SymbolTableEntity | undefined;
+    const scope = symbolTable.getScopeAtPosition(diag.range.start);
+    if (scope) {
+        if (matchesDiagRange(scope)) {
+            entity = scope;
+        } else {
+            const sym = scope.getSymbol(symName);
+            if (sym && matchesDiagRange(sym)) {
+                entity = sym;
+            } else {
+                const childScope = scope.getChildScope(symName);
+                if (childScope && matchesDiagRange(childScope)) {
+                    entity = childScope;
+                }
+            }
+        }
+    }
+    if (!entity) {
+        const macro = symbolTable.getMacro(symName);
+        if (macro && matchesDiagRange(macro)) {
+            entity = macro;
+        } else {
+            entity = symbolTable.getAllDefinedEntities().find(matchesDiagRange);
+        }
+    }
     if (!entity) return;
 
     const removeTitle = `Remove unused ${entity instanceof Symbol || entity instanceof Scope || entity instanceof Macro ? entity.kind : 'symbol'} '${entity.name}'`;
@@ -268,7 +278,7 @@ function buildUnusedSymbolQuickFixes(
 
     const isRootScope = entity.scope?.name === '';
     const isExportable = entity instanceof Symbol || (entity instanceof Scope && entity.kind === ScopeKind.Proc);
-    const alreadyExported = symbolTable.exports.some(exp => exp.name === entity.name);
+    const alreadyExported = symbolTable.hasExport(entity.name);
     if (isRootScope && isExportable && !alreadyExported) {
         const useZp = isZeroPageEntity(entity);
         const directive = useZp ? '.exportzp' : '.export';
@@ -287,6 +297,84 @@ function buildUnusedSymbolQuickFixes(
             });
         }
     }
+}
+
+function buildImportMismatchQuickFix(
+    diag: Diagnostic,
+    document: TextDocument,
+    seenTitles: Set<string>,
+    outActions: CodeAction[]
+): void {
+    if (diag.code !== 'import-zp-expected' && diag.code !== 'import-abs-expected') {
+        return;
+    }
+
+    const lineNum = diag.range.start.line;
+    if (lineNum < 0 || lineNum >= document.lineCount) return;
+
+    const lineText = getLineText(document, lineNum);
+    const commentIdx = findCommentStart(lineText);
+    const codePart = commentIdx >= 0 ? lineText.slice(0, commentIdx) : lineText;
+
+    const directiveMatch = codePart.match(/^(\s*)(\.(?:importzp|import|globalzp|global))\b(.*)$/i);
+    if (!directiveMatch) return;
+
+    const [, indent, directive, rest] = directiveMatch;
+    const lowerDir = directive.toLowerCase();
+    const wantZp = diag.code === 'import-zp-expected';
+    if ((wantZp && lowerDir.endsWith('zp')) || (!wantZp && !lowerDir.endsWith('zp'))) {
+        return;
+    }
+
+    const isUpper = directive === directive.toUpperCase();
+    let swappedDirective: string;
+    if (lowerDir === '.import') swappedDirective = isUpper ? '.IMPORTZP' : '.importzp';
+    else if (lowerDir === '.importzp') swappedDirective = isUpper ? '.IMPORT' : '.import';
+    else if (lowerDir === '.global') swappedDirective = isUpper ? '.GLOBALZP' : '.globalzp';
+    else swappedDirective = isUpper ? '.GLOBAL' : '.global';
+
+    const symName = document.getText(diag.range).trim();
+    const title = `Change '${directive}' to '${swappedDirective}'${symName ? ` for '${symName}'` : ''}`;
+    if (seenTitles.has(title)) return;
+    seenTitles.add(title);
+
+    const edits: TextEdit[] = [];
+    if (!rest.includes(',')) {
+        const dirStart = indent.length;
+        const dirEnd = dirStart + directive.length;
+        edits.push(TextEdit.replace(Range.create(lineNum, dirStart, lineNum, dirEnd), swappedDirective));
+    } else if (symName) {
+        const relStart = diag.range.start.character;
+        const relEnd = diag.range.end.character;
+        const before = codePart.slice(0, relStart);
+        const after = codePart.slice(relEnd);
+        const trailingCommaMatch = after.match(/^\s*,\s*/);
+        const leadingCommaMatch = before.match(/\s*,\s*$/);
+        if (trailingCommaMatch) {
+            edits.push(TextEdit.del(Range.create(lineNum, relStart, lineNum, relEnd + trailingCommaMatch[0].length)));
+        } else if (leadingCommaMatch) {
+            edits.push(TextEdit.del(Range.create(lineNum, relStart - leadingCommaMatch[0].length, lineNum, relEnd)));
+        }
+        if (lineNum + 1 < document.lineCount) {
+            edits.push(TextEdit.insert(Position.create(lineNum + 1, 0), `${indent}${swappedDirective} ${symName}\n`));
+        } else {
+            edits.push(TextEdit.insert(Position.create(lineNum, lineText.length), `\n${indent}${swappedDirective} ${symName}`));
+        }
+    } else {
+        return;
+    }
+
+    outActions.push({
+        title,
+        kind: CodeActionKind.QuickFix,
+        isPreferred: true,
+        diagnostics: [diag],
+        edit: {
+            changes: {
+                [document.uri]: edits,
+            },
+        },
+    });
 }
 
 interface NumberLiteralHit {
@@ -414,6 +502,7 @@ function buildNumberConversionActions(
 export function initializeCodeActionProvider(connection: _Connection, documents: TextDocuments<TextDocument>): void {
     connection.onCodeAction(async (params: CodeActionParams): Promise<CodeAction[]> => {
         await initializationGate.isInitialized;
+        await ensureDocumentRefreshed?.(params.textDocument.uri);
 
         return performanceMonitor.timeAsync('onCodeAction', async () => {
             const document = documents.get(params.textDocument.uri);
@@ -441,6 +530,7 @@ export function initializeCodeActionProvider(connection: _Connection, documents:
                 for (const diag of params.context.diagnostics) {
                     if (diag.source === 'ca65-lsp') {
                         buildUnusedSymbolQuickFixes(diag, document, symbolTable, seenTitles, actions);
+                        buildImportMismatchQuickFix(diag, document, seenTitles, actions);
                         continue;
                     }
 

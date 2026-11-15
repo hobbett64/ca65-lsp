@@ -14,23 +14,26 @@ import {
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import * as path from 'path';
 import { execFile } from 'child_process';
-import { URI } from 'vscode-uri';
-import { getDocumentSettings, includesGraph, performanceMonitor, symbolTables } from './server';
+import { ensureDocumentRefreshed, exportsMap, getDocumentSettings, includesGraph, performanceMonitor, symbolTables } from './server';
 import * as fs from 'fs/promises';
 import * as os from "os";
 import { promisify } from 'util';
 import { Ca65Settings } from './settings';
 import which from "which";
-import { getWorkspaceFolderOfFile, resolveWorkspaceRelativeDirs } from './pathUtils';
-import { countReferencesByFile, isEntityUsed } from './symbolResolver';
-import { SymbolTableEntity } from './symbolTable';
+import { fsPathToUri, getWorkspaceFolderOfFile, resolveWorkspaceRelativeDirs, uriToFsPath } from './pathUtils';
+import { countReferencesByFile, isEntityUsed, resolveImport } from './symbolResolver';
+import { ImportKind, Scope, ScopeKind, Symbol as Ca65Symbol, SymbolKind as Ca65SymbolKind, SymbolTableEntity } from './symbolTable';
 import { findCommentStart } from './documentScanner';
+import { getCachedTextDocument, isOpenDocumentPotentiallyDirty } from './documentCache';
 
 const execFileAsync = promisify(execFile);
 
 const validationTimers: Map<string, NodeJS.Timeout> = new Map();
+const pendingFilesToUpdate: Map<string, Set<string>> = new Map();
 const activeValidationControllers: Set<AbortController> = new Set();
 const cachedExecutablePaths: Map<string, string | null> = new Map();
+const VALIDATION_ROOT_CONCURRENCY = 4;
+const SHADOW_IO_CONCURRENCY = 16;
 let connection: _Connection;
 let documents: TextDocuments<TextDocument>;
 let hasShownCa65NotFoundMessage = false;
@@ -68,6 +71,10 @@ async function findUnusedSymbolDiagnostics(
         }
 
         const definedEntities = symbolTable.getAllDefinedEntities();
+        const diagLines = new Set<number>();
+        for (const diag of existingDiags) {
+            diagLines.add(diag.range.start.line);
+        }
 
         let i = 0;
         for (const entity of definedEntities) {
@@ -78,14 +85,16 @@ async function findUnusedSymbolDiagnostics(
             }
             i++;
 
+            if (entity.name.startsWith('<anon')) {
+                continue;
+            }
             const fqn = entity.getFullyQualifiedName();
-            if (entity.name.startsWith('<anon') || checkedUnusedSymbols.has(fqn)) {
+            if (checkedUnusedSymbols.has(fqn)) {
                 continue;
             }
 
             // Do not mark a symbol as unused if its definition line already has a diagnostic.
-            const hasExistingDiagnostic = existingDiags.some(diag => diag.range.start.line === entity.definition.start.line);
-            if (hasExistingDiagnostic) {
+            if (diagLines.has(entity.definition.start.line)) {
                 continue;
             }
 
@@ -102,6 +111,74 @@ async function findUnusedSymbolDiagnostics(
         }
         return lspDiagnostics;
     });
+}
+
+function isZeroPageSegmentName(segment: string | null | undefined): boolean {
+    if (!segment) return false;
+    const upper = segment.toUpperCase();
+    return upper === 'ZEROPAGE' || upper === 'ZP';
+}
+
+function entityCarriesSegmentAddress(entity: SymbolTableEntity): boolean {
+    if (entity instanceof Ca65Symbol) {
+        return entity.kind === Ca65SymbolKind.Label
+            || entity.kind === Ca65SymbolKind.ResLabel
+            || entity.kind === Ca65SymbolKind.DataLabel
+            || entity.kind === Ca65SymbolKind.StringLabel;
+    }
+    return entity instanceof Scope && entity.kind === ScopeKind.Proc;
+}
+
+/**
+ * Checks `.import`/`.importzp` and `.global`/`.globalzp` declarations against the resolved
+ * target symbol's segment and `.exportzp` declarations to warn on zero-page width mismatches.
+ */
+export function findImportMismatchDiagnostics(uri: string): Diagnostic[] {
+    const symbolTable = symbolTables.get(uri);
+    if (!symbolTable || symbolTable.imports.length === 0) {
+        return [];
+    }
+
+    const diagnostics: Diagnostic[] = [];
+    for (const imp of symbolTable.imports) {
+        const resolved = resolveImport(imp.name, symbolTables, includesGraph);
+        if (!resolved) continue;
+
+        // `.global` inside the defining file acts as an export rather than an external import
+        if (imp.kind === ImportKind.Global && resolved.uri === imp.uri) {
+            continue;
+        }
+
+        const matchingExport = exportsMap?.get(imp.name)?.find(exp => exp.uri === resolved.uri);
+        const resolvedSeg = resolved.segment;
+        const segmentBased = entityCarriesSegmentAddress(resolved) && Boolean(resolvedSeg);
+
+        const definitelyZp = Boolean(matchingExport?.isZeroPage) || (segmentBased && isZeroPageSegmentName(resolvedSeg));
+        const definitelyNonZp = !matchingExport?.isZeroPage && segmentBased && !isZeroPageSegmentName(resolvedSeg);
+
+        if (!imp.isZeroPage && definitelyZp) {
+            const reason = matchingExport?.isZeroPage
+                ? `exported with '.exportzp'`
+                : `defined in zero-page segment '${resolvedSeg}'`;
+            diagnostics.push({
+                severity: DiagnosticSeverity.Warning,
+                range: imp.definition,
+                message: `Symbol '${imp.name}' is ${reason}, but imported without '.importzp'.`,
+                source: 'ca65-lsp',
+                code: 'import-zp-expected',
+            });
+        } else if (imp.isZeroPage && definitelyNonZp) {
+            diagnostics.push({
+                severity: DiagnosticSeverity.Warning,
+                range: imp.definition,
+                message: `Symbol '${imp.name}' is defined in segment '${resolvedSeg}' (non-ZEROPAGE), but imported as zero-page.`,
+                source: 'ca65-lsp',
+                code: 'import-abs-expected',
+            });
+        }
+    }
+
+    return diagnostics;
 }
 
 /**
@@ -148,22 +225,26 @@ async function getDocumentCached(
     uri: string,
     docCache: Map<string, TextDocument | null>
 ): Promise<TextDocument | null> {
-    const openDoc = documents.get(uri);
-    if (openDoc) return openDoc;
+    return getCachedTextDocument(uri, documents, docCache);
+}
 
-    if (docCache.has(uri)) {
-        return docCache.get(uri) ?? null;
+function sanitizeAdditionalCa65Args(rawArgs: unknown): string[] {
+    if (!Array.isArray(rawArgs)) return [];
+    const safeArgs: string[] = [];
+    for (let i = 0; i < rawArgs.length; i++) {
+        const arg = typeof rawArgs[i] === 'string' ? rawArgs[i].trim() : '';
+        if (!arg) continue;
+        // Skip output/listing flags (and their path value) so temporary LSP outputs stay intact.
+        if (arg === '-o' || arg === '-l' || arg === '--listing') {
+            i++;
+            continue;
+        }
+        if (arg.startsWith('--listing=') || (arg.startsWith('-o') && !arg.startsWith('--')) || (arg.startsWith('-l') && !arg.startsWith('--'))) {
+            continue;
+        }
+        safeArgs.push(arg);
     }
-
-    let doc: TextDocument | null = null;
-    try {
-        const content = await fs.readFile(URI.parse(uri).fsPath, 'utf-8');
-        doc = TextDocument.create(uri, 'ca65', 0, content);
-    } catch {
-        doc = null;
-    }
-    docCache.set(uri, doc);
-    return doc;
+    return safeArgs;
 }
 
 export interface Ca65AssembleOptions {
@@ -207,11 +288,11 @@ export async function assembleTranslationUnit(
         }
 
         const workspaceFolderUri = getWorkspaceFolderOfFile(textDocument.uri);
-        const filePath = URI.parse(textDocument.uri).fsPath;
+        const filePath = uriToFsPath(textDocument.uri);
         const fileDir = path.dirname(filePath);
-        const workspaceRoot = workspaceFolderUri ? URI.parse(workspaceFolderUri).fsPath : fileDir;
+        const workspaceRoot = workspaceFolderUri ? uriToFsPath(workspaceFolderUri) : fileDir;
 
-        const tuUris = new Set<string>(includesGraph.getTranslationUnit(textDocument.uri));
+        const tuUris = new Set<string>(includesGraph.getTranslationUnitSet(textDocument.uri));
         tuUris.add(textDocument.uri);
 
         // Build a lightweight shadow directory only when an open TU file has unsaved edits.
@@ -221,15 +302,8 @@ export async function assembleTranslationUnit(
             const openDoc = documents.get(tuUri);
             if (!openDoc) continue;
             openDocsInTu.set(tuUri, openDoc);
-            if (!needsShadow) {
-                try {
-                    const diskContent = await fs.readFile(URI.parse(tuUri).fsPath, 'utf-8');
-                    if (diskContent !== openDoc.getText()) {
-                        needsShadow = true;
-                    }
-                } catch {
-                    needsShadow = true;
-                }
+            if (!needsShadow && await isOpenDocumentPotentiallyDirty(openDoc)) {
+                needsShadow = true;
             }
         }
         if (signal.aborted) return null;
@@ -252,10 +326,12 @@ export async function assembleTranslationUnit(
                 shadowDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ca65-lsp-'));
                 effectiveCwd = shadowDir;
                 const createdTargets = new Set<string>();
+                const targetDirs = new Set<string>();
+                const shadowTasks: Array<{ tuUri: string; tuFsPath: string; targetPath: string }> = [];
 
                 for (const tuUri of tuUris) {
                     if (signal.aborted) return null;
-                    const tuFsPath = URI.parse(tuUri).fsPath;
+                    const tuFsPath = uriToFsPath(tuUri);
                     originalSourceDirs.add(path.dirname(tuFsPath));
                     const rel = path.relative(workspaceRoot, tuFsPath);
                     if (rel.startsWith('..') || path.isAbsolute(rel)) {
@@ -265,18 +341,32 @@ export async function assembleTranslationUnit(
                     const targetPath = path.join(shadowDir, rel);
                     if (createdTargets.has(targetPath)) continue;
                     createdTargets.add(targetPath);
+                    targetDirs.add(path.dirname(targetPath));
+                    shadowTasks.push({ tuUri, tuFsPath, targetPath });
+                }
 
-                    await fs.mkdir(path.dirname(targetPath), { recursive: true });
-                    const openDoc = openDocsInTu.get(tuUri);
-                    if (openDoc) {
-                        await fs.writeFile(targetPath, openDoc.getText(), 'utf-8');
-                    } else {
-                        try {
-                            await fs.symlink(tuFsPath, targetPath);
-                        } catch {
-                            await fs.copyFile(tuFsPath, targetPath);
+                await Promise.all(Array.from(targetDirs, dir => fs.mkdir(dir, { recursive: true })));
+                if (signal.aborted) return null;
+
+                let nextTaskIdx = 0;
+                const workerCount = Math.min(SHADOW_IO_CONCURRENCY, shadowTasks.length);
+                const runShadowWorker = async () => {
+                    while (nextTaskIdx < shadowTasks.length && !signal.aborted) {
+                        const task = shadowTasks[nextTaskIdx++];
+                        const openDoc = openDocsInTu.get(task.tuUri);
+                        if (openDoc) {
+                            await fs.writeFile(task.targetPath, openDoc.getText(), 'utf-8');
+                        } else {
+                            try {
+                                await fs.symlink(task.tuFsPath, task.targetPath);
+                            } catch {
+                                await fs.copyFile(task.tuFsPath, task.targetPath);
+                            }
                         }
                     }
+                };
+                if (workerCount > 0) {
+                    await Promise.all(Array.from({ length: workerCount }, () => runShadowWorker()));
                 }
 
                 for (const includeDir of userIncludeDirs) {
@@ -322,6 +412,8 @@ export async function assembleTranslationUnit(
             if (settings.lineContinuations) {
                 args.push('--feature', 'line_continuations');
             }
+
+            args.push(...sanitizeAdditionalCa65Args(settings.additionalArgs));
 
             try {
                 const result = await execFileAsync(ca65Path, args, { cwd: effectiveCwd, signal });
@@ -384,9 +476,9 @@ async function getCompilerDiagnosticsForUnit(
                 const resolved = path.resolve(effectiveCwd, fileName);
                 if (shadowDir && (resolved === shadowDir || resolved.startsWith(shadowDir + path.sep))) {
                     const rel = path.relative(shadowDir, resolved);
-                    return URI.file(path.resolve(workspaceRoot, rel)).toString();
+                    return fsPathToUri(path.resolve(workspaceRoot, rel));
                 }
-                return URI.file(resolved).toString();
+                return fsPathToUri(resolved);
             };
             
             for (let i = 0; i < lines.length; i++) {
@@ -462,6 +554,21 @@ async function getCompilerDiagnosticsForUnit(
     });
 }
 
+export function hasPendingValidation(uri: string): boolean {
+    return validationTimers.has(uri);
+}
+
+export function addPendingValidationFiles(uri: string, files: Iterable<string>): void {
+    let pendingSet = pendingFilesToUpdate.get(uri);
+    if (!pendingSet) {
+        pendingSet = new Set<string>();
+        pendingFilesToUpdate.set(uri, pendingSet);
+    }
+    for (const f of files) {
+        pendingSet.add(f);
+    }
+}
+
 export function abortValidation() {
     for (const controller of activeValidationControllers) {
         controller.abort();
@@ -478,6 +585,17 @@ export function abortValidation() {
 export function triggerValidation(uri: string, debounce: boolean = true, allFilesToUpdate?: Set<string>) {
     abortValidation();
 
+    if (allFilesToUpdate && allFilesToUpdate.size > 0) {
+        let pendingSet = pendingFilesToUpdate.get(uri);
+        if (!pendingSet) {
+            pendingSet = new Set<string>();
+            pendingFilesToUpdate.set(uri, pendingSet);
+        }
+        for (const f of allFilesToUpdate) {
+            pendingSet.add(f);
+        }
+    }
+
     if (validationTimers.has(uri)) {
         clearTimeout(validationTimers.get(uri)!);
     }
@@ -489,37 +607,51 @@ export function triggerValidation(uri: string, debounce: boolean = true, allFile
         const signal = controller.signal;
 
         try {
+            await ensureDocumentRefreshed?.(uri);
+            if (signal.aborted) return;
+
             const fullDiagnosticsByUri = new Map<string, Diagnostic[]>();
 
-            // If a specific set of files wasn't provided, calculate it.
-            if (!allFilesToUpdate) {
-                allFilesToUpdate = new Set(includesGraph.getTranslationUnit(uri));
+            // Combine any pre-edit affected files accumulated across debounced edits with the latest TU.
+            const filesToUpdate = new Set<string>(pendingFilesToUpdate.get(uri));
+            for (const tuUri of includesGraph.getTranslationUnitSet(uri)) {
+                filesToUpdate.add(tuUri);
             }
 
-            const allRoots = Array.from(includesGraph.getIncludingRoots(uri));
+            const existingRoots = includesGraph.getIncludingRootsArray(uri);
+            const allRoots = (existingRoots.length === 0 && includesGraph.isTranslationUnitRoot(uri))
+                ? [uri]
+                : existingRoots;
             const settings = await getDocumentSettings(uri);
             if (signal.aborted) return;
 
-            if (allRoots.length === 0 && includesGraph.isTranslationUnitRoot(uri)) {
-                allRoots.push(uri);
-            }
-
             // 1. Initialize full diagnostic list for all potentially affected files to ensure old ones are cleared.
-            for (const fileUri of allFilesToUpdate) {
+            for (const fileUri of filesToUpdate) {
                 fullDiagnosticsByUri.set(fileUri, []);
             }
 
-            // 2. Gather context-dependent compiler diagnostics from each root.
+            // 2. Gather context-dependent compiler diagnostics from each root with bounded concurrency.
             const docCache = new Map<string, TextDocument | null>();
+            const rootResults: Array<Map<string, Diagnostic[]> | null> = new Array(allRoots.length).fill(null);
+            let nextRootIdx = 0;
+            const workerCount = Math.min(VALIDATION_ROOT_CONCURRENCY, allRoots.length);
+            const runRootWorker = async () => {
+                while (nextRootIdx < allRoots.length && !signal.aborted) {
+                    const idx = nextRootIdx++;
+                    const doc = await getDocumentCached(allRoots[idx], docCache);
+                    if (!doc || signal.aborted) continue;
+                    rootResults[idx] = await getCompilerDiagnosticsForUnit(doc, signal, docCache);
+                }
+            };
+            if (workerCount > 0) {
+                await Promise.all(Array.from({ length: workerCount }, () => runRootWorker()));
+            }
+            if (signal.aborted) return;
+
             const seenCompilerDiags = new Set<string>();
-            for (const rootUri of allRoots) {
-                if (signal.aborted) return;
-                const doc = await getDocumentCached(rootUri, docCache);
-                if (!doc) continue;
-
-                const compilerDiagnostics = await getCompilerDiagnosticsForUnit(doc, signal, docCache);
-                if (signal.aborted) return;
-
+            for (let idx = 0; idx < rootResults.length; idx++) {
+                const compilerDiagnostics = rootResults[idx];
+                if (!compilerDiagnostics) continue;
                 for (const [fileUri, diags] of compilerDiagnostics.entries()) {
                     const existingDiags = fullDiagnosticsByUri.get(fileUri);
                     if (existingDiags) {
@@ -537,9 +669,9 @@ export function triggerValidation(uri: string, debounce: boolean = true, allFile
 
             // 3. Gather context-independent "unused symbol" diagnostics ONCE.
             if (settings.enableUnusedSymbolDiagnostics) {
-                const allTuUris = new Set<string>(allFilesToUpdate);
-                for (const fileUri of allFilesToUpdate) {
-                    for (const tuUri of includesGraph.getTranslationUnit(fileUri)) {
+                const allTuUris = new Set<string>(filesToUpdate);
+                for (const fileUri of filesToUpdate) {
+                    for (const tuUri of includesGraph.getTranslationUnitSet(fileUri)) {
                         allTuUris.add(tuUri);
                     }
                 }
@@ -547,7 +679,7 @@ export function triggerValidation(uri: string, debounce: boolean = true, allFile
                 if (signal.aborted) return;
 
                 const checkedUnusedSymbols = new Set<string>();
-                for (const fileUri of allFilesToUpdate) {
+                for (const fileUri of filesToUpdate) {
                     const unusedSymbolDiags = await findUnusedSymbolDiagnostics(
                         fileUri,
                         checkedUnusedSymbols,
@@ -560,10 +692,19 @@ export function triggerValidation(uri: string, debounce: boolean = true, allFile
                 }
             }
 
+            // 4. Warn on .import/.importzp vs resolved segment/exportzp mismatches.
+            for (const fileUri of filesToUpdate) {
+                const mismatchDiags = findImportMismatchDiagnostics(fileUri);
+                if (mismatchDiags.length > 0) {
+                    fullDiagnosticsByUri.get(fileUri)?.push(...mismatchDiags);
+                }
+            }
+
             if (signal.aborted) return;
+            pendingFilesToUpdate.delete(uri);
 
             // 4. Send the final, consolidated diagnostics for every affected file.
-            for (const fileUri of allFilesToUpdate) {
+            for (const fileUri of filesToUpdate) {
                 connection.sendDiagnostics({ uri: fileUri, diagnostics: fullDiagnosticsByUri.get(fileUri) || [] });
             }
         } catch (err) {

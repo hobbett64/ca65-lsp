@@ -12,6 +12,8 @@ export interface Ca65Settings {
     implicitImports: boolean;
     lineContinuations: boolean;
     enableStatusBarCycleCount?: boolean;
+    enableProcCodeLens?: boolean;
+    additionalArgs?: string[];
 }
 
 export const documentSettings: Map<string, Thenable<Ca65Settings>> = new Map();

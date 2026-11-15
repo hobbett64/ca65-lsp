@@ -4,11 +4,12 @@ import {
     FoldingRange,
     FoldingRangeKind
 } from 'vscode-languageserver/node';
-import { getDocumentSettings, initializationGate, symbolTables } from './server';
+import { ensureDocumentRefreshed, getDocumentSettings, initializationGate, symbolTables } from './server';
 
 export function initializeFoldingRangeProvider(connection: _Connection) {
     connection.onFoldingRanges(async (params: FoldingRangeParams): Promise<FoldingRange[] | null> => {
         await initializationGate.isInitialized;
+        await ensureDocumentRefreshed?.(params.textDocument.uri);
 
         const settings = await getDocumentSettings(params.textDocument.uri);
         if (!settings.smartFolding) {

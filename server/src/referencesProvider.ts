@@ -5,7 +5,7 @@ import {
     ReferenceParams,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
+import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
 import { findAllCheapLocalLabelReferences } from './cheapLocalLabelUtils';
 import { findAllAnonLabelReferences } from './anonymousLabelUtils';
 import { getAllReferenceLocationsForEntity, resolveReferenceAtPosition } from './symbolResolver';
@@ -17,6 +17,7 @@ export function initializeReferencesProvider(connection: _Connection, documents:
      */
     connection.onReferences(async (params: ReferenceParams): Promise<Location[] | undefined> => {
         await initializationGate.isInitialized;
+        await ensureDocumentRefreshed?.(params.textDocument.uri);
         return performanceMonitor.timeAsync("onReferences", async () => {
             const uri = params.textDocument.uri;
             const document = documents.get(uri);

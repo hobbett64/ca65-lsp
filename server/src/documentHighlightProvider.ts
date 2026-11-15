@@ -5,7 +5,7 @@ import {
     DocumentHighlight,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { getDocumentSettings, includesGraph, initializationGate, symbolTables } from './server';
+import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, symbolTables } from './server';
 import { findAllCheapLocalLabelReferences } from './cheapLocalLabelUtils';
 import { findAllAnonLabelReferences } from './anonymousLabelUtils';
 import { resolveReference, resolveReferenceAtPosition } from './symbolResolver';
@@ -13,6 +13,7 @@ import { resolveReference, resolveReferenceAtPosition } from './symbolResolver';
 export function initializeDocumentHighlightProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
     connection.onDocumentHighlight(async (params: DocumentHighlightParams): Promise<DocumentHighlight[] | undefined> => {
         await initializationGate.isInitialized;
+        await ensureDocumentRefreshed?.(params.textDocument.uri);
         
         const document = documents.get(params.textDocument.uri);
         const symbolTable = symbolTables.get(params.textDocument.uri);

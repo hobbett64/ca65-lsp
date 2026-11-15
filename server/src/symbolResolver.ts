@@ -9,10 +9,27 @@ import { exportsMap, performanceMonitor } from './server';
 
 const cachedLocalResolutionsPerUri: Map<string, Map<ReferenceInfo, SymbolTableEntity | null>> = new Map();
 const cachedExportResolutionsPerUri: Map<string, Map<Export, Symbol | Scope | null>> = new Map();
+const cachedImportResolutions: Map<string, Symbol | Scope | null> = new Map();
 
 export function deleteCachedResolutions(uri: string) {
     cachedLocalResolutionsPerUri.delete(uri);
     cachedExportResolutionsPerUri.delete(uri);
+    cachedImportResolutions.clear();
+}
+
+export function resolveMacroByName(
+    uri: string,
+    name: string,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph
+): Macro | undefined {
+    const tuUris = includesGraph.getTranslationUnit(uri);
+    const searchUris = tuUris.length > 0 ? tuUris : [uri];
+    for (const candidateUri of searchUris) {
+        const macro = allSymbolTables.get(candidateUri)?.getMacro(name);
+        if (macro) return macro;
+    }
+    return undefined;
 }
 
 export function resolveReferenceAtPosition(
@@ -153,12 +170,18 @@ export function resolveImport(
     allSymbolTables: Map<string, SymbolTable>,
     includesGraph: IncludesGraph,
 ): Symbol | Scope | undefined {
+    if (cachedImportResolutions.has(importName)) {
+        return cachedImportResolutions.get(importName) ?? undefined;
+    }
+
     for (const exportEntity of exportsMap.get(importName)) {
         const resolved = resolveExport(exportEntity, allSymbolTables, includesGraph);
         if (resolved) {
+            cachedImportResolutions.set(importName, resolved);
             return resolved;
         }
     }
+    cachedImportResolutions.set(importName, null);
     return undefined;
 }
 
@@ -222,15 +245,38 @@ export function getAllReferencesForEntity(
         const isExported = exportsMap.get(entity.name).some(
             exp => resolveExport(exp, allSymbolTables, includesGraph) === entity
         );
-        let tablesToSearch: Iterable<SymbolTable>;
+        const tablesToSearch: SymbolTable[] = [];
         if (isExported) {
-            tablesToSearch = allSymbolTables.values();
+            for (const symbolTable of allSymbolTables.values()) {
+                if (symbolTable.getReferencesByName(entity.name).length === 0) continue;
+                if (!implicitImports && symbolTable.uri !== entity.uri) {
+                    const tuSet = includesGraph.getTranslationUnitSet(symbolTable.uri);
+                    if (!tuSet.has(entity.uri)) {
+                        let hasImportInTu = symbolTable.hasImport(entity.name);
+                        if (!hasImportInTu) {
+                            for (const tuUri of tuSet) {
+                                if (allSymbolTables.get(tuUri)?.hasImport(entity.name)) {
+                                    hasImportInTu = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!hasImportInTu) continue;
+                    }
+                }
+                tablesToSearch.push(symbolTable);
+            }
         } else {
             const tuUris = includesGraph.getTranslationUnit(entity.uri);
-            const candidateUris = tuUris.length > 0 ? tuUris : [entity.uri];
-            tablesToSearch = candidateUris
-                .map(uri => allSymbolTables.get(uri))
-                .filter((st): st is SymbolTable => st !== undefined);
+            if (tuUris.length > 0) {
+                for (const uri of tuUris) {
+                    const st = allSymbolTables.get(uri);
+                    if (st) tablesToSearch.push(st);
+                }
+            } else {
+                const st = allSymbolTables.get(entity.uri);
+                if (st) tablesToSearch.push(st);
+            }
         }
 
         for (const symbolTable of tablesToSearch) {
@@ -256,6 +302,25 @@ export function getAllReferenceLocationsForEntity(
         .map((ref) => { return { uri: ref.uri, range: ref.location }})
 }
 
+function getLabelSymbolKindBySegment(segment: string | null | undefined): LSPSymbolKind {
+    if (!segment) {
+        return LSPSymbolKind.String;
+    }
+    switch (segment.toUpperCase()) {
+        case 'CODE':
+            return LSPSymbolKind.Function;
+        case 'RODATA':
+        case 'DATA':
+            return LSPSymbolKind.Array;
+        case 'ZEROPAGE':
+        case 'ZP':
+        case 'BSS':
+            return LSPSymbolKind.Variable;
+        default:
+            return LSPSymbolKind.String;
+    }
+}
+
 export function getLSPSymbolKind(item: SymbolTableEntity): LSPSymbolKind {
     if (item instanceof Macro) {
         switch (item.kind) {
@@ -273,7 +338,7 @@ export function getLSPSymbolKind(item: SymbolTableEntity): LSPSymbolKind {
             case SymbolKind.Variable: return LSPSymbolKind.Variable;
             case SymbolKind.StructMember: return LSPSymbolKind.Field;
             case SymbolKind.EnumMember: return LSPSymbolKind.EnumMember;
-            default: return LSPSymbolKind.Function;
+            default: return getLabelSymbolKindBySegment(item.segment);
         }
     }
 

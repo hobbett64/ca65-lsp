@@ -12,6 +12,8 @@ import {
 	EventEmitter,
 	ViewColumn,
 	Range as VscodeRange,
+	Position as VscodePosition,
+	Location as VscodeLocation,
 } from "vscode";
 import {
 	LanguageClient,
@@ -102,6 +104,26 @@ export function activate(context: ExtensionContext) {
 	context.subscriptions.push(commands.registerCommand('ca65.showReference', () => {
 		return showReferencePanel(context);
 	}));
+
+	context.subscriptions.push(commands.registerCommand(
+		'ca65.showProcReferences',
+		async (
+			uriStr: string,
+			position: { line: number; character: number },
+			locations: Array<{ uri: string; range: { start: { line: number; character: number }; end: { line: number; character: number } } }>
+		) => {
+			if (!locations || locations.length === 0) {
+				return;
+			}
+			const parsedUri = Uri.parse(uriStr);
+			const vscodePos = new VscodePosition(position.line, position.character);
+			const vscodeLocs = locations.map(loc => new VscodeLocation(
+				Uri.parse(loc.uri),
+				new VscodeRange(loc.range.start.line, loc.range.start.character, loc.range.end.line, loc.range.end.character)
+			));
+			return commands.executeCommand('editor.action.showReferences', parsedUri, vscodePos, vscodeLocs);
+		}
+	));
 
 	const dumpCommands: ReadonlyArray<[string, string]> = [
 		['ca65.dumpPerformanceStats', 'ca65/dumpPerformanceStats'],
@@ -207,17 +229,34 @@ function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<voi
 
 	let debounceTimer: NodeJS.Timeout | undefined;
 	let latestSeq = 0;
+	let lastQueryKey = '';
 
-	const updateForEditor = (editor: TextEditor | undefined) => {
+	const updateForEditor = (editor: TextEditor | undefined, force: boolean = false) => {
+		const enabled = workspace.getConfiguration('ca65').get<boolean>('enableStatusBarCycleCount', true);
+		if (!enabled || !editor || editor.document.languageId !== 'ca65') {
+			if (debounceTimer) {
+				clearTimeout(debounceTimer);
+				debounceTimer = undefined;
+			}
+			lastQueryKey = '';
+			statusBarItem.hide();
+			return;
+		}
+
+		const sel = editor.selection;
+		const isSelection = !sel.isEmpty;
+		const queryKey = isSelection
+			? `${editor.document.uri.toString()}|${editor.document.version}|S:${sel.start.line}:${sel.start.character}-${sel.end.line}:${sel.end.character}`
+			: `${editor.document.uri.toString()}|${editor.document.version}|L:${sel.active.line}`;
+
+		if (!force && queryKey === lastQueryKey) {
+			return;
+		}
+		lastQueryKey = queryKey;
+
 		if (debounceTimer) {
 			clearTimeout(debounceTimer);
 			debounceTimer = undefined;
-		}
-
-		const enabled = workspace.getConfiguration('ca65').get<boolean>('enableStatusBarCycleCount', true);
-		if (!enabled || !editor || editor.document.languageId !== 'ca65') {
-			statusBarItem.hide();
-			return;
 		}
 
 		const seq = ++latestSeq;
@@ -226,8 +265,6 @@ function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<voi
 				await clientReady;
 				if (seq !== latestSeq || window.activeTextEditor !== editor) return;
 
-				const sel = editor.selection;
-				const isSelection = !sel.isEmpty;
 				const targetRange = isSelection
 					? {
 						start: { line: sel.start.line, character: sel.start.character },
@@ -260,6 +297,7 @@ function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<voi
 				statusBarItem.show();
 			} catch {
 				if (seq === latestSeq) {
+					lastQueryKey = '';
 					statusBarItem.hide();
 				}
 			}
@@ -267,7 +305,7 @@ function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<voi
 	};
 
 	context.subscriptions.push(
-		window.onDidChangeActiveTextEditor((editor) => updateForEditor(editor)),
+		window.onDidChangeActiveTextEditor((editor) => updateForEditor(editor, true)),
 		window.onDidChangeTextEditorSelection((event) => {
 			if (event.textEditor === window.activeTextEditor) {
 				updateForEditor(event.textEditor);
@@ -275,18 +313,18 @@ function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<voi
 		}),
 		workspace.onDidChangeTextDocument((event) => {
 			if (window.activeTextEditor && event.document === window.activeTextEditor.document) {
-				updateForEditor(window.activeTextEditor);
+				updateForEditor(window.activeTextEditor, true);
 			}
 		}),
 		workspace.onDidChangeConfiguration((event) => {
 			if (event.affectsConfiguration('ca65.enableStatusBarCycleCount')) {
-				updateForEditor(window.activeTextEditor);
+				updateForEditor(window.activeTextEditor, true);
 			}
 		}),
 		{ dispose: () => { if (debounceTimer) clearTimeout(debounceTimer); } },
 	);
 
-	updateForEditor(window.activeTextEditor);
+	updateForEditor(window.activeTextEditor, true);
 }
 
 interface OverlayLineItem {
@@ -400,15 +438,16 @@ function setupSideBySideHexListing(context: ExtensionContext, clientReady: Promi
 			return;
 		}
 
+		const totalBytes = meta.lines.reduce((sum, entry) => sum + entry.byteCount, 0);
 		if (meta.stale) {
 			overlayStatusBadge.text = meta.error
-				? '$(warning) ca65 -l (stale — assembly error)'
-				: '$(warning) ca65 -l (stale)';
-			overlayStatusBadge.tooltip = 'Showing last valid ca65 -l listing. Fix errors and save to update (click to open Problems).';
+				? `$(warning) ca65 -l · ${totalBytes} B (stale — assembly error)`
+				: `$(warning) ca65 -l · ${totalBytes} B (stale)`;
+			overlayStatusBadge.tooltip = `Showing last valid ca65 -l listing (${totalBytes} bytes emitted). Fix errors and save to update (click to open Problems).`;
 			overlayStatusBadge.command = 'workbench.actions.view.problems';
 		} else {
-			overlayStatusBadge.text = '$(file-binary) ca65 -l';
-			overlayStatusBadge.tooltip = 'Side-by-side listing from ca65 -l. Click to refresh.';
+			overlayStatusBadge.text = `$(file-binary) ca65 -l · ${totalBytes} B`;
+			overlayStatusBadge.tooltip = `Side-by-side listing from ca65 -l (${totalBytes} bytes emitted in this file). Click to refresh.`;
 			overlayStatusBadge.command = 'ca65.showHexListing';
 		}
 		overlayStatusBadge.show();
@@ -437,10 +476,7 @@ function setupSideBySideHexListing(context: ExtensionContext, clientReady: Promi
 					: '; ca65 listing unavailable (ensure ca65 is installed or configured via ca65.executablePath).';
 			}
 
-			const sourceLines: string[] = [];
-			for (let i = 0; i < srcDoc.lineCount; i++) {
-				sourceLines.push(srcDoc.lineAt(i).text);
-			}
+			const sourceLines = srcDoc.getText().split(/\r?\n/);
 			return formatSideBySideListing(sourceLines, data);
 		},
 	};
