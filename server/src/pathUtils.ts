@@ -237,6 +237,29 @@ export async function resolveIncbinUri(
     return null;
 }
 
+/**
+ * Synchronously resolves an `.incbin` asset path and returns its byte size, or `null` if unavailable.
+ */
+export function resolveIncbinFileSizeSync(
+    currentFileUri: string,
+    incbinFile: string,
+    binIncludeDirs: string[] | undefined,
+): number | null {
+    for (const dir of getSearchDirectories(currentFileUri, binIncludeDirs)) {
+        const fullPath = path.join(dir, incbinFile);
+        try {
+            const stat = fsSync.statSync(fullPath);
+            if (stat.isFile()) {
+                return stat.size;
+            }
+        } catch {
+            // File does not exist in this directory, continue searching
+        }
+    }
+
+    return null;
+}
+
 export function findCanonicalIncludePath(
     currentFileUri: string,
     importFileUri: string,

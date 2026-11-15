@@ -15,6 +15,7 @@ import {
     symbolTables,
 } from './server';
 import {
+    classifyLabelSegment,
     Macro,
     MacroKind,
     Scope,
@@ -111,15 +112,41 @@ function classifyEntity(
                 };
             case Ca65SymbolKind.Variable:
             case Ca65SymbolKind.StructMember:
+            case Ca65SymbolKind.ResLabel:
                 return {
                     tokenType: TOKEN_TYPE_INDEX[SemanticTokenTypes.variable],
                     tokenModifiers: declFlag,
                 };
-            case Ca65SymbolKind.Label:
-            case Ca65SymbolKind.ResLabel:
             case Ca65SymbolKind.DataLabel:
-            case Ca65SymbolKind.StringLabel:
-                return null;
+            case Ca65SymbolKind.StringLabel: {
+                const segCat = classifyLabelSegment(entity.segment);
+                const readonlyFlag = segCat === 'data' || segCat === 'bss' ? 0 : MOD_READONLY;
+                return {
+                    tokenType: TOKEN_TYPE_INDEX[SemanticTokenTypes.variable],
+                    tokenModifiers: declFlag | readonlyFlag,
+                };
+            }
+            case Ca65SymbolKind.Label:
+                switch (classifyLabelSegment(entity.segment)) {
+                    case 'code':
+                        return {
+                            tokenType: TOKEN_TYPE_INDEX[SemanticTokenTypes.function],
+                            tokenModifiers: declFlag,
+                        };
+                    case 'rodata':
+                        return {
+                            tokenType: TOKEN_TYPE_INDEX[SemanticTokenTypes.variable],
+                            tokenModifiers: declFlag | MOD_READONLY,
+                        };
+                    case 'data':
+                    case 'bss':
+                        return {
+                            tokenType: TOKEN_TYPE_INDEX[SemanticTokenTypes.variable],
+                            tokenModifiers: declFlag,
+                        };
+                    default:
+                        return null;
+                }
         }
     }
 
@@ -178,7 +205,11 @@ export async function computeSemanticTokens(uri: string): Promise<SemanticTokens
         });
     }
 
-    tokens.sort((a, b) => a.line - b.line || a.char - b.char);
+    tokens.sort((a, b) =>
+        a.line - b.line
+        || a.char - b.char
+        || (b.tokenModifiers & MOD_DECLARATION) - (a.tokenModifiers & MOD_DECLARATION)
+    );
 
     let lastLine = -1;
     let lastEndChar = -1;

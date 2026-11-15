@@ -39,6 +39,7 @@ export interface Ca65Settings {
     implicitImports: boolean;
     lineContinuations: boolean;
     enableStatusBarCycleCount?: boolean;
+    enableStatusBarSegment?: boolean;
     additionalArgs?: string[];
 }
 

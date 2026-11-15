@@ -13,16 +13,16 @@ This extension provides a full-featured language server to make writing `ca65` a
     * **Go to Definition:** Jump directly to the definition of any label, constant, variable, macro, enum, struct, or scope. Works across local, included, and workspace-exported symbols.
     * **Find All References & Safe Rename:** Find all usages across the workspace or rename symbols (`F2`) with `prepareRename` validation and cheap local (`@label`) normalization.
     * **Call Hierarchy:** See incoming and outgoing `jsr`/`jmp` (and `65816` `jsl`/`jml`) calls for procedures and labels.
-    * **Outline view:** Nested file outline with segment-based symbol icons, `(macro)` / `(zp)` annotations, and source-order sorting.
+    * **Outline view:** Nested file outline with segment-based symbol icons, non-`CODE` segment annotations (e.g. `(ZEROPAGE)`, `(RODATA)`, `(BSS)`, `(BANK01)`), `(macro)` labels, and source-order sorting.
 * **Code Intelligence:**
-    * **Rich Hover Information:** Shows segment / kind badges (`CODE`, `ZEROPAGE`, `CONST`, `ENUM`, `VAR`, `MACRO`, `DEFINE`), evaluated constant values, verbatim `;` doc comments, clickable source links, cheap/anonymous label previews, and CPU-aware instruction (`6502`, `65SC02`, `65C02`, `W65C02`, `65816`) & directive references.
-    * **Context-Aware Autocompletion & Snippets:** Suggests CPU-filtered mnemonics, directives, block snippets (`.proc`, `.macro`, `.scope`, `.struct`, `.union`, `.enum`, `.repeat`, `.if*`), `Scope::` members, `.include`/`.incbin` paths, and auto-import/include suggestions — while suppressing nuisance popups inside comments, strings, numbers, and declaration names.
+    * **Rich Hover Information:** Shows segment badges (`CODE`, `ZEROPAGE`, `RODATA`, etc.) alongside kind labels (`label`, `proc`, `constant`, `variable`, `enum`, `struct`, `union`, `macro`, `define`, `anonymous label`), byte sizes (`[N]`), evaluated constant values, qualified cheap local names (`scope::label@local`), anonymous label indices, multi-base number literal hovers (Hex, Dec, Bin), verbatim `;` doc comments, clickable source links, and CPU-aware lowercase instruction (`6502`, `65SC02`, `65C02`, `W65C02`, `65816`) & directive references.
+    * **Context-Aware Autocompletion & Snippets:** Suggests CPU-filtered mnemonics, directives, block snippets (`.proc`, `.macro`, `.scope`, `.struct`, `.union`, `.enum`, `.repeat`, `.if*`), `Scope::` members, `.tag` and `.sizeof(` struct/union types, `.segment "..."` segment names, `.include`/`.incbin` paths, and auto-import/include suggestions — while suppressing nuisance popups inside comments, strings, numbers, and declaration names.
     * **Signature Help:** Active parameter hints for `.macro` calls and `.define` function-like macros.
     * **Import Tracing & Anonymous Label Indexing:** Inlay hints for `.import` origins and opt-in `L1`/`L2` anonymous label indices (`ca65.anonymousLabelIndexHints`).
 * **Editor & Assembly Tools:**
-    * **Syntax Highlighting & Semantic Tokens:** TextMate grammar for ca65 syntax (highlighting label declarations, control-flow opcodes, string escapes, and constants) paired with LSP semantic tokens for `.proc`, `.macro`, constants, `.enum`, `.struct`, `.scope`, and `.set` variables.
+    * **Syntax Highlighting & Semantic Tokens:** TextMate grammar for ca65 syntax paired with LSP semantic tokens for `.proc`, `CODE`/data/ZP/BSS labels, `.macro`, constants, `.enum`, `.struct`, `.scope`, and `.set` variables.
     * **Side-by-Side Hex & Address Listing:** Open `ca65: Show Hex & Address Listing Side-by-Side` (`$(file-binary)` editor title icon) to inspect assembled addresses and emitted bytes aligned line-for-line with your source.
-    * **Status Bar Cycle & Byte Counter:** Shows estimated byte sizes and cycle counts (or 8/16-bit `M`/`X` ranges for `65816`) for the current line or selection.
+    * **Status Bar Cycle/Byte Counter & Active Segment:** Displays estimated byte sizes and cycle counts (including 8/16-bit `M`/`X` ranges for `65816`) for the current line or selection, plus the active segment at the cursor line with click-to-jump navigation to the directive that set it.
     * **Code Folding & Sticky Scroll:** Fold `.proc`, `.macro`, `.scope`, `.struct`, `.union`, `.enum`, and conditional blocks.
     * **Instruction Reference Page:** Open the full opcode reference for the active `ca65.cpu` target via `ca65: Show Instruction Reference`.
     
@@ -33,7 +33,6 @@ This extension provides a full-featured language server to make writing `ca65` a
 * Macro expansion is entirely opaque to the LSP, so symbols/scopes/syntax that are affected by macro expansion will not be visible to the LSP.
 * Symbols with multiple definitions will always resolve to the first definition in the same file.
 * Symbol refs will always resolve to the symbol even if a macro is declared with the same name after it's declaration.
-* Auto-completion in the operand will only suggest symbols -- it will not suggest `struct`s in a `.tag` or `.sizeof` command
 * Anonymous structs are currently not handled to spec (the spec adds the members to an anonymous scope, but `ca65` actually adds them to the parent scope).
 * Symbol definitions on continuation lines (i.e. lines after a line ending in `\`) are ignored. Only symbol references are parsed, which is good enough for the common use case of using line continuations for long expressions.
 
@@ -69,6 +68,8 @@ For users of the standalone LSP with other IDEs, please use the `ca65.additional
 Select your target processor via `ca65.cpu` (`6502` default, `65SC02`, `65C02`, `W65C02`, or `65816`) to align diagnostics, hover docs, autocomplete, status-bar timing/byte estimates, and the instruction reference panel.
 
 Paths for `.include` and `.incbin` (i.e. what you would pass into `-I` and `--bin-include-dir` during the assembly step) may be specified by `ca65.includeDirs` and `ca65.binIncludeDirs` settings, and custom compiler flags (such as `-D DEBUG=1` or `-t nes`) can be passed via `ca65.additionalArgs`.
+
+Status bar indicators can be toggled individually with `ca65.enableStatusBarCycleCount` and `ca65.enableStatusBarSegment`.
 
 Please see the Settings gear icon in the installed extension to easily set this and other settings.
 

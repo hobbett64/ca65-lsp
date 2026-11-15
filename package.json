@@ -3,7 +3,7 @@
     "description": "CA65 Assembly language support for VS Code",
     "author": "Quang Luong",
     "license": "MIT",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "publisher": "hobbett",
     "repository": {
         "type": "git",
@@ -152,6 +152,11 @@
                 "ca65.enableStatusBarCycleCount": {
                     "type": "boolean",
                     "description": "Shows estimated cycle count and byte size for the selected instructions (or current line) in the status bar.",
+                    "default": true
+                },
+                "ca65.enableStatusBarSegment": {
+                    "type": "boolean",
+                    "description": "Shows the active ca65 segment for the current cursor line in the status bar.",
                     "default": true
                 }
             }

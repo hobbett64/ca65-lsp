@@ -17,7 +17,7 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
 import { getLineText } from './editUtils';
 import { directiveData, getMnemonicInfo, getMnemonicsForCpu, resolveDirectiveAlias } from './dataManager';
-import { Export, Import, ImportKind, Macro, MacroKind, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
+import { Export, formatSegmentDisplayName, Import, ImportKind, Macro, MacroKind, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
 import { findCheapLocalLabelDefinition, getCheapLocalLabelDefinitions } from './cheapLocalLabelUtils';
 import { IncludesGraph } from './includesGraph';
 import { getLSPSymbolKind, resolveExport, resolveImport } from './symbolResolver';
@@ -28,6 +28,7 @@ import { getCachedTextDocument } from './documentCache';
 import {
     extractLeadingDocInfo,
     formatSourceLink,
+    generateCheapLocalHoverMarkdown,
     generateDirectiveHoverMarkdown,
     generateMnemonicHoverMarkdown,
     generateSymbolTableEntityMarkdown,
@@ -72,6 +73,10 @@ const ZERO_ARG_DIRECTIVES = new Set([
 
 const NUMERIC_LITERAL_AT_CURSOR_RE = /(?:^|[^a-zA-Z0-9_.@])(?:\$[0-9a-fA-F]*|%[01]*|[0-9]+)$/;
 const SINGLE_TRAILING_COLON_RE = /(?:^|[^:]):$/;
+const SEGMENT_PATH_CONTEXT_RE = /^\s*(?:[a-zA-Z_@.][a-zA-Z0-9_@.]*:\s*)?\.segment\s+"([^"]*)$/i;
+const TAG_CONTEXT_RE = /(?:^|[\s:])\.tag\s+[a-zA-Z0-9_.:]*$/i;
+const SIZEOF_CONTEXT_RE = /(?:^|[^a-zA-Z0-9_.])\.sizeof\s*\(\s*[a-zA-Z0-9_.:]*$/i;
+const STANDARD_SEGMENT_NAMES = ['CODE', 'ZEROPAGE', 'RODATA', 'BSS', 'DATA'] as const;
 
 function hasUnclosedPriorBlockComment(document: TextDocument, line: number): boolean {
     const startLine = Math.max(0, line - 200);
@@ -216,8 +221,8 @@ function getCompletionItemDetail(entity: SymbolTableEntity): string | undefined 
         || entity instanceof Import
         || entity instanceof Export
     ) {
-        if (entity.segment && entity.segment !== 'CODE') {
-            return `${entity.kind} · ${entity.segment}`;
+        if (entity.segment && entity.segment.toUpperCase() !== 'CODE') {
+            return `${entity.kind} · ${formatSegmentDisplayName(entity.segment)}`;
         }
         return entity.kind;
     }
@@ -322,7 +327,9 @@ function getCheapLocalLabelCompletions(
                 uri: document.uri,
                 targetUri: defLoc.uri,
                 targetLine: defLoc.range.start.line,
+                targetRange: defLoc.range,
                 targetName: labelName,
+                isCheapLocal: true,
             } : undefined,
         };
         if (!currentWord.startsWith('@')) {
@@ -357,6 +364,7 @@ interface CachedValueEntityMeta {
 interface CachedTableCompletionMeta {
     macroCommands: CachedMacroCompletionMeta[];
     valueEntities: CachedValueEntityMeta[];
+    typeEntities: CachedValueEntityMeta[];
 }
 
 const tableCompletionCache = new WeakMap<SymbolTable, CachedTableCompletionMeta>();
@@ -367,6 +375,15 @@ function makeTargetData(documentUri: string, entity: SymbolTableEntity): TargetR
         targetUri: entity.uri,
         targetLine: entity.definition.start.line,
         targetName: entity.name,
+    };
+}
+
+function makeEntityCompletionMeta(entity: SymbolTableEntity): CachedValueEntityMeta {
+    return {
+        entity,
+        fqn: entity.getFullyQualifiedName(),
+        kind: getCompletionItemKind(getLSPSymbolKind(entity)),
+        detail: getCompletionItemDetail(entity),
     };
 }
 
@@ -390,18 +407,16 @@ function getTableCompletionMeta(symbolTable: SymbolTable): CachedTableCompletion
     }
 
     const valueEntities: CachedValueEntityMeta[] = [];
+    const typeEntities: CachedValueEntityMeta[] = [];
     for (const entity of symbolTable.getAllDefinedEntities()) {
         if (isValueCompletionEntity(entity)) {
-            valueEntities.push({
-                entity,
-                fqn: entity.getFullyQualifiedName(),
-                kind: getCompletionItemKind(getLSPSymbolKind(entity)),
-                detail: getCompletionItemDetail(entity),
-            });
+            valueEntities.push(makeEntityCompletionMeta(entity));
+        } else if (isTypeCompletionEntity(entity)) {
+            typeEntities.push(makeEntityCompletionMeta(entity));
         }
     }
 
-    cached = { macroCommands, valueEntities };
+    cached = { macroCommands, valueEntities, typeEntities };
     tableCompletionCache.set(symbolTable, cached);
     return cached;
 }
@@ -448,6 +463,12 @@ export function initializeCompletionProvider(connection: _Connection, documents:
                 return getIncludePathCompletions(document.uri, position, partialPath, isIncbin, settings);
             }
 
+            // --- .SEGMENT NAME CONTEXT ---
+            const segmentMatch = lineToCursor.match(SEGMENT_PATH_CONTEXT_RE);
+            if (segmentMatch && !hasUnclosedPriorBlockComment(document, position.line)) {
+                return getSegmentNameCompletions(document.uri, position, segmentMatch[1], symbolTables);
+            }
+
             if (isInCommentOrString(document, position, lineToCursor)) {
                 return [];
             }
@@ -461,6 +482,8 @@ export function initializeCompletionProvider(connection: _Connection, documents:
             if (NUMERIC_LITERAL_AT_CURSOR_RE.test(lineToCursor) || SINGLE_TRAILING_COLON_RE.test(lineToCursor)) {
                 return [];
             }
+
+            const isTypeContext = TAG_CONTEXT_RE.test(lineToCursor) || SIZEOF_CONTEXT_RE.test(lineToCursor);
 
             const wordMatch = lineToCursor.match(/[a-zA-Z0-9_.:@]*$/);
             const currentWord = wordMatch ? wordMatch[0] : '';
@@ -481,7 +504,8 @@ export function initializeCompletionProvider(connection: _Connection, documents:
                     currentWord.slice(0, lastDoubleColonIdx),
                     memberRange,
                     symbolTables,
-                    includesGraph
+                    includesGraph,
+                    isTypeContext
                 );
             }
 
@@ -491,6 +515,18 @@ export function initializeCompletionProvider(connection: _Connection, documents:
                 params.position.line,
                 params.position.character
             );
+
+            // --- TYPE CONTEXT (`.tag` / `.sizeof(`): Suggest structs and unions ---
+            if (isTypeContext) {
+                return getStructUnionCompletions(
+                    document,
+                    position,
+                    replacementRange,
+                    symbolTables,
+                    includesGraph,
+                    settings
+                );
+            }
 
             // --- CONTEXT DETERMINATION ---
             const prefixMatch = lineToCursor.match(/^\s*(?:(?:[a-zA-Z_@.][a-zA-Z0-9_@.]*)?:(?![:=<>+-])\s*)?/);
@@ -596,23 +632,42 @@ export function initializeCompletionProvider(connection: _Connection, documents:
                     const settingsUri = data.uri || data.targetUri;
                     const settings = await getDocumentSettings(settingsUri);
                     const targetTable = symbolTables.get(data.targetUri);
-                    const targetEntity = findResolvedEntity(targetTable, data.targetLine, data.targetName);
-                    if (targetEntity) {
+                    if (data.isCheapLocal && data.targetRange && data.targetName) {
                         item.documentation = {
                             kind: MarkupKind.Markdown,
-                            value: generateSymbolTableEntityMarkdown(targetEntity, targetDoc, settings.implicitImports),
+                            value: generateCheapLocalHoverMarkdown(
+                                data.targetName,
+                                data.targetRange,
+                                targetDoc,
+                                targetTable,
+                                settings.implicitImports,
+                                settings.binIncludeDirs
+                            ),
                         };
                     } else {
-                        const { docCommentBlock } = extractLeadingDocInfo(targetDoc, data.targetLine);
-                        const parts = [`\`\`\`ca65\n${data.targetName || ''}\n\`\`\``];
-                        if (docCommentBlock) {
-                            parts.push(`\`\`\`ca65\n${docCommentBlock}\n\`\`\``);
+                        const targetEntity = findResolvedEntity(targetTable, data.targetLine, data.targetName);
+                        if (targetEntity) {
+                            item.documentation = {
+                                kind: MarkupKind.Markdown,
+                                value: generateSymbolTableEntityMarkdown(
+                                    targetEntity,
+                                    targetDoc,
+                                    settings.implicitImports,
+                                    settings.binIncludeDirs
+                                ),
+                            };
+                        } else {
+                            const { docCommentBlock } = extractLeadingDocInfo(targetDoc, data.targetLine);
+                            const parts = [`\`\`\`ca65\n${data.targetName || ''}\n\`\`\``];
+                            if (docCommentBlock) {
+                                parts.push(`\`\`\`ca65\n${docCommentBlock}\n\`\`\``);
+                            }
+                            parts.push(`Defined in ${formatSourceLink(data.targetUri, data.targetLine + 1)}`);
+                            item.documentation = {
+                                kind: MarkupKind.Markdown,
+                                value: parts.join('\n\n'),
+                            };
                         }
-                        parts.push(`Defined in ${formatSourceLink(data.targetUri, data.targetLine + 1)}`);
-                        item.documentation = {
-                            kind: MarkupKind.Markdown,
-                            value: parts.join('\n\n'),
-                        };
                     }
                 }
             }
@@ -768,7 +823,8 @@ function getScopeQualifiedCompletions(
     rawQualifier: string,
     replacementRange: Range,
     allSymbolTables: Map<string, SymbolTable>,
-    graph: IncludesGraph
+    graph: IncludesGraph,
+    onlyTypes = false
 ): CompletionItem[] {
     const symbolTable = allSymbolTables.get(document.uri);
     if (!symbolTable) return [];
@@ -801,12 +857,25 @@ function getScopeQualifiedCompletions(
     };
 
     for (const scope of scopes) {
-        for (const sym of scope.getSymbols()) {
-            pushEntity(sym);
+        if (!onlyTypes) {
+            for (const sym of scope.getSymbols()) {
+                pushEntity(sym);
+            }
         }
         for (const childScope of scope.getOrderedChildScopes()) {
             if (!childScope.name) continue;
+            if (
+                onlyTypes
+                && childScope.kind !== ScopeKind.Struct
+                && childScope.kind !== ScopeKind.Union
+                && childScope.kind !== ScopeKind.Scope
+            ) {
+                continue;
+            }
             pushEntity(childScope);
+        }
+        if (onlyTypes) {
+            continue;
         }
         for (const imp of scope.getImports()) {
             const resolved = resolveImport(imp.name, allSymbolTables, graph);
@@ -825,7 +894,7 @@ function getScopeQualifiedCompletions(
         }
     }
 
-    if (isGlobalRoot) {
+    if (isGlobalRoot && !onlyTypes) {
         for (const depUri of visibleUriSet) {
             const st = allSymbolTables.get(depUri);
             if (!st) continue;
@@ -852,15 +921,134 @@ function isValueCompletionEntity(entity: SymbolTableEntity): boolean {
         || (entity instanceof Scope && entity.kind === ScopeKind.Proc);
 }
 
+function isTypeCompletionEntity(entity: SymbolTableEntity): entity is Scope {
+    return entity instanceof Scope
+        && (entity.kind === ScopeKind.Struct || entity.kind === ScopeKind.Union)
+        && !!entity.name
+        && !entity.name.startsWith('<anon');
+}
+
+function getSegmentNameCompletions(
+    documentUri: string,
+    position: Position,
+    partialSegment: string,
+    allSymbolTables: Map<string, SymbolTable>
+): CompletionItem[] {
+    const replaceRange = Range.create(
+        position.line,
+        position.character - partialSegment.length,
+        position.line,
+        position.character
+    );
+    const items: CompletionItem[] = [];
+    const seen = new Set<string>();
+
+    const pushSegment = (name: string, sortGroup: string, detail: string) => {
+        if (!name || seen.has(name)) return;
+        seen.add(name);
+        items.push({
+            label: name,
+            kind: CompletionItemKind.Module,
+            detail,
+            sortText: `${sortGroup}${name.toLowerCase()}`,
+            textEdit: TextEdit.replace(replaceRange, name),
+        });
+    };
+
+    const currentTable = allSymbolTables.get(documentUri);
+    if (currentTable) {
+        for (const seg of currentTable.getDeclaredSegments()) {
+            pushSegment(seg, '0', 'Segment (current file)');
+        }
+    }
+
+    for (const [uri, st] of allSymbolTables) {
+        if (uri === documentUri) continue;
+        for (const seg of st.getDeclaredSegments()) {
+            pushSegment(seg, '1', 'Segment (workspace)');
+        }
+    }
+
+    for (const seg of STANDARD_SEGMENT_NAMES) {
+        pushSegment(seg, '2', 'Standard ca65 segment');
+    }
+
+    return items;
+}
+
+function getStructUnionCompletions(
+    document: TextDocument,
+    position: Position,
+    replacementRange: Range,
+    allSymbolTables: Map<string, SymbolTable>,
+    graph: IncludesGraph,
+    settings: Ca65Settings
+): CompletionItem[] {
+    const symbolTable = allSymbolTables.get(document.uri);
+    if (!symbolTable) return [];
+
+    const currentScope = symbolTable.getScopeAtPosition(position);
+    if (!currentScope) return [];
+
+    const items: CompletionItem[] = [];
+    const visibleUriSet = getVisibleTranslationUnitSet(document.uri, graph);
+    const visibleFqns = new Set<string>();
+
+    for (const depUri of visibleUriSet) {
+        const depSymbolTable = allSymbolTables.get(depUri);
+        if (!depSymbolTable) continue;
+
+        const { typeEntities } = getTableCompletionMeta(depSymbolTable);
+        for (const entry of typeEntities) {
+            visibleFqns.add(entry.fqn);
+            const label = currentScope.findRelativeName(entry.entity);
+            items.push({
+                label,
+                kind: entry.kind,
+                detail: entry.detail,
+                sortText: VISIBLE_ITEM_PREFIX + label,
+                textEdit: TextEdit.replace(replacementRange, label),
+                data: makeTargetData(document.uri, entry.entity),
+            });
+        }
+    }
+
+    for (const [uri, otherSymbolTable] of allSymbolTables) {
+        if (visibleUriSet.has(uri)) continue;
+        if (!isAutoIncludable(uri, settings)) continue;
+
+        const { typeEntities } = getTableCompletionMeta(otherSymbolTable);
+        if (typeEntities.length === 0) continue;
+
+        const canonicalPath = findCanonicalIncludePath(document.uri, uri, settings.includeDirs);
+        for (const entry of typeEntities) {
+            if (visibleFqns.has(entry.fqn)) continue;
+            const label = currentScope.findRelativeName(entry.entity);
+            items.push(makeAutoIncludeCompletionItem(
+                document.uri,
+                label,
+                entry.kind,
+                entry.detail,
+                canonicalPath,
+                entry.entity,
+                replacementRange
+            ));
+        }
+    }
+
+    return items;
+}
+
 function makeAutoIncludeCompletionItem(
     documentUri: string,
     label: string,
     kind: CompletionItemKind,
     detail: string | undefined,
     includePath: string,
-    targetEntity: SymbolTableEntity
+    targetEntity: SymbolTableEntity,
+    replacementRange?: Range
 ): CompletionItem {
-    return {
+    const item: CompletionItem = {
         label,
         kind,
         detail,
@@ -877,6 +1065,10 @@ function makeAutoIncludeCompletionItem(
             targetName: targetEntity.name,
         }
     };
+    if (replacementRange) {
+        item.textEdit = TextEdit.replace(replacementRange, label);
+    }
+    return item;
 }
 
 async function getCompletionMacros(

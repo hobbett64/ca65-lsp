@@ -3,7 +3,7 @@ import {
     SymbolKind as LSPSymbolKind,
     Location,
 } from 'vscode-languageserver-types';
-import { SymbolTable, Symbol, SymbolTableEntity, Macro, Scope, ScopeKind, MacroKind, SymbolKind, ReferenceInfo, Export, Import, isZeroPageSegmentName } from './symbolTable';
+import { SymbolTable, Symbol, SymbolTableEntity, Macro, Scope, ScopeKind, MacroKind, SymbolKind, ReferenceInfo, Export, Import, classifyLabelSegment } from './symbolTable';
 import { IncludesGraph } from './includesGraph';
 import { exportsMap, performanceMonitor } from './server';
 
@@ -303,19 +303,13 @@ export function getAllReferenceLocationsForEntity(
 }
 
 function getLabelSymbolKindBySegment(segment: string | null | undefined): LSPSymbolKind {
-    if (!segment) {
-        return LSPSymbolKind.String;
-    }
-    if (isZeroPageSegmentName(segment)) {
-        return LSPSymbolKind.Variable;
-    }
-    switch (segment.toUpperCase()) {
-        case 'CODE':
+    switch (classifyLabelSegment(segment)) {
+        case 'code':
             return LSPSymbolKind.Function;
-        case 'RODATA':
-        case 'DATA':
+        case 'rodata':
+        case 'data':
             return LSPSymbolKind.Array;
-        case 'BSS':
+        case 'bss':
             return LSPSymbolKind.Variable;
         default:
             return LSPSymbolKind.String;

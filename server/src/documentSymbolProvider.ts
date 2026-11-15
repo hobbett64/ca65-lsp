@@ -4,14 +4,14 @@ import {
     DocumentSymbol,
 } from 'vscode-languageserver/node';
 import { ensureDocumentRefreshed, initializationGate, symbolTables } from './server';
-import { isZeroPageSegmentName, Macro, MacroKind, Scope } from './symbolTable';
+import { Macro, MacroKind, Scope } from './symbolTable';
 import { getLSPSymbolKind } from './symbolResolver';
 
-function formatSegmentDetail(segment: string | null | undefined, parentSegment: string): string | undefined {
-    if (!segment || segment === parentSegment) {
+function formatSegmentDetail(segment: string | null | undefined, parentSegment?: string): string | undefined {
+    if (!segment || segment.trim().toUpperCase() === 'CODE' || segment === parentSegment) {
         return undefined;
     }
-    return isZeroPageSegmentName(segment) ? '(zp)' : undefined;
+    return `(${segment})`;
 }
 
 function formatMacroDetail(macro: Macro): string | undefined {
@@ -27,7 +27,7 @@ export function initializeDocumentSymbolProvider(connection: _Connection) {
         if (!symbolTable) return undefined;
 
         // Recursive function to convert our Symbol/Scope hierarchy to DocumentSymbols
-        function getDocumentSymbols(scope: Scope, parentSegment: string): DocumentSymbol[] {
+        function getDocumentSymbols(scope: Scope, parentSegment?: string): DocumentSymbol[] {
             const symbols: DocumentSymbol[] = [];
             const currentSegment = scope.segment ?? parentSegment;
 
@@ -60,7 +60,7 @@ export function initializeDocumentSymbolProvider(connection: _Connection) {
             return symbols;
         }
 
-        const rootSymbols = getDocumentSymbols(symbolTable.getRootScope(), 'CODE');
+        const rootSymbols = getDocumentSymbols(symbolTable.getRootScope(), undefined);
 
         // Add macros and sort top-level symbols in source order
         for (const macro of symbolTable.getAllMacros()) {

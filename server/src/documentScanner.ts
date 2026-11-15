@@ -490,6 +490,7 @@ class DocumentScanner {
     private currentMacro: Macro | null = null;
     private inIgnoredMacro = false;
     private currentSegment = 'CODE';
+    private segmentStack: string[] = [];
     private currentLabel: Symbol | undefined;
     private pendingLabelKindSet = false;
     private nextAnonLabelIndex = 0;
@@ -888,6 +889,21 @@ class DocumentScanner {
             this.currentSegment = cmd === '.segment'
                 ? argsText.replace(/"/g, '')
                 : cmd.slice(1).toUpperCase();
+            this.symbolTable.recordSegmentChange(line, this.currentSegment);
+            return true;
+        }
+
+        if (cmd === '.pushseg') {
+            this.segmentStack.push(this.currentSegment);
+            return true;
+        }
+
+        if (cmd === '.popseg') {
+            this.currentLabel = undefined;
+            if (this.segmentStack.length > 0) {
+                this.currentSegment = this.segmentStack.pop()!;
+                this.symbolTable.recordSegmentChange(line, this.currentSegment);
+            }
             return true;
         }
 
@@ -1038,6 +1054,7 @@ class DocumentScanner {
             });
         }
         this.currentSegment = `segment from ${filename}`;
+        this.symbolTable.recordSegmentChange(line, this.currentSegment);
     }
 
     private updateLabelKindFromCommand(cmd: string, argsText: string): void {

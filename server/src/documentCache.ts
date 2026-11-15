@@ -1,3 +1,4 @@
+import * as fsSync from 'fs';
 import * as fs from 'fs/promises';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { TextDocuments } from 'vscode-languageserver/node';
@@ -8,6 +9,41 @@ const MAX_UNOPENED_DOC_CACHE = 64;
 const unopenedDocCache = new Map<string, TextDocument>();
 const dirtySinceSave = new Set<string>();
 const verifiedCleanVersions = new Map<string, number>();
+let liveDocuments: TextDocuments<TextDocument> | undefined;
+
+export function registerLiveDocuments(documents: TextDocuments<TextDocument>): void {
+    liveDocuments = documents;
+}
+
+export function getCachedTextDocumentSync(uri: string, fallbackDoc?: TextDocument): TextDocument | null {
+    if (fallbackDoc && fallbackDoc.uri === uri) {
+        return fallbackDoc;
+    }
+    const openDoc = liveDocuments?.get(uri);
+    if (openDoc) {
+        return openDoc;
+    }
+    const cached = unopenedDocCache.get(uri);
+    if (cached) {
+        unopenedDocCache.delete(uri);
+        unopenedDocCache.set(uri, cached);
+        return cached;
+    }
+    try {
+        const content = fsSync.readFileSync(uriToFsPath(uri), 'utf-8');
+        const doc = TextDocument.create(uri, 'ca65', 0, content);
+        if (unopenedDocCache.size >= MAX_UNOPENED_DOC_CACHE) {
+            const oldestKey = unopenedDocCache.keys().next().value;
+            if (oldestKey !== undefined) {
+                unopenedDocCache.delete(oldestKey);
+            }
+        }
+        unopenedDocCache.set(uri, doc);
+        return doc;
+    } catch {
+        return null;
+    }
+}
 
 export function invalidateCachedDocument(uri: string): void {
     unopenedDocCache.delete(uri);

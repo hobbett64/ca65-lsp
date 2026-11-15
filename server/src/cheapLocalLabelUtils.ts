@@ -136,6 +136,16 @@ function getCheapLocalScopeSpan(
 }
 
 /**
+ * Returns the inclusive last line number of the cheap local label scope containing `line`.
+ */
+export function getCheapLocalScopeEndLine(document: TextDocument, line: number): number {
+    if (line < 0 || line >= document.lineCount) {
+        return Math.max(0, document.lineCount - 1);
+    }
+    return getCheapLocalScopeSpan(document.getText(), document, line).endLine;
+}
+
+/**
  * Finds the previous boundary for a cheap local label.
  * @param document The document to scan.
  * @param startLine The line to start scanning backwards from.

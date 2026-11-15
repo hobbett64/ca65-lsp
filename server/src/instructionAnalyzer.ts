@@ -1,12 +1,14 @@
 import { Range } from 'vscode-languageserver-types';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { getMnemonicInfo, MnemonicModeInfo } from './dataManager';
+import { getCachedTextDocumentSync } from './documentCache';
 import { findCommentStart, parseLine } from './documentScanner';
 import { getLineText } from './editUtils';
 import { IncludesGraph } from './includesGraph';
+import { resolveIncbinFileSizeSync } from './pathUtils';
 import { Ca65Cpu, normalizeCpu } from './settings';
 import { resolveImport, resolveReference } from './symbolResolver';
-import { Import, isZeroPageSegmentName, Scope, ScopeKind, Symbol, SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
+import { Import, isZeroPageSegmentName, Macro, MacroKind, ReferenceInfo, Scope, ScopeKind, Symbol, SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
 
 export interface InstructionAnalysisItem {
     line: number;
@@ -45,9 +47,55 @@ export interface InstructionAnalysisSummary {
 type AddressWidth = 'zp' | 'abs' | 'far' | 'unknown';
 
 interface ExprToken {
-    type: 'num' | 'op' | 'lparen' | 'rparen' | 'ident';
+    type: 'num' | 'op' | 'lparen' | 'rparen' | 'ident' | 'sizeof' | 'unary_fn';
     value: string;
     numValue?: number;
+}
+
+const UNARY_PSEUDO_FUNCTIONS = new Set([
+    '.lobyte',
+    '.hibyte',
+    '.bankbyte',
+    '.loword',
+    '.hiword',
+]);
+
+const QUALIFIED_IDENT_RE = /^(?:::)?[a-zA-Z_@][a-zA-Z0-9_]*(?:::[a-zA-Z_@][a-zA-Z0-9_]*)*$/;
+
+function findMatchingCloseParen(text: string, openParenIdx: number): number {
+    let depth = 0;
+    let quote = 0;
+    for (let i = openParenIdx; i < text.length; i++) {
+        const c = text.charCodeAt(i);
+        if (quote !== 0) {
+            if (c === quote) {
+                quote = 0;
+            }
+        } else if (c === 34 /* " */ || c === 39 /* ' */) {
+            quote = c;
+        } else if (c === 40 /* ( */) {
+            depth++;
+        } else if (c === 41 /* ) */) {
+            depth--;
+            if (depth === 0) return i;
+        }
+    }
+    return -1;
+}
+
+function isSimpleQuotedString(text: string, allowEscapes: boolean = false): boolean {
+    if (text.length < 2 || text.charCodeAt(0) !== 34) return false;
+    for (let i = 1; i < text.length; i++) {
+        const c = text.charCodeAt(i);
+        if (allowEscapes && c === 92 /* \ */) {
+            i++;
+            continue;
+        }
+        if (c === 34 /* " */) {
+            return i === text.length - 1;
+        }
+    }
+    return false;
 }
 
 function isWsCode(code: number): boolean {
@@ -219,8 +267,42 @@ function tokenizeExpr(expr: string): ExprToken[] | null {
             i = p;
             continue;
         }
-        if (isIdentStartCode(code)) {
+        if (code === 46) { // '.sizeof', '.strlen', '.lobyte', ...
             let p = i + 1;
+            while (p < len && isIdentBodyCode(expr.charCodeAt(p))) {
+                p++;
+            }
+            if (p === i + 1) return null;
+            const fnName = expr.slice(i, p).toLowerCase();
+            if (fnName === '.sizeof' || fnName === '.strlen') {
+                let openIdx = p;
+                while (openIdx < len && isWsCode(expr.charCodeAt(openIdx))) {
+                    openIdx++;
+                }
+                if (openIdx >= len || expr.charCodeAt(openIdx) !== 40) return null;
+                const closeIdx = findMatchingCloseParen(expr, openIdx);
+                if (closeIdx < 0) return null;
+                const inner = expr.slice(openIdx + 1, closeIdx).trim();
+                if (fnName === '.sizeof') {
+                    if (!QUALIFIED_IDENT_RE.test(inner)) return null;
+                    tokens.push({ type: 'sizeof', value: inner });
+                } else {
+                    if (!isSimpleQuotedString(inner)) return null;
+                    tokens.push({ type: 'num', value: expr.slice(i, closeIdx + 1), numValue: inner.length - 2 });
+                }
+                i = closeIdx + 1;
+                continue;
+            }
+            if (UNARY_PSEUDO_FUNCTIONS.has(fnName)) {
+                tokens.push({ type: 'unary_fn', value: fnName });
+                i = p;
+                continue;
+            }
+            return null;
+        }
+        if (isIdentStartCode(code) || (code === 58 && i + 1 < len && expr.charCodeAt(i + 1) === 58)) {
+            let p = i + (code === 58 ? 2 : 1);
+            if (code === 58 && (p >= len || !isIdentStartCode(expr.charCodeAt(p)))) return null;
             while (p < len && isIdentBodyCode(expr.charCodeAt(p))) {
                 p++;
             }
@@ -239,7 +321,8 @@ function tokenizeExpr(expr: string): ExprToken[] | null {
  */
 export function tryEvaluateNumericExpr(
     expr: string,
-    resolveIdent?: (name: string) => number | null
+    resolveIdent?: (name: string) => number | null,
+    resolveSizeof?: (name: string) => number | null
 ): number | null {
     const tokens = tokenizeExpr(expr);
     if (!tokens || tokens.length === 0) return null;
@@ -349,6 +432,28 @@ export function tryEvaluateNumericExpr(
             pos++;
             return resolveIdent(tok.value);
         }
+        if (tok.type === 'sizeof' && resolveSizeof) {
+            pos++;
+            return resolveSizeof(tok.value);
+        }
+        if (tok.type === 'unary_fn') {
+            pos++;
+            if (pos >= tokens.length || tokens[pos].type !== 'lparen') return null;
+            pos++;
+            const inner = parseBitOr();
+            if (inner === null || pos >= tokens.length || tokens[pos].type !== 'rparen') {
+                return null;
+            }
+            pos++;
+            switch (tok.value) {
+                case '.lobyte': return inner & 0xFF;
+                case '.hibyte': return (inner >> 8) & 0xFF;
+                case '.bankbyte': return (inner >> 16) & 0xFF;
+                case '.loword': return inner & 0xFFFF;
+                case '.hiword': return (inner >> 16) & 0xFFFF;
+                default: return null;
+            }
+        }
         if (tok.type === 'lparen') {
             pos++;
             const inner = parseBitOr();
@@ -440,6 +545,524 @@ function matchOuterDelimited(
     return null;
 }
 
+interface LineSource {
+    line: number;
+    minChar: number;
+}
+
+interface LogicalLine {
+    text: string;
+    sources: LineSource[];
+}
+
+interface SizeEvalContext {
+    document: TextDocument;
+    symbolTable: SymbolTable | undefined;
+    allSymbolTables: Map<string, SymbolTable>;
+    includesGraph: IncludesGraph;
+    implicitImports: boolean;
+    binIncludeDirs?: string[];
+    visitedEntities: Set<SymbolTableEntity>;
+    visitedScopes: Set<Scope>;
+    constCache?: Map<SymbolTableEntity, number | null>;
+}
+
+const DATA_DIRECTIVE_UNIT_BYTES: Record<string, number> = {
+    '.byte': 1,
+    '.byt': 1,
+    '.lobytes': 1,
+    '.hibytes': 1,
+    '.bankbytes': 1,
+    '.literal': 1,
+    '.asciiz': 1,
+    '.word': 2,
+    '.addr': 2,
+    '.dbyt': 2,
+    '.faraddr': 3,
+    '.dword': 4,
+};
+
+const STRUCT_FIELD_UNIT_BYTES: Record<string, number> = {
+    '.byte': 1,
+    '.byt': 1,
+    '.word': 2,
+    '.addr': 2,
+    '.dbyt': 2,
+    '.faraddr': 3,
+    '.dword': 4,
+};
+
+const STRING_CAPABLE_DATA_DIRECTIVES = new Set([
+    '.byte',
+    '.byt',
+    '.literal',
+    '.asciiz',
+]);
+
+const NON_EMITTING_LABEL_DIRECTIVES = new Set([
+    '.export',
+    '.exportzp',
+    '.global',
+    '.globalzp',
+    '.import',
+    '.importzp',
+    '.forceimport',
+    '.condes',
+    '.constructor',
+    '.destructor',
+    '.interruptor',
+    '.debuginfo',
+    '.list',
+    '.listbytes',
+    '.pagelen',
+    '.pagelength',
+    '.out',
+    '.warning',
+    '.error',
+    '.fatal',
+    '.assert',
+    '.feature',
+    '.case',
+    '.smart',
+    '.a8',
+    '.a16',
+    '.i8',
+    '.i16',
+    '.p02',
+    '.pc02',
+    '.p816',
+    '.setcpu',
+    '.pushcpu',
+    '.popcpu',
+    '.localchar',
+    '.autoimport',
+    '.referto',
+    '.refto',
+    '.fopt',
+    '.fileopt',
+    '.charmap',
+    '.pushcharmap',
+    '.popcharmap',
+    '.pushseg',
+    '.linecont',
+]);
+
+const STOP_SEGMENT_OR_SCOPE_DIRECTIVES = new Set([
+    '.popseg',
+    '.segment',
+    '.code',
+    '.data',
+    '.rodata',
+    '.zeropage',
+    '.bss',
+    '.endproc',
+    '.endscope',
+    '.end',
+]);
+
+const HAS_STRING_ESCAPES_RE = /^\s*\.feature\s+.*\bstring_escapes\b/im;
+const LABEL_ASSIGNMENT_RE = /^\s*[a-zA-Z_@.][a-zA-Z0-9_]*\s*(?:=|:=|\.(?:equ|set)\b)/i;
+
+function splitCommaArgsOutsideQuotes(text: string, allowEscapes: boolean = false): string[] {
+    const parts: string[] = [];
+    let start = 0;
+    let quote = 0;
+    let depth = 0;
+    for (let i = 0; i < text.length; i++) {
+        const c = text.charCodeAt(i);
+        if (quote !== 0) {
+            if (allowEscapes && c === 92 /* \ */) {
+                i++;
+                continue;
+            }
+            if (c === quote) {
+                quote = 0;
+            }
+        } else if (c === 34 /* " */ || c === 39 /* ' */) {
+            quote = c;
+        } else if (c === 40 /* ( */) {
+            depth++;
+        } else if (c === 41 /* ) */ && depth > 0) {
+            depth--;
+        } else if (c === 44 /* , */ && depth === 0) {
+            const seg = text.slice(start, i).trim();
+            if (seg.length > 0) parts.push(seg);
+            start = i + 1;
+        }
+    }
+    const tail = text.slice(start).trim();
+    if (tail.length > 0) parts.push(tail);
+    return parts;
+}
+
+function measureQuotedStringBytes(quotedItem: string, allowEscapes: boolean): number {
+    const raw = quotedItem.slice(1, -1);
+    if (!allowEscapes || !raw.includes('\\')) {
+        return raw.length;
+    }
+    let count = 0;
+    for (let i = 0; i < raw.length; i++) {
+        if (raw.charCodeAt(i) === 92 /* \ */ && i + 1 < raw.length) {
+            const next = raw.charCodeAt(i + 1);
+            if ((next === 120 /* x */ || next === 88 /* X */) && i + 3 < raw.length) {
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        count++;
+    }
+    return count;
+}
+
+function collectLogicalLines(
+    document: TextDocument,
+    startLine: number,
+    endLine: number,
+    firstLineMinChar: number = -1,
+    stopAfterFirst: boolean = false
+): LogicalLine[] {
+    const result: LogicalLine[] = [];
+    const maxLine = Math.min(endLine, document.lineCount - 1);
+    let currentText = '';
+    let currentSources: LineSource[] = [];
+
+    for (let line = Math.max(0, startLine); line <= maxLine; line++) {
+        const rawLine = getLineText(document, line);
+        const commentIdx = findCommentStart(rawLine);
+        const hasComment = commentIdx >= 0;
+        const code = hasComment ? rawLine.slice(0, commentIdx) : rawLine;
+        const trimmed = code.trimEnd();
+        const isContinuation = !hasComment && trimmed.endsWith('\\');
+        const piece = isContinuation ? trimmed.slice(0, -1) : trimmed;
+
+        currentText = currentSources.length === 0 ? piece : `${currentText} ${piece}`;
+        currentSources.push({
+            line,
+            minChar: line === startLine ? firstLineMinChar : -1,
+        });
+
+        if (!isContinuation) {
+            result.push({ text: currentText, sources: currentSources });
+            if (stopAfterFirst) {
+                return result;
+            }
+            currentText = '';
+            currentSources = [];
+        }
+    }
+
+    if (currentSources.length > 0) {
+        result.push({ text: currentText, sources: currentSources });
+    }
+    return result;
+}
+
+function resolveEntityByName(
+    identName: string,
+    line: number,
+    context: ReferenceInfo['context'],
+    symbolTable: SymbolTable,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph
+): SymbolTableEntity | undefined {
+    const parts = identName.split('::');
+    const leaf = parts[parts.length - 1];
+    const quals = parts.slice(0, -1);
+
+    const startScope = symbolTable.getScopeAtPosition({ line, character: 0 }) ?? symbolTable.getRootScope();
+    const localFound = startScope.findDefinitionOrImport(leaf, quals, context);
+    if (localFound) {
+        return localFound instanceof Import
+            ? resolveImport(localFound.name, allSymbolTables, includesGraph)
+            : localFound;
+    }
+
+    for (const uri of includesGraph.getTranslationUnit(symbolTable.uri)) {
+        if (uri === symbolTable.uri) continue;
+        const st = allSymbolTables.get(uri);
+        if (!st) continue;
+        const found = st.getRootScope().findDefinitionOrImport(leaf, quals, context);
+        if (found) {
+            return found instanceof Import
+                ? resolveImport(found.name, allSymbolTables, includesGraph)
+                : found;
+        }
+    }
+
+    if (quals.length === 0 && (context === 'symbol' || context === 'macro')) {
+        for (const uri of includesGraph.getTranslationUnit(symbolTable.uri)) {
+            const macro = allSymbolTables.get(uri)?.getMacro(leaf);
+            if (macro && macro.kind === MacroKind.Define && macro.params.length === 0) {
+                return macro;
+            }
+        }
+    }
+
+    return undefined;
+}
+
+function resolveIdentOnLine(
+    identName: string,
+    line: number,
+    minChar: number,
+    symbolTable: SymbolTable | undefined,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+    implicitImports: boolean,
+    context: ReferenceInfo['context'] = 'symbol'
+): SymbolTableEntity | undefined {
+    if (!symbolTable) return undefined;
+    const parts = identName.split('::');
+    const leaf = parts[parts.length - 1];
+    const quals = parts.slice(0, -1);
+
+    const lineRefs = symbolTable.getReferencesOnLine(line);
+    const matchRef = lineRefs.find((r: ReferenceInfo) => {
+        if (r.location.start.character <= minChar || r.name !== leaf) return false;
+        if (quals.length > 0 && (r.qualifiers.length !== quals.length || r.qualifiers.join('::') !== quals.join('::'))) {
+            return false;
+        }
+        return true;
+    });
+    if (matchRef) {
+        const resolved = resolveReference(matchRef, allSymbolTables, includesGraph, implicitImports);
+        if (resolved && !(resolved instanceof Import)) {
+            return resolved;
+        }
+    }
+
+    return resolveEntityByName(identName, line, context, symbolTable, allSymbolTables, includesGraph);
+}
+
+function resolveEntityOnSources(
+    identName: string,
+    sources: readonly LineSource[],
+    context: ReferenceInfo['context'],
+    symbolTable: SymbolTable | undefined,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+    implicitImports: boolean
+): SymbolTableEntity | undefined {
+    if (!symbolTable || sources.length === 0) return undefined;
+    for (const src of sources) {
+        const resolved = resolveIdentOnLine(
+            identName,
+            src.line,
+            src.minChar,
+            symbolTable,
+            allSymbolTables,
+            includesGraph,
+            implicitImports,
+            context
+        );
+        if (resolved) return resolved;
+    }
+    return undefined;
+}
+
+function evaluateNumericExprOnSources(
+    expr: string,
+    sources: readonly LineSource[],
+    ctx: SizeEvalContext
+): number | null {
+    return tryEvaluateNumericExpr(
+        expr,
+        (identName) => {
+            const target = resolveEntityOnSources(
+                identName,
+                sources,
+                'symbol',
+                ctx.symbolTable,
+                ctx.allSymbolTables,
+                ctx.includesGraph,
+                ctx.implicitImports
+            );
+            if (!target) return null;
+            return tryResolveLocalConstantValue(
+                target,
+                ctx.document,
+                ctx.symbolTable!,
+                ctx.allSymbolTables,
+                ctx.includesGraph,
+                ctx.implicitImports,
+                ctx.visitedEntities,
+                ctx.constCache,
+                ctx.visitedScopes,
+                ctx.binIncludeDirs
+            );
+        },
+        (sizeofTargetName) => {
+            const target = resolveEntityOnSources(
+                sizeofTargetName,
+                sources,
+                'sizeof',
+                ctx.symbolTable,
+                ctx.allSymbolTables,
+                ctx.includesGraph,
+                ctx.implicitImports
+            );
+            if (!target) return null;
+            if (target instanceof Scope) {
+                return evaluateStructOrUnionSize(target, ctx);
+            }
+            if (
+                target instanceof Symbol
+                && (
+                    target.kind === SymbolKind.ResLabel
+                    || target.kind === SymbolKind.DataLabel
+                    || target.kind === SymbolKind.StringLabel
+                    || target.kind === SymbolKind.Label
+                )
+            ) {
+                const targetDoc = getCachedTextDocumentSync(target.uri, ctx.document);
+                const targetSymTable = ctx.allSymbolTables.get(target.uri);
+                if (!targetDoc || !targetSymTable) return null;
+                return evaluateLabelSizeInternal(target, {
+                    ...ctx,
+                    document: targetDoc,
+                    symbolTable: targetSymTable,
+                });
+            }
+            return null;
+        }
+    );
+}
+
+function evaluateStructMemberDirectiveBytes(
+    dirToken: string,
+    dirArgs: string,
+    sources: readonly LineSource[],
+    ctx: SizeEvalContext
+): number | null {
+    if (dirToken === '.res') {
+        const parts = splitCommaArgsOutsideQuotes(dirArgs);
+        if (parts.length === 0) return null;
+        const val = evaluateNumericExprOnSources(parts[0], sources, ctx);
+        return val !== null && Number.isFinite(val) && val >= 0 ? val : null;
+    }
+
+    if (dirToken === '.tag') {
+        const targetName = dirArgs.split(/\s+/)[0] ?? '';
+        if (!targetName || !ctx.symbolTable) return null;
+        const target = resolveEntityOnSources(
+            targetName,
+            sources,
+            'scope',
+            ctx.symbolTable,
+            ctx.allSymbolTables,
+            ctx.includesGraph,
+            ctx.implicitImports
+        );
+        if (!(target instanceof Scope)) return null;
+        return evaluateStructOrUnionSize(target, ctx);
+    }
+
+    const unitBytes = STRUCT_FIELD_UNIT_BYTES[dirToken];
+    if (unitBytes === undefined) {
+        return null;
+    }
+    if (!dirArgs) {
+        return unitBytes;
+    }
+    const parts = splitCommaArgsOutsideQuotes(dirArgs);
+    if (parts.length === 0) return null;
+    const countVal = evaluateNumericExprOnSources(parts[0], sources, ctx);
+    return countVal !== null && Number.isFinite(countVal) && countVal >= 0
+        ? unitBytes * countVal
+        : null;
+}
+
+function evaluateStructOrUnionSize(scope: Scope, ctx: SizeEvalContext): number | null {
+    if (scope.kind !== ScopeKind.Struct && scope.kind !== ScopeKind.Union) {
+        return null;
+    }
+    if (ctx.visitedScopes.has(scope)) {
+        return null;
+    }
+    const scopeDoc = getCachedTextDocumentSync(scope.uri, ctx.document);
+    const scopeSymTable = ctx.allSymbolTables.get(scope.uri);
+    if (!scopeDoc || !scopeSymTable) {
+        return null;
+    }
+
+    ctx.visitedScopes.add(scope);
+    try {
+        const scopeCtx: SizeEvalContext = {
+            ...ctx,
+            document: scopeDoc,
+            symbolTable: scopeSymTable,
+        };
+        const logicalLines = collectLogicalLines(
+            scopeDoc,
+            scope.definition.start.line + 1,
+            scope.range.end.line - 1
+        );
+        const frames: Array<{ kind: ScopeKind.Struct | ScopeKind.Union; size: number }> = [
+            { kind: scope.kind, size: 0 },
+        ];
+
+        const addMemberSize = (memberSize: number) => {
+            const top = frames[frames.length - 1];
+            top.size = top.kind === ScopeKind.Struct
+                ? top.size + memberSize
+                : Math.max(top.size, memberSize);
+        };
+
+        for (const logical of logicalLines) {
+            const parsed = parseLine(logical.text);
+            if (!parsed.command) continue;
+
+            let dirToken: string;
+            let dirArgs: string;
+            let minChar: number;
+            if (parsed.command.text.startsWith('.')) {
+                dirToken = parsed.command.text.toLowerCase();
+                dirArgs = parsed.args?.text.trim() ?? '';
+                minChar = parsed.command.index + parsed.command.text.length;
+            } else {
+                const rest = parsed.args?.text.trim() ?? '';
+                const sub = parseLine(rest);
+                if (!sub.command || !sub.command.text.startsWith('.')) {
+                    return null;
+                }
+                dirToken = sub.command.text.toLowerCase();
+                dirArgs = sub.args?.text.trim() ?? '';
+                minChar = parsed.command.index + parsed.command.text.length;
+            }
+
+            if (dirToken === '.struct' || dirToken === '.union') {
+                frames.push({
+                    kind: dirToken === '.struct' ? ScopeKind.Struct : ScopeKind.Union,
+                    size: 0,
+                });
+                continue;
+            }
+            if (dirToken === '.endstruct' || dirToken === '.endunion') {
+                const expected = dirToken === '.endstruct' ? ScopeKind.Struct : ScopeKind.Union;
+                if (frames.length <= 1 || frames[frames.length - 1].kind !== expected) {
+                    return null;
+                }
+                const finished = frames.pop()!;
+                addMemberSize(finished.size);
+                continue;
+            }
+
+            const adjustedSources = logical.sources.map((s, idx) =>
+                idx === 0 ? { line: s.line, minChar } : s
+            );
+
+            const memberSize = evaluateStructMemberDirectiveBytes(dirToken, dirArgs, adjustedSources, scopeCtx);
+            if (memberSize === null) return null;
+            addMemberSize(memberSize);
+        }
+
+        return frames.length === 1 ? frames[0].size : null;
+    } finally {
+        ctx.visitedScopes.delete(scope);
+    }
+}
+
 function tryResolveLocalConstantValue(
     entity: SymbolTableEntity,
     document: TextDocument,
@@ -448,53 +1071,142 @@ function tryResolveLocalConstantValue(
     includesGraph: IncludesGraph,
     implicitImports: boolean,
     visited: Set<SymbolTableEntity>,
-    constCache?: Map<SymbolTableEntity, number | null>
+    constCache?: Map<SymbolTableEntity, number | null>,
+    visitedScopes: Set<Scope> = new Set(),
+    binIncludeDirs?: string[]
 ): number | null {
     if (constCache && constCache.has(entity)) {
         return constCache.get(entity) ?? null;
     }
-    if (!(entity instanceof Symbol) || entity.kind !== SymbolKind.Constant) {
+    if (visited.has(entity)) {
         return null;
     }
-    if (entity.uri !== document.uri || visited.has(entity)) {
+
+    const targetDoc = getCachedTextDocumentSync(entity.uri, document);
+    const targetSymTable = allSymbolTables.get(entity.uri) ?? (entity.uri === symbolTable.uri ? symbolTable : undefined);
+    if (!targetDoc || !targetSymTable) {
         return null;
     }
+
+    const ctx: SizeEvalContext = {
+        document: targetDoc,
+        symbolTable: targetSymTable,
+        allSymbolTables,
+        includesGraph,
+        implicitImports,
+        binIncludeDirs,
+        visitedEntities: visited,
+        visitedScopes,
+        constCache,
+    };
+
+    if (entity instanceof Macro) {
+        if (entity.kind !== MacroKind.Define || entity.params.length > 0) {
+            return null;
+        }
+        visited.add(entity);
+        try {
+            const defLine = entity.definition.start.line;
+            if (defLine < 0 || defLine >= targetDoc.lineCount) {
+                constCache?.set(entity, null);
+                return null;
+            }
+            const rawLine = getLineText(targetDoc, defLine);
+            const commentIdx = findCommentStart(rawLine);
+            const code = commentIdx >= 0 ? rawLine.slice(0, commentIdx) : rawLine;
+            const defMatch = code.match(/^\s*\.define\s+[a-zA-Z_][a-zA-Z0-9_]*\s+(.+)$/i);
+            if (!defMatch) {
+                constCache?.set(entity, null);
+                return null;
+            }
+            const rhs = defMatch[1].trim();
+            const resolvedVal = evaluateNumericExprOnSources(
+                rhs,
+                [{ line: defLine, minChar: entity.definition.end.character }],
+                ctx
+            );
+            constCache?.set(entity, resolvedVal);
+            return resolvedVal;
+        } finally {
+            visited.delete(entity);
+        }
+    }
+
+    if (
+        !(entity instanceof Symbol)
+        || (
+            entity.kind !== SymbolKind.Constant
+            && entity.kind !== SymbolKind.Variable
+            && entity.kind !== SymbolKind.EnumMember
+        )
+    ) {
+        return null;
+    }
+
     visited.add(entity);
+    try {
+        const defLine = entity.definition.start.line;
+        if (defLine < 0 || defLine >= targetDoc.lineCount) {
+            constCache?.set(entity, null);
+            return null;
+        }
 
-    const defLine = entity.definition.start.line;
-    if (defLine < 0 || defLine >= document.lineCount) {
-        constCache?.set(entity, null);
-        return null;
-    }
-    const rawLine = getLineText(document, defLine);
-    const commentIdx = findCommentStart(rawLine);
-    const code = commentIdx >= 0 ? rawLine.slice(0, commentIdx) : rawLine;
-    const eqMatch = code.match(/(?:=|:=|\.(?:equ|EQU))\s*(.+)$/);
-    if (!eqMatch) {
-        constCache?.set(entity, null);
-        return null;
-    }
+        if (entity.kind === SymbolKind.EnumMember && entity.scope?.kind === ScopeKind.Enum) {
+            let nextVal: number | null = 0;
+            for (const member of entity.scope.getSymbols()) {
+                const mLine = member.definition.start.line;
+                if (mLine >= 0 && mLine < targetDoc.lineCount) {
+                    const mRaw = getLineText(targetDoc, mLine);
+                    const mComment = findCommentStart(mRaw);
+                    const mCode = mComment >= 0 ? mRaw.slice(0, mComment) : mRaw;
+                    const mAfter = mCode.slice(member.definition.end.character);
+                    const mEq = mAfter.match(/^\s*=\s*(.+)$/);
+                    if (mEq) {
+                        nextVal = evaluateNumericExprOnSources(
+                            mEq[1].trim(),
+                            [{ line: mLine, minChar: member.definition.end.character }],
+                            ctx
+                        );
+                    }
+                }
+                if (member === entity) {
+                    constCache?.set(entity, nextVal);
+                    return nextVal;
+                }
+                if (nextVal !== null) {
+                    nextVal++;
+                }
+            }
+            constCache?.set(entity, null);
+            return null;
+        }
 
-    const rhs = eqMatch[1].trim();
-    const resolvedVal = tryEvaluateNumericExpr(rhs, (identName) => {
-        const lineRefs = symbolTable.getReferencesOnLine(defLine);
-        const matchRef = lineRefs.find(r => r.name === identName && r.location.start.character > entity.definition.end.character);
-        if (!matchRef) return null;
-        const target = resolveReference(matchRef, allSymbolTables, includesGraph, implicitImports);
-        if (!target) return null;
-        return tryResolveLocalConstantValue(
-            target,
-            document,
-            symbolTable,
-            allSymbolTables,
-            includesGraph,
-            implicitImports,
-            visited,
-            constCache
+        const rawLine = getLineText(targetDoc, defLine);
+        const commentIdx = findCommentStart(rawLine);
+        const code = commentIdx >= 0 ? rawLine.slice(0, commentIdx) : rawLine;
+        const afterDef = code.slice(entity.definition.end.character);
+        const trimmedLine = code.trimStart().toLowerCase();
+        const isImportExportDecl = trimmedLine.startsWith('.export') || trimmedLine.startsWith('.global');
+        const rhsCandidate = isImportExportDecl
+            ? splitCommaArgsOutsideQuotes(afterDef)[0] ?? ''
+            : afterDef;
+        const eqMatch = rhsCandidate.match(/^\s*(?:=|:=|\.(?:equ|set))\s*(.+)$/i);
+        if (!eqMatch) {
+            constCache?.set(entity, null);
+            return null;
+        }
+
+        const rhs = eqMatch[1].trim();
+        const resolvedVal = evaluateNumericExprOnSources(
+            rhs,
+            [{ line: defLine, minChar: entity.definition.end.character }],
+            ctx
         );
-    });
-    constCache?.set(entity, resolvedVal);
-    return resolvedVal;
+        constCache?.set(entity, resolvedVal);
+        return resolvedVal;
+    } finally {
+        visited.delete(entity);
+    }
 }
 
 /**
@@ -517,6 +1229,364 @@ export function evaluateConstantEntity(
         implicitImports,
         new Set()
     );
+}
+
+function evaluateLabelSpanSize(
+    startLine: number,
+    endLine: number,
+    defEndChar: number,
+    stopAtAnyLabel: boolean,
+    ctx: SizeEvalContext
+): number | null {
+    if (startLine < 0 || startLine > endLine) {
+        return null;
+    }
+
+    const logicalLines = collectLogicalLines(
+        ctx.document,
+        startLine,
+        endLine,
+        defEndChar
+    );
+
+    let totalBytes = 0;
+    let sawData = false;
+    let sawTrailingAlign = false;
+    let checkedStringEscapes: boolean | undefined;
+    const repeatStack: number[] = [];
+
+    const hasStringEscapes = (): boolean => {
+        if (checkedStringEscapes === undefined) {
+            checkedStringEscapes = HAS_STRING_ESCAPES_RE.test(ctx.document.getText());
+        }
+        return checkedStringEscapes;
+    };
+
+    for (const logical of logicalLines) {
+        const parsed = parseLine(logical.text);
+        const isFirstLine = logical.sources[0].line === startLine;
+
+        if (!isFirstLine && parsed.label !== undefined && parsed.label.text !== '') {
+            if (stopAtAnyLabel || !parsed.label.text.startsWith('@')) {
+                break;
+            }
+        }
+
+        if (!parsed.command) {
+            continue;
+        }
+
+        const cmd = parsed.command.text.toLowerCase();
+        if (!cmd.startsWith('.') && LABEL_ASSIGNMENT_RE.test(
+            isFirstLine && parsed.label
+                ? logical.text.slice(defEndChar).replace(/^\s*:?\s*/, '')
+                : logical.text
+        )) {
+            continue;
+        }
+
+        if (NON_EMITTING_LABEL_DIRECTIVES.has(cmd)) {
+            continue;
+        }
+
+        if (STOP_SEGMENT_OR_SCOPE_DIRECTIVES.has(cmd)) {
+            if (!sawData || repeatStack.length > 0) return null;
+            break;
+        }
+
+        if (cmd === '.align') {
+            if (!sawData || repeatStack.length > 0) return null;
+            sawTrailingAlign = true;
+            continue;
+        }
+
+        if (sawTrailingAlign) {
+            return null;
+        }
+
+        const argsText = parsed.args?.text.trim() ?? '';
+
+        if (cmd === '.repeat' || cmd === '.rep') {
+            const parts = splitCommaArgsOutsideQuotes(argsText);
+            if (parts.length === 0) return null;
+            const repVal = evaluateNumericExprOnSources(parts[0], logical.sources, ctx);
+            if (repVal === null || !Number.isFinite(repVal) || repVal < 0) {
+                return null;
+            }
+            repeatStack.push(Math.floor(repVal));
+            continue;
+        }
+
+        if (cmd === '.endrepeat' || cmd === '.endrep') {
+            if (repeatStack.length === 0) {
+                if (!sawData) return null;
+                break;
+            }
+            repeatStack.pop();
+            continue;
+        }
+
+        let mult = 1;
+        for (const r of repeatStack) {
+            mult *= r;
+        }
+
+        if (cmd === '.res') {
+            const parts = splitCommaArgsOutsideQuotes(argsText);
+            if (parts.length === 0) return null;
+            const countVal = evaluateNumericExprOnSources(parts[0], logical.sources, ctx);
+            if (countVal === null || !Number.isFinite(countVal) || countVal < 0) {
+                return null;
+            }
+            totalBytes += countVal * mult;
+            sawData = true;
+            continue;
+        }
+
+        if (cmd === '.tag') {
+            const structName = argsText.split(/\s+/)[0] ?? '';
+            if (!structName) return null;
+            const target = resolveEntityOnSources(
+                structName,
+                logical.sources,
+                'scope',
+                ctx.symbolTable,
+                ctx.allSymbolTables,
+                ctx.includesGraph,
+                ctx.implicitImports
+            );
+            if (!(target instanceof Scope)) return null;
+            const tagSize = evaluateStructOrUnionSize(target, ctx);
+            if (tagSize === null) return null;
+            totalBytes += tagSize * mult;
+            sawData = true;
+            continue;
+        }
+
+        if (cmd === '.incbin') {
+            const parts = splitCommaArgsOutsideQuotes(argsText);
+            if (parts.length === 0) return null;
+            if (parts.length >= 3) {
+                const countVal = evaluateNumericExprOnSources(parts[2], logical.sources, ctx);
+                if (countVal === null || !Number.isFinite(countVal) || countVal < 0) {
+                    return null;
+                }
+                totalBytes += countVal * mult;
+                sawData = true;
+                continue;
+            }
+            if (!isSimpleQuotedString(parts[0])) return null;
+            const filename = parts[0].slice(1, -1);
+            const offsetVal = parts.length >= 2
+                ? evaluateNumericExprOnSources(parts[1], logical.sources, ctx)
+                : 0;
+            if (offsetVal === null || !Number.isFinite(offsetVal) || offsetVal < 0) {
+                return null;
+            }
+            const fileSize = resolveIncbinFileSizeSync(ctx.document.uri, filename, ctx.binIncludeDirs);
+            if (fileSize === null || offsetVal > fileSize) {
+                return null;
+            }
+            totalBytes += (fileSize - offsetVal) * mult;
+            sawData = true;
+            continue;
+        }
+
+        const unitBytes = DATA_DIRECTIVE_UNIT_BYTES[cmd];
+        if (unitBytes !== undefined) {
+            const allowEscapes = STRING_CAPABLE_DATA_DIRECTIVES.has(cmd) && argsText.includes('\\') && hasStringEscapes();
+            const items = splitCommaArgsOutsideQuotes(argsText, allowEscapes);
+            if (items.length === 0) return null;
+            let lineBytes = 0;
+            for (const item of items) {
+                if (STRING_CAPABLE_DATA_DIRECTIVES.has(cmd) && isSimpleQuotedString(item, allowEscapes)) {
+                    lineBytes += measureQuotedStringBytes(item, allowEscapes);
+                } else {
+                    lineBytes += unitBytes;
+                }
+            }
+            if (cmd === '.asciiz') {
+                lineBytes += 1;
+            }
+            totalBytes += lineBytes * mult;
+            sawData = true;
+            continue;
+        }
+
+        return null;
+    }
+
+    if (repeatStack.length > 0) {
+        return null;
+    }
+    return sawData ? totalBytes : null;
+}
+
+function evaluateLabelSizeInternal(
+    entity: SymbolTableEntity,
+    ctx: SizeEvalContext
+): number | null {
+    if (ctx.visitedEntities.has(entity)) {
+        return null;
+    }
+    ctx.visitedEntities.add(entity);
+    try {
+        return evaluateLabelSpanSize(
+            entity.definition.start.line,
+            Math.min(entity.range.end.line, ctx.document.lineCount - 1),
+            entity.definition.end.character,
+            false,
+            ctx
+        );
+    } finally {
+        ctx.visitedEntities.delete(entity);
+    }
+}
+
+function createSizeEvalContext(
+    document: TextDocument,
+    symbolTable: SymbolTable | undefined,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+    implicitImports: boolean,
+    binIncludeDirs?: string[]
+): SizeEvalContext {
+    return {
+        document,
+        symbolTable,
+        allSymbolTables,
+        includesGraph,
+        implicitImports,
+        binIncludeDirs,
+        visitedEntities: new Set(),
+        visitedScopes: new Set(),
+    };
+}
+
+/**
+ * Evaluates a label's total allocated/emitted byte size (`.res`, `.tag`, `.incbin`, `.byte`, `.lobytes`,
+ * `.hibytes`, `.bankbytes`, `.word`, `.addr`, `.dbyt`, `.faraddr`, `.dword`, `.literal`, `.asciiz`, `.repeat`).
+ */
+export function evaluateLabelSize(
+    entity: SymbolTableEntity,
+    document: TextDocument,
+    symbolTable: SymbolTable | undefined,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+    implicitImports: boolean,
+    binIncludeDirs?: string[]
+): number | null {
+    return evaluateLabelSizeInternal(
+        entity,
+        createSizeEvalContext(document, symbolTable, allSymbolTables, includesGraph, implicitImports, binIncludeDirs)
+    );
+}
+
+/**
+ * Evaluates a cheap local label's total allocated/emitted byte size within `[defRange.start.line, endLine]`.
+ */
+export function evaluateLocationLabelSize(
+    defRange: Range,
+    endLine: number,
+    document: TextDocument,
+    symbolTable: SymbolTable | undefined,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+    implicitImports: boolean,
+    binIncludeDirs?: string[]
+): number | null {
+    return evaluateLabelSpanSize(
+        defRange.start.line,
+        Math.min(endLine, document.lineCount - 1),
+        defRange.end.character,
+        true,
+        createSizeEvalContext(document, symbolTable, allSymbolTables, includesGraph, implicitImports, binIncludeDirs)
+    );
+}
+
+/**
+ * Evaluates a `.struct` or `.union` scope's total byte size (`.sizeof(scope)`).
+ */
+export function evaluateScopeSize(
+    scope: Scope,
+    document: TextDocument,
+    symbolTable: SymbolTable | undefined,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+    implicitImports: boolean,
+    binIncludeDirs?: string[]
+): number | null {
+    return evaluateStructOrUnionSize(scope, {
+        document,
+        symbolTable,
+        allSymbolTables,
+        includesGraph,
+        implicitImports,
+        binIncludeDirs,
+        visitedEntities: new Set(),
+        visitedScopes: new Set(),
+    });
+}
+
+export interface StructFieldHoverInfo {
+    badge: string | null;
+    size: number | null;
+}
+
+/**
+ * Extracts a compact type badge and byte size for a `.struct` or `.union` field (e.g. `byte` [1], `word` [2], `[4]`, `tag Vec2` [2]).
+ */
+export function evaluateStructFieldBadge(
+    entity: SymbolTableEntity,
+    document: TextDocument,
+    symbolTable: SymbolTable | undefined,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+    implicitImports: boolean,
+    binIncludeDirs?: string[]
+): StructFieldHoverInfo | null {
+    const line = entity.definition.start.line;
+    if (line < 0 || line >= document.lineCount) return null;
+
+    const logical = collectLogicalLines(
+        document,
+        line,
+        document.lineCount - 1,
+        entity.definition.end.character,
+        true
+    )[0];
+    if (!logical) return null;
+
+    const afterName = logical.text.slice(entity.definition.end.character).replace(/^\s*:?\s*/, '');
+    const match = afterName.match(/^\.([a-zA-Z0-9_]+)(?:\s+(.+))?$/);
+    if (!match) return null;
+
+    const rawDir = match[1].toLowerCase();
+    const dir = rawDir === 'byt' ? 'byte' : rawDir;
+    const dirArgs = match[2]?.trim() ?? '';
+
+    let badge: string | null;
+    if (dir === 'res') {
+        badge = null;
+    } else if (dir === 'tag') {
+        const tagTarget = dirArgs ? dirArgs.split(/\s+/)[0] : '';
+        badge = tagTarget ? `tag ${tagTarget}` : 'tag';
+    } else {
+        badge = dir;
+    }
+
+    const size = evaluateStructMemberDirectiveBytes(`.${dir}`, dirArgs, logical.sources, {
+        document,
+        symbolTable,
+        allSymbolTables,
+        includesGraph,
+        implicitImports,
+        binIncludeDirs,
+        visitedEntities: new Set(),
+        visitedScopes: new Set(),
+    });
+
+    return { badge, size };
 }
 
 function classifyEntityWidth(

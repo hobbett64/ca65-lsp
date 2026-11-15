@@ -2,7 +2,7 @@
   "ADC": {
     "fullName": "Add with Carry",
     "description": "Adds a value from memory and the *carry flag* to the *accumulator*. This is used for multi-byte addition.",
-    "note": "The *carry flag* should be cleared with **`CLC`** before adding the first byte in a sequence.",
+    "note": "The *carry flag* should be cleared with **`clc`** before adding the first byte in a sequence.",
     "seeAlso": ["SBC", "CLC"],
     "modes": {
       "Immediate": { "opcode": "69", "bytes": 2, "cycles": 2 },
@@ -365,7 +365,7 @@
   "JSR": {
     "fullName": "Jump to Subroutine",
     "description": "Pushes the return address to the stack, then jumps to a new address.",
-    "note": "Pushes the address of the final byte of the instruction. **`RTS`** increments this value before returning.",
+    "note": "Pushes the address of the final byte of the instruction. **`rts`** increments this value before returning.",
     "seeAlso": ["RTS", "JMP", "RTI"],
     "modes": {
       "Absolute": { "opcode": "20", "bytes": 3, "cycles": 6 }
@@ -556,7 +556,7 @@
   "RTI": {
     "fullName": "Return from Interrupt",
     "description": "Returns from an interrupt routine. Pulls the *processor status* and the *program counter* from the stack.",
-    "note": "Unlike **`PLP`**, **`CLI`**, or **`SEI`**, the effect of restoring the **I** flag is immediate.",
+    "note": "Unlike **`plp`**, **`cli`**, or **`sei`**, the effect of restoring the **I** flag is immediate.",
     "seeAlso": ["BRK", "PLP", "RTS"],
     "modes": {
       "Implied": { "opcode": "40", "bytes": 1, "cycles": 6 }
@@ -583,7 +583,7 @@
   "SBC": {
     "fullName": "Subtract with Carry",
     "description": "Subtracts a value from memory and the inverted *carry flag* from the *accumulator*. Used for multi-byte subtraction.",
-    "note": "The *carry flag* should be set with **`SEC`** before subtracting the first byte in a sequence.",
+    "note": "The *carry flag* should be set with **`sec`** before subtracting the first byte in a sequence.",
     "seeAlso": ["ADC", "SEC"],
     "modes": {
       "Immediate": { "opcode": "E9", "bytes": 2, "cycles": 2 },

@@ -5,7 +5,10 @@ import {
 	commands,
 	window,
 	StatusBarAlignment,
+	StatusBarItem,
 	MarkdownString,
+	Position,
+	Selection,
 	TextEditor,
 	TextDocumentContentProvider,
 	TextEditorRevealType,
@@ -118,8 +121,9 @@ export function activate(context: ExtensionContext) {
 		}));
 	}
 
-	// --- Status Bar Cycle & Byte Estimator ---
+	// --- Status Bar Cycle, Byte Estimator & Active Segment ---
 	setupCycleStatusBar(context, clientReady);
+	setupSegmentStatusBar(context, clientReady);
 
 	// --- Read-Only Side-by-Side .lst / --dbgfile Listing ---
 	setupSideBySideHexListing(context, clientReady);
@@ -203,7 +207,7 @@ function buildCycleTooltip(result: InstructionAnalysisSummary, isSelection: bool
 		notes.push('In Emulation mode (E=1), branch page crossings add +1 cycle');
 	}
 	if (result.hasPerByteCycles) {
-		notes.push('Block move (MVN/MVP) executes 7 cycles per byte transferred (C + 1 bytes)');
+		notes.push('Block move (mvn/mvp) executes 7 cycles per byte transferred (C + 1 bytes)');
 	}
 	if (result.uncertainCount > 0) {
 		const zpName = result.cpu === '65816' ? 'Direct Page' : 'Zero Page';
@@ -223,7 +227,7 @@ function buildCycleTooltip(result: InstructionAnalysisSummary, isSelection: bool
 			const cycCell = item.minCycles === item.maxCycles
 				? `${item.minCycles}`
 				: `${item.minCycles}–${item.maxCycles}`;
-			lines.push(`| ${item.line + 1} | \`${item.mnemonic}\` | ${item.mode}${item.uncertainMode ? ' ?' : ''} | ${byteCell} | ${cycCell} |`);
+			lines.push(`| ${item.line + 1} | \`${item.mnemonic.toLowerCase()}\` | ${item.mode}${item.uncertainMode ? ' ?' : ''} | ${byteCell} | ${cycCell} |`);
 		}
 		if (result.items.length > maxPreviewRows) {
 			lines.push('', `*…and ${result.items.length - maxPreviewRows} more instruction(s)*`);
@@ -233,8 +237,28 @@ function buildCycleTooltip(result: InstructionAnalysisSummary, isSelection: bool
 	return new MarkdownString(lines.join('\n'));
 }
 
-function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<void>): void {
-	const statusBarItem = window.createStatusBarItem(StatusBarAlignment.Right, 100);
+interface SegmentPositionResult {
+	segment: string;
+	definitionLine: number;
+	explicit: boolean;
+	line: number;
+}
+
+interface CursorStatusBarConfig<TResult> {
+	priority: number;
+	settingKey: string;
+	affectingSettings: string[];
+	getQueryKey: (editor: TextEditor) => string;
+	fetchData: (editor: TextEditor) => Promise<TResult>;
+	applyResult: (item: StatusBarItem, result: TResult, editor: TextEditor) => void;
+}
+
+function registerCursorStatusBarUpdater<TResult>(
+	context: ExtensionContext,
+	clientReady: Promise<void>,
+	config: CursorStatusBarConfig<TResult>
+): void {
+	const statusBarItem = window.createStatusBarItem(StatusBarAlignment.Right, config.priority);
 	context.subscriptions.push(statusBarItem);
 
 	let debounceTimer: NodeJS.Timeout | undefined;
@@ -242,7 +266,7 @@ function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<voi
 	let lastQueryKey = '';
 
 	const updateForEditor = (editor: TextEditor | undefined, force: boolean = false) => {
-		const enabled = workspace.getConfiguration('ca65').get<boolean>('enableStatusBarCycleCount', true);
+		const enabled = workspace.getConfiguration('ca65').get<boolean>(config.settingKey, true);
 		if (!enabled || !editor || editor.document.languageId !== 'ca65') {
 			if (debounceTimer) {
 				clearTimeout(debounceTimer);
@@ -253,12 +277,7 @@ function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<voi
 			return;
 		}
 
-		const sel = editor.selection;
-		const isSelection = !sel.isEmpty;
-		const queryKey = isSelection
-			? `${editor.document.uri.toString()}|${editor.document.version}|S:${sel.start.line}:${sel.start.character}-${sel.end.line}:${sel.end.character}`
-			: `${editor.document.uri.toString()}|${editor.document.version}|L:${sel.active.line}`;
-
+		const queryKey = config.getQueryKey(editor);
 		if (!force && queryKey === lastQueryKey) {
 			return;
 		}
@@ -275,36 +294,10 @@ function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<voi
 				await clientReady;
 				if (seq !== latestSeq || window.activeTextEditor !== editor) return;
 
-				const targetRange = isSelection
-					? {
-						start: { line: sel.start.line, character: sel.start.character },
-						end: { line: sel.end.line, character: sel.end.character },
-					}
-					: {
-						start: { line: sel.active.line, character: 0 },
-						end: { line: sel.active.line, character: editor.document.lineAt(sel.active.line).text.length },
-					};
-
-				const result = await client.sendRequest<InstructionAnalysisSummary | null>('ca65/analyzeSelection', {
-					uri: editor.document.uri.toString(),
-					range: targetRange,
-				});
-
+				const result = await config.fetchData(editor);
 				if (seq !== latestSeq || window.activeTextEditor !== editor) return;
-				if (!result || result.instructionCount === 0) {
-					statusBarItem.hide();
-					return;
-				}
 
-				const cycStr = formatRangeValue(result.minCycles, result.maxCycles, 'cyc');
-				const byteStr = formatRangeValue(result.minBytes, result.maxBytes, 'B');
-				const detail = result.instructionCount === 1
-					? `${result.items[0].mnemonic} ${result.items[0].mode}${result.items[0].uncertainMode ? '?' : ''}`
-					: `${result.instructionCount} ops`;
-
-				statusBarItem.text = `$(clock) ${cycStr} · ${byteStr} (${detail})`;
-				statusBarItem.tooltip = buildCycleTooltip(result, isSelection);
-				statusBarItem.show();
+				config.applyResult(statusBarItem, result, editor);
 			} catch {
 				if (seq === latestSeq) {
 					lastQueryKey = '';
@@ -327,7 +320,7 @@ function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<voi
 			}
 		}),
 		workspace.onDidChangeConfiguration((event) => {
-			if (event.affectsConfiguration('ca65.enableStatusBarCycleCount') || event.affectsConfiguration('ca65.cpu')) {
+			if (config.affectingSettings.some(setting => event.affectsConfiguration(setting))) {
 				updateForEditor(window.activeTextEditor, true);
 			}
 		}),
@@ -335,6 +328,111 @@ function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<voi
 	);
 
 	updateForEditor(window.activeTextEditor, true);
+}
+
+function buildSegmentTooltip(result: SegmentPositionResult, editor: TextEditor): MarkdownString {
+	const targetLine = result.definitionLine + 1;
+	if (!result.explicit) {
+		return new MarkdownString(
+			`**Active Segment:** \`${result.segment}\` *(default segment)*\n\n*Click to jump to top of file*`
+		);
+	}
+	const directiveText = editor.document.lineAt(result.definitionLine).text.trim();
+	const lines = [`**Active Segment:** \`${result.segment}\``, ''];
+	if (directiveText) {
+		const safeText = directiveText.replace(/`/g, "'");
+		lines.push(`Set at line ${targetLine}: \`${safeText}\``);
+	} else {
+		lines.push(`Set at line ${targetLine}`);
+	}
+	lines.push('', `*Click to jump to line ${targetLine}*`);
+	return new MarkdownString(lines.join('\n'));
+}
+
+function setupSegmentStatusBar(context: ExtensionContext, clientReady: Promise<void>): void {
+	context.subscriptions.push(commands.registerCommand('_ca65.revealSegmentOrigin', async (uri?: Uri, line?: number) => {
+		if (!uri || typeof line !== 'number') return;
+		const active = window.activeTextEditor;
+		const editor = (active && active.document.uri.toString() === uri.toString())
+			? active
+			: await workspace.openTextDocument(uri).then(doc => window.showTextDocument(doc, { preserveFocus: false }));
+		const clampedLine = Math.max(0, Math.min(line, Math.max(0, editor.document.lineCount - 1)));
+		const pos = new Position(clampedLine, 0);
+		editor.selection = new Selection(pos, pos);
+		editor.revealRange(new VscodeRange(pos, pos), TextEditorRevealType.InCenterIfOutsideViewport);
+	}));
+
+	registerCursorStatusBarUpdater<SegmentPositionResult | null>(context, clientReady, {
+		priority: 101,
+		settingKey: 'enableStatusBarSegment',
+		affectingSettings: ['ca65.enableStatusBarSegment'],
+		getQueryKey: (editor) => `${editor.document.uri.toString()}|${editor.document.version}|L:${editor.selection.active.line}`,
+		fetchData: (editor) => client.sendRequest<SegmentPositionResult | null>('ca65/getSegmentAtPosition', {
+			uri: editor.document.uri.toString(),
+			line: editor.selection.active.line,
+		}),
+		applyResult: (item, result, editor) => {
+			if (!result) {
+				item.hide();
+				return;
+			}
+			item.text = `$(layers) ${result.segment}`;
+			item.tooltip = buildSegmentTooltip(result, editor);
+			item.command = {
+				command: '_ca65.revealSegmentOrigin',
+				title: 'Jump to Segment Origin',
+				arguments: [editor.document.uri, result.definitionLine],
+			};
+			item.show();
+		},
+	});
+}
+
+function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<void>): void {
+	registerCursorStatusBarUpdater<InstructionAnalysisSummary | null>(context, clientReady, {
+		priority: 100,
+		settingKey: 'enableStatusBarCycleCount',
+		affectingSettings: ['ca65.enableStatusBarCycleCount', 'ca65.cpu'],
+		getQueryKey: (editor) => {
+			const sel = editor.selection;
+			return !sel.isEmpty
+				? `${editor.document.uri.toString()}|${editor.document.version}|S:${sel.start.line}:${sel.start.character}-${sel.end.line}:${sel.end.character}`
+				: `${editor.document.uri.toString()}|${editor.document.version}|L:${sel.active.line}`;
+		},
+		fetchData: (editor) => {
+			const sel = editor.selection;
+			const targetRange = !sel.isEmpty
+				? {
+					start: { line: sel.start.line, character: sel.start.character },
+					end: { line: sel.end.line, character: sel.end.character },
+				}
+				: {
+					start: { line: sel.active.line, character: 0 },
+					end: { line: sel.active.line, character: editor.document.lineAt(sel.active.line).text.length },
+				};
+			return client.sendRequest<InstructionAnalysisSummary | null>('ca65/analyzeSelection', {
+				uri: editor.document.uri.toString(),
+				range: targetRange,
+			});
+		},
+		applyResult: (item, result, editor) => {
+			if (!result || result.instructionCount === 0) {
+				item.hide();
+				return;
+			}
+
+			const isSelection = !editor.selection.isEmpty;
+			const cycStr = formatRangeValue(result.minCycles, result.maxCycles, 'cyc');
+			const byteStr = formatRangeValue(result.minBytes, result.maxBytes, 'B');
+			const detail = result.instructionCount === 1
+				? `${result.items[0].mnemonic.toLowerCase()} ${result.items[0].mode}${result.items[0].uncertainMode ? '?' : ''}`
+				: `${result.instructionCount} ops`;
+
+			item.text = `$(clock) ${cycStr} · ${byteStr} (${detail})`;
+			item.tooltip = buildCycleTooltip(result, isSelection);
+			item.show();
+		},
+	});
 }
 
 interface OverlayLineItem {
@@ -607,7 +705,7 @@ const FLAG_NAMES: Record<string, string> = {
 };
 
 function generateTypeTable(jsonData: Record<string, any>): string {
-	const link = (mnemonic: string) => `[${mnemonic}](#${mnemonic.toLowerCase()})`;
+	const link = (mnemonic: string) => `[${mnemonic.toLowerCase()}](#${mnemonic.toLowerCase()})`;
 	const formatGroup = (list: string[]) => list.filter(m => Boolean(jsonData[m])).map(link).join(', ');
 
 	const rows: Array<[string, string[]]> = [
@@ -670,7 +768,7 @@ function generateFullMarkdown(jsonData: Record<string, any>, cpu: string = '6502
 		const data = jsonData[mnemonic];
 
 		// Title
-		fullMarkdown += `### <a id="${mnemonic.toLowerCase()}"></a>\`${mnemonic}\` - ${data.fullName || ''}\n\n`;
+		fullMarkdown += `### <a id="${mnemonic.toLowerCase()}"></a>\`${mnemonic.toLowerCase()}\` - ${data.fullName || ''}\n\n`;
 
 		// Description
 		if (data.description) {
@@ -679,7 +777,7 @@ function generateFullMarkdown(jsonData: Record<string, any>, cpu: string = '6502
 
 		// Warning
 		if (data.warning) {
-			fullMarkdown += `⚠️ **WARNING**: ${data.warning}\n\n`;
+			fullMarkdown += `⚠️ **Warning**: ${data.warning}\n\n`;
 		}
 
 		if (data.note) {
@@ -713,8 +811,8 @@ function generateFullMarkdown(jsonData: Record<string, any>, cpu: string = '6502
 		// See also
 		if (data.seeAlso && Array.isArray(data.seeAlso) && data.seeAlso.length > 0) {
 			const seeAlsoLinks = data.seeAlso
-				.filter((link: string) => Boolean(jsonData[link]))
-				.map((link: string) => `[${link}](#${link.toLowerCase()})`)
+				.filter((link: string) => Boolean(jsonData[link.toUpperCase()]))
+				.map((link: string) => `[${link.toLowerCase()}](#${link.toLowerCase()})`)
 				.join(', ');
 			if (seeAlsoLinks) {
 				fullMarkdown += `**See also:** ${seeAlsoLinks}\n\n`;

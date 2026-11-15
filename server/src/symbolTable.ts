@@ -10,6 +10,17 @@ const EMPTY_SCOPES: readonly Scope[] = [];
 const EMPTY_STRING_ARRAY: readonly string[] = Object.freeze([]);
 const EMPTY_REFS: readonly ReferenceInfo[] = Object.freeze([]);
 const ZERO_PAGE_SEGMENTS = new Set(['ZEROPAGE', 'ZP', 'DIRECTPAGE', 'DP']);
+const BUILTIN_SEGMENTS = new Set([
+    'CODE',
+    'DATA',
+    'BSS',
+    'RODATA',
+    'ZEROPAGE',
+    'ZP',
+    'DIRECTPAGE',
+    'DP',
+    'NULL',
+]);
 
 /**
  * Returns true if `segment` uses a standard zero-page or direct-page segment name.
@@ -17,6 +28,38 @@ const ZERO_PAGE_SEGMENTS = new Set(['ZEROPAGE', 'ZP', 'DIRECTPAGE', 'DP']);
 export function isZeroPageSegmentName(segment: string | null | undefined): boolean {
     if (!segment) return false;
     return ZERO_PAGE_SEGMENTS.has(segment.trim().toUpperCase());
+}
+
+export type LabelSegmentCategory = 'code' | 'rodata' | 'data' | 'bss' | 'unknown';
+
+/**
+ * Classifies a segment name into code, read-only data, initialized RAM, uninitialized RAM/ZP, or unknown.
+ */
+export function classifyLabelSegment(segment: string | null | undefined): LabelSegmentCategory {
+    if (!segment) return 'unknown';
+    if (isZeroPageSegmentName(segment)) return 'bss';
+    switch (segment.trim().toUpperCase()) {
+        case 'CODE':
+            return 'code';
+        case 'RODATA':
+            return 'rodata';
+        case 'DATA':
+            return 'data';
+        case 'BSS':
+            return 'bss';
+        default:
+            return 'unknown';
+    }
+}
+
+/**
+ * Formats built-in segment names (CODE, BSS, ZEROPAGE, RODATA, DATA, etc.) in lowercase
+ * while preserving user casing for custom segments.
+ */
+export function formatSegmentDisplayName(segment: string): string {
+    return BUILTIN_SEGMENTS.has(segment.trim().toUpperCase())
+        ? segment.toLowerCase()
+        : segment;
 }
 
 export interface DocumentLinkDirective {
@@ -428,6 +471,9 @@ export class SymbolTable {
 
     public anonymousLabelLines: number[] = [];
     public anonymousLabelReferences: Map<number, Range[]> = new Map();
+    private segmentHistory: Array<{ line: number; segment: string; explicit: boolean }> = [
+        { line: 0, segment: 'CODE', explicit: false },
+    ];
 
     public imports: Import[] = [];
     public exports: Export[] = [];
@@ -477,6 +523,47 @@ export class SymbolTable {
         if (this.cachedDefinedEntities !== null) {
             this.cachedDefinedEntities = null;
         }
+    }
+
+    public recordSegmentChange(line: number, segment: string): void {
+        const last = this.segmentHistory[this.segmentHistory.length - 1];
+        if (last && last.line === line) {
+            last.segment = segment;
+            last.explicit = true;
+        } else if (!last || !last.explicit || last.segment !== segment) {
+            this.segmentHistory.push({ line, segment, explicit: true });
+        }
+    }
+
+    public getSegmentInfoAtLine(line: number): { line: number; segment: string; explicit: boolean } {
+        let lo = 0;
+        let hi = this.segmentHistory.length - 1;
+        while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (this.segmentHistory[mid].line <= line) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        return this.segmentHistory[lo] ?? { line: 0, segment: 'CODE', explicit: false };
+    }
+
+    public getSegmentAtLine(line: number): string {
+        return this.getSegmentInfoAtLine(line).segment;
+    }
+
+    public getDeclaredSegments(): string[] {
+        const seen = new Set<string>();
+        const result: string[] = [];
+        for (const entry of this.segmentHistory) {
+            if (!entry.explicit || !entry.segment || seen.has(entry.segment)) {
+                continue;
+            }
+            seen.add(entry.segment);
+            result.push(entry.segment);
+        }
+        return result;
     }
 
     getUri(): string {

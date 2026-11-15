@@ -2,7 +2,7 @@
   "65SC02": {
     "updates": {
       "ADC": {
-        "note": "Clear the *carry flag* with **`CLC`** before adding the first byte in a sequence. On CMOS 65C02 variants, decimal mode (**`D`**=1) sets **N** and **Z** accurately and adds 1 extra cycle.",
+        "note": "Clear the *carry flag* with **`clc`** before adding the first byte in a sequence. On CMOS 65C02 variants, decimal mode (**`D`**=1) sets **N** and **Z** accurately and adds 1 extra cycle.",
         "modes": {
           "(Zero Page)": { "opcode": "72", "bytes": 2, "cycles": 5 }
         }
@@ -19,7 +19,7 @@
         }
       },
       "BIT": {
-        "note": "Immediate mode (`BIT #imm`) updates only the **Z** flag and leaves **N** and **V** unchanged.",
+        "note": "Immediate mode (`bit #imm`) updates only the **Z** flag and leaves **N** and **V** unchanged.",
         "modes": {
           "Immediate": { "opcode": "89", "bytes": 2, "cycles": 2 },
           "Zero Page, X": { "opcode": "34", "bytes": 2, "cycles": 4 },
@@ -39,7 +39,7 @@
         }
       },
       "DEC": {
-        "note": "CMOS 65C02 adds `DEC A` (also written `DEC` with no operand or `DEA`) and performs a dummy read rather than the NMOS dummy write.",
+        "note": "CMOS 65C02 adds `dec a` (also written `dec` with no operand or `dea`) and performs a dummy read rather than the NMOS dummy write.",
         "modes": {
           "Accumulator": { "opcode": "3A", "bytes": 1, "cycles": 2 }
         }
@@ -50,14 +50,14 @@
         }
       },
       "INC": {
-        "note": "CMOS 65C02 adds `INC A` (also written `INC` with no operand or `INA`) and performs a dummy read rather than the NMOS dummy write.",
+        "note": "CMOS 65C02 adds `inc a` (also written `inc` with no operand or `ina`) and performs a dummy read rather than the NMOS dummy write.",
         "modes": {
           "Accumulator": { "opcode": "1A", "bytes": 1, "cycles": 2 }
         }
       },
       "JMP": {
         "clearWarning": true,
-        "note": "CMOS 65C02 fixes the NMOS indirect page-boundary wrap bug on `JMP ($xxFF)` (adding 1 cycle to `Indirect` mode).",
+        "note": "CMOS 65C02 fixes the NMOS indirect page-boundary wrap bug on `jmp ($xxFF)` (adding 1 cycle to `Indirect` mode).",
         "modes": {
           "Indirect": { "opcode": "6C", "bytes": 3, "cycles": 6 },
           "(Absolute, X)": { "opcode": "7C", "bytes": 3, "cycles": 6 }
@@ -92,7 +92,7 @@
         }
       },
       "SBC": {
-        "note": "Set the *carry flag* with **`SEC`** before subtracting the first byte in a sequence. On CMOS 65C02 variants, decimal mode (**`D`**=1) sets **N** and **Z** accurately and adds 1 extra cycle.",
+        "note": "Set the *carry flag* with **`sec`** before subtracting the first byte in a sequence. On CMOS 65C02 variants, decimal mode (**`D`**=1) sets **N** and **Z** accurately and adds 1 extra cycle.",
         "modes": {
           "(Zero Page)": { "opcode": "F2", "bytes": 2, "cycles": 5 }
         }
@@ -115,7 +115,7 @@
       },
       "DEA": {
         "fullName": "Decrement Accumulator",
-        "description": "`ca65` alias for `DEC A`. Subtracts 1 from the *accumulator*.",
+        "description": "`ca65` alias for `dec a`. Subtracts 1 from the *accumulator*.",
         "aliasOf": "DEC",
         "seeAlso": ["DEC", "INA", "DEX", "DEY"],
         "modes": {
@@ -128,7 +128,7 @@
       },
       "INA": {
         "fullName": "Increment Accumulator",
-        "description": "`ca65` alias for `INC A`. Adds 1 to the *accumulator*.",
+        "description": "`ca65` alias for `inc a`. Adds 1 to the *accumulator*.",
         "aliasOf": "INC",
         "seeAlso": ["INC", "DEA", "INX", "INY"],
         "modes": {
@@ -244,7 +244,7 @@
   "65816": {
     "updates": {
       "ADC": {
-        "note": "Clear **C** with **`CLC`** before multi-word addition. Unlike the 65C02, the 65816 performs BCD without an extra cycle.",
+        "note": "Clear **C** with **`clc`** before multi-word addition. Unlike the 65C02, the 65816 performs BCD without an extra cycle.",
         "modes": {
           "[Direct Page]": { "opcode": "67", "bytes": 2, "cycles": 6 },
           "[Direct Page], Y": { "opcode": "77", "bytes": 2, "cycles": 6 },
@@ -278,7 +278,7 @@
         }
       },
       "BRK": {
-        "note": "In Native mode (`E`=0), `BRK` pushes `PBR`, 16-bit `PC`, and `P` (8 cycles total) and clears **D**=0. In `ca65`, an optional signature byte may be supplied (`brk $00`).",
+        "note": "In Native mode (`E`=0), `brk` pushes `PBR`, 16-bit `PC`, and `P` (8 cycles total) and clears **D**=0. In `ca65`, an optional signature byte may be supplied (`brk $00`).",
         "modes": {
           "Implied": { "opcode": "00", "bytes": 1, "cycles": 7, "nativeModeCyclePenalty": 1 },
           "Signature": { "opcode": "00", "bytes": 2, "cycles": 7, "nativeModeCyclePenalty": 1 }
@@ -295,10 +295,10 @@
         }
       },
       "DEC": {
-        "note": "Writes only once (no dummy write). `DEC A` / `DEA` always takes 2 cycles regardless of **M**."
+        "note": "Writes only once (no dummy write). `dec a` / `dea` always takes 2 cycles regardless of **M**."
       },
       "DEA": {
-        "description": "`ca65` alias for `DEC A`. Subtracts 1 from the 8-bit or 16-bit *accumulator*."
+        "description": "`ca65` alias for `dec a`. Subtracts 1 from the 8-bit or 16-bit *accumulator*."
       },
       "EOR": {
         "modes": {
@@ -311,13 +311,13 @@
         }
       },
       "INC": {
-        "note": "Writes only once (no dummy write). `INC A` / `INA` always takes 2 cycles regardless of **M**."
+        "note": "Writes only once (no dummy write). `inc a` / `ina` always takes 2 cycles regardless of **M**."
       },
       "INA": {
-        "description": "`ca65` alias for `INC A`. Adds 1 to the 8-bit or 16-bit *accumulator*."
+        "description": "`ca65` alias for `inc a`. Adds 1 to the 8-bit or 16-bit *accumulator*."
       },
       "JMP": {
-        "note": "`JMP ($abs)` always takes 5 cycles on 65816 with the indirect page-boundary bug fixed. 24-bit `JMP long` and `JMP [abs]` are aliases for `JML`.",
+        "note": "`jmp ($abs)` always takes 5 cycles on 65816 with the indirect page-boundary bug fixed. 24-bit `jmp long` and `jmp [abs]` are aliases for `jml`.",
         "seeAlso": ["JML", "JSR", "BRL"],
         "modes": {
           "Indirect": { "opcode": "6C", "bytes": 3, "cycles": 5 },
@@ -377,7 +377,7 @@
         }
       },
       "SBC": {
-        "note": "Set **C** with **`SEC`** before multi-word subtraction. Unlike the 65C02, the 65816 performs BCD without an extra cycle.",
+        "note": "Set **C** with **`sec`** before multi-word subtraction. Unlike the 65C02, the 65816 performs BCD without an extra cycle.",
         "modes": {
           "[Direct Page]": { "opcode": "E7", "bytes": 2, "cycles": 6 },
           "[Direct Page], Y": { "opcode": "F7", "bytes": 2, "cycles": 6 },
@@ -422,7 +422,7 @@
       },
       "CPA": {
         "fullName": "Compare Memory and Accumulator",
-        "description": "`ca65` alias for `CMP` in 65816 mode.",
+        "description": "`ca65` alias for `cmp` in 65816 mode.",
         "aliasOf": "CMP",
         "seeAlso": ["CMP", "CPX", "CPY"],
         "modes": {},
@@ -558,7 +558,7 @@
       },
       "RTL": {
         "fullName": "Return from Subroutine Long",
-        "description": "Pulls a 16-bit `PC` and 8-bit `PBR` pushed by `JSL` and resumes execution at `PC + 1` in the caller's bank.",
+        "description": "Pulls a 16-bit `PC` and 8-bit `PBR` pushed by `jsl` and resumes execution at `PC + 1` in the caller's bank.",
         "seeAlso": ["JSL", "RTS", "RTI"],
         "modes": {
           "Implied": { "opcode": "6B", "bytes": 1, "cycles": 6 }
@@ -587,7 +587,7 @@
       },
       "SWA": {
         "fullName": "Swap Accumulator Halves",
-        "description": "`ca65` alias for `XBA`. Exchanges the low (`A`) and high (`B`) bytes of the 16-bit `C` accumulator.",
+        "description": "`ca65` alias for `xba`. Exchanges the low (`A`) and high (`B`) bytes of the 16-bit `C` accumulator.",
         "aliasOf": "XBA",
         "seeAlso": ["XBA"],
         "modes": {
@@ -600,7 +600,7 @@
       },
       "TAD": {
         "fullName": "Transfer C Accumulator to Direct Page",
-        "description": "`ca65` alias for `TCD`. Transfers the 16-bit `C` accumulator into the Direct Page Register (`D`).",
+        "description": "`ca65` alias for `tcd`. Transfers the 16-bit `C` accumulator into the Direct Page Register (`D`).",
         "aliasOf": "TCD",
         "seeAlso": ["TCD", "TDA", "TDC"],
         "modes": {
@@ -613,7 +613,7 @@
       },
       "TAS": {
         "fullName": "Transfer C Accumulator to Stack Pointer",
-        "description": "`ca65` alias for `TCS`. Transfers the 16-bit `C` accumulator into the Stack Pointer (`S`).",
+        "description": "`ca65` alias for `tcs`. Transfers the 16-bit `C` accumulator into the Stack Pointer (`S`).",
         "aliasOf": "TCS",
         "seeAlso": ["TCS", "TSA", "TSC"],
         "modes": {
@@ -644,7 +644,7 @@
       },
       "TDA": {
         "fullName": "Transfer Direct Page to C Accumulator",
-        "description": "`ca65` alias for `TDC`. Transfers the 16-bit Direct Page Register (`D`) into the `C` accumulator.",
+        "description": "`ca65` alias for `tdc`. Transfers the 16-bit Direct Page Register (`D`) into the `C` accumulator.",
         "aliasOf": "TDC",
         "seeAlso": ["TDC", "TCD", "TAD"],
         "modes": {
@@ -669,7 +669,7 @@
       },
       "TSA": {
         "fullName": "Transfer Stack Pointer to C Accumulator",
-        "description": "`ca65` alias for `TSC`. Transfers the 16-bit Stack Pointer (`S`) into the `C` accumulator.",
+        "description": "`ca65` alias for `tsc`. Transfers the 16-bit Stack Pointer (`S`) into the `C` accumulator.",
         "aliasOf": "TSC",
         "seeAlso": ["TSC", "TCS", "TAS"],
         "modes": {

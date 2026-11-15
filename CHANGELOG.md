@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-11-16
+### Added
+- **Active Segment Status Bar Indicator** (`ca65.enableStatusBarSegment`): Shows the active segment for the cursor line (tracking `.segment`, `.code`, `.zeropage`, `.rodata`, `.bss`, `.data`, and `.pushseg`/`.popseg`) with click-to-jump navigation to the directive that set it.
+- **Byte-Size Evaluation in Hover Cards:** Evaluates and displays `[size]` byte counts for data labels, `.res`, `.byte`/`.word`/`.dword`/`.addr`/`.faraddr`/`.asciiz`/`.literal`, `.incbin`, `.struct`/`.union`, `.proc`, `.tag` fields, and cheap local (`@label`) labels, including `.sizeof(...)` and `.strlen(...)` expression evaluation.
+- **Number Literal Hover:** Hovering hexadecimal (`$...`), binary (`%...`), or decimal number literals displays normalized Hex, Dec, and Bin equivalents.
+- **Context-Aware Completions:**
+  - Added `.tag` and `.sizeof(` completions filtering to `.struct` and `.union` definitions (including `Scope::` qualification and auto-include suggestions).
+  - Added `.segment "..."` completions suggesting segment names declared in the current file, open workspace files, and standard ca65 segments (`CODE`, `ZEROPAGE`, `RODATA`, `BSS`, `DATA`).
+  - Added hover-style preview documentation resolution for cheap local (`@label`) completion items.
+- **Segment-Aware Semantic Tokens:** Classifies `CODE` labels as functions, `.res`/zero-page/`BSS`/`DATA` labels as variables, and `RODATA`/data/string definitions with the `readonly` modifier.
+
+### Changed
+- **Hover Card Polish & Lowercase Mnemonics:**
+  - Reverted segment pills to actual uppercase segment names (e.g., `` `CODE` ``, `` `ZEROPAGE` ``, `` `RODATA` ``) paired with unstyled normal-weight kind badges (`label`, `proc`, `constant`, `variable`, `enum`, `struct`, `union`, `macro`, `define`).
+  - Cheap local (`@label`) hovers now show their segment badge, `label` badge, byte size, and full parent-qualified name with bolded `@name` (e.g., `` `CODE` label myscope::mylabel@mylocallabel ``).
+  - Anonymous label hovers now display their segment badge, `anonymous label` kind, and 1-based index (e.g., `` `CODE` anonymous label **1** ``).
+  - Standardized 6502/65C02/65816 assembly mnemonics to lowercase across hover cards, status bar cycle tooltips, completions, and the Instruction Reference view.
+- **Outline Segment Labels:** Replaced `(zp)` outline annotations with non-`CODE` actual segment names (e.g., `(ZEROPAGE)`, `(DIRECTPAGE)`, `(RODATA)`, `(BSS)`, `(BANK01)`) while keeping `CODE` symbols uncluttered.
+- Consolidated cursor-based status bar updaters in `client/src/extension.ts`.
+
 ## [2.0.0] - 2026-11-15
 ### Added
 - Target CPU selection via `ca65.cpu` (`6502`, `65SC02`, `65C02`, `W65C02`, and `65816`) updating `ca65` diagnostics, hover cards, autocompletion, status-bar byte/cycle estimates (including min–max `M`/`X` ranges for `65816`), `jsl`/`jml` call hierarchy, and the `ca65: Show Instruction Reference` panel.

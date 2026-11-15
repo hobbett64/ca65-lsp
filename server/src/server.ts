@@ -60,11 +60,13 @@ import {
     invalidateCachedDocument,
     markDocumentModifiedSinceSave,
     markDocumentSaved,
+    registerLiveDocuments,
 } from './documentCache';
 
 // --- Connection and Document Manager Setup ---
 const connection = createConnection(ProposedFeatures.all);
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
+registerLiveDocuments(documents);
 export let workspaceFolderUris: string[] = [];
 export const symbolTables = new Map<string, SymbolTable>();
 export const includesGraph = new IncludesGraph();
@@ -496,6 +498,31 @@ connection.onRequest('ca65/analyzeSelection', async (params: { uri?: string; ran
         settings.implicitImports,
         settings.cpu
     );
+});
+
+// Custom request from the client to resolve the active segment at a cursor line
+connection.onRequest('ca65/getSegmentAtPosition', async (params: { uri?: string; line?: number }) => {
+    await initializationGate.isInitialized;
+    if (!params?.uri || typeof params.line !== 'number' || !Number.isFinite(params.line)) {
+        return null;
+    }
+    await ensureDocumentRefreshed(params.uri);
+    const document = documents.get(params.uri);
+    if (!document) {
+        return null;
+    }
+    const symbolTable = symbolTables.get(params.uri);
+    if (!symbolTable) {
+        return null;
+    }
+    const clampedLine = Math.max(0, Math.min(Math.floor(params.line), Math.max(0, document.lineCount - 1)));
+    const info = symbolTable.getSegmentInfoAtLine(clampedLine);
+    return {
+        segment: info.segment,
+        definitionLine: info.line,
+        explicit: info.explicit,
+        line: clampedLine,
+    };
 });
 
 // Custom request from the client to fetch mnemonic reference tables for a CPU

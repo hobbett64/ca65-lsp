@@ -12,13 +12,14 @@ import { URI } from 'vscode-uri';
 
 import { getMnemonicInfo, MnemonicInfo, MnemonicModeInfo, resolveDirectiveAlias } from './dataManager';
 import { Ca65Cpu } from './settings';
-import { Macro, MacroKind, Scope, Symbol as Ca65Symbol, SymbolKind as Ca65SymbolKind, SymbolTableEntity } from './symbolTable';
+import { Macro, MacroKind, Scope, ScopeKind, Symbol as Ca65Symbol, SymbolKind as Ca65SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
 import { resolveReference } from './symbolResolver';
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
 import { getCachedTextDocument } from './documentCache';
-import { evaluateConstantEntity } from './instructionAnalyzer';
-import { findCheapLocalLabelAtPosition, findCheapLocalLabelDefinition } from './cheapLocalLabelUtils';
-import { getAnonymousLabelDefinition } from './anonymousLabelUtils';
+import { evaluateConstantEntity, evaluateLabelSize, evaluateLocationLabelSize, evaluateScopeSize, evaluateStructFieldBadge } from './instructionAnalyzer';
+import { findCheapLocalLabelAtPosition, findCheapLocalLabelDefinition, findPreviousCheapLocalBoundary, getCheapLocalScopeEndLine } from './cheapLocalLabelUtils';
+import { getAnonymousLabelIndex } from './anonymousLabelUtils';
+import { findNumberLiteralAtPosition, NumberLiteralHit } from './codeActionProvider';
 import { getWorkspaceRelativePath } from './pathUtils';
 
 export function initializeHoverProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
@@ -51,11 +52,19 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
                 if (!definitionDocument) {
                     return undefined;
                 }
+                const defSettings = foundEntity.uri === textDocument.uri
+                    ? settings
+                    : await getDocumentSettings(foundEntity.uri);
 
                 return {
                     contents: {
                         kind: MarkupKind.Markdown,
-                        value: generateSymbolTableEntityMarkdown(foundEntity, definitionDocument, settings.implicitImports)
+                        value: generateSymbolTableEntityMarkdown(
+                            foundEntity,
+                            definitionDocument,
+                            defSettings.implicitImports,
+                            defSettings.binIncludeDirs
+                        )
                     },
                     range: ref.location
                 };
@@ -73,11 +82,18 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
             if (localName) {
                 const defLoc = findCheapLocalLabelDefinition(document, position, localName);
                 if (defLoc) {
-                    const enclosingSeg = symbolTable.getScopeAtPosition(defLoc.range.start)?.segment;
+                    const settings = await getDocumentSettings(textDocument.uri);
                     return {
                         contents: {
                             kind: MarkupKind.Markdown,
-                            value: generateLocationHoverMarkdown(localName, defLoc.uri, defLoc.range.start.line, document, enclosingSeg)
+                            value: generateCheapLocalHoverMarkdown(
+                                localName,
+                                defLoc.range,
+                                document,
+                                symbolTable,
+                                settings.implicitImports,
+                                settings.binIncludeDirs
+                            )
                         }
                     };
                 }
@@ -85,16 +101,39 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
         }
 
         if (lineText.includes(':')) {
-            const anonLoc = getAnonymousLabelDefinition(document, position);
-            if (anonLoc) {
-                const enclosingSeg = symbolTable.getScopeAtPosition(anonLoc.range.start)?.segment;
-                return {
-                    contents: {
-                        kind: MarkupKind.Markdown,
-                        value: generateLocationHoverMarkdown(':', anonLoc.uri, anonLoc.range.start.line, document, enclosingSeg)
-                    }
-                };
+            const anonIndex = getAnonymousLabelIndex(document, position);
+            if (anonIndex !== undefined) {
+                const defLine = symbolTable.anonymousLabelLines[anonIndex];
+                if (defLine !== undefined) {
+                    const enclosingSeg = getEffectiveSegmentAtLine(symbolTable, defLine);
+                    return {
+                        contents: {
+                            kind: MarkupKind.Markdown,
+                            value: generateLocationHoverMarkdown(
+                                String(anonIndex + 1),
+                                document.uri,
+                                defLine,
+                                document,
+                                enclosingSeg,
+                                ['anonymous label']
+                            )
+                        }
+                    };
+                }
             }
+        }
+
+        const numHit = findNumberLiteralAtPosition(document, position);
+        if (numHit) {
+            const rawToken = lineText.slice(numHit.startChar, numHit.endChar);
+            const hoverRange = Range.create(position.line, numHit.startChar, position.line, numHit.endChar);
+            return {
+                contents: {
+                    kind: MarkupKind.Markdown,
+                    value: generateNumberHoverMarkdown(numHit, rawToken),
+                },
+                range: hoverRange,
+            };
         }
 
         const wordRegex = /[.a-zA-Z_][a-zA-Z0-9_]*/g;
@@ -194,54 +233,178 @@ export function formatSourceLink(uri: string, oneBasedLine: number): string {
     return `[${normalizedPath}:${oneBasedLine}](${uri}#L${oneBasedLine})`;
 }
 
+const LABEL_SYMBOL_KINDS = new Set<Ca65SymbolKind>([
+    Ca65SymbolKind.Label,
+    Ca65SymbolKind.ResLabel,
+    Ca65SymbolKind.DataLabel,
+    Ca65SymbolKind.StringLabel,
+]);
+
 function escapeInlineMarkdown(text: string): string {
     return text.replace(/([\\`*_{}[\]()#+\-!])/g, '\\$1');
 }
 
+function getEffectiveSegmentAtLine(symbolTable: SymbolTable | undefined, line: number): string | undefined {
+    if (!symbolTable) {
+        return undefined;
+    }
+    const seg = symbolTable.getSegmentAtLine(line);
+    return seg || undefined;
+}
+
+function formatQualifiedPrefixAndLeaf(entity: SymbolTableEntity): { prefixParts: string[]; leaf: string } {
+    return {
+        prefixParts: entity.getScopeStack().filter(name => !name.startsWith('<anon')),
+        leaf: entity.name,
+    };
+}
+
+function formatQualifiedMarkdownName(entity: SymbolTableEntity): string {
+    const { prefixParts, leaf } = formatQualifiedPrefixAndLeaf(entity);
+    const boldLeaf = `**${escapeInlineMarkdown(leaf)}**`;
+    if (prefixParts.length === 0) {
+        return boldLeaf;
+    }
+    const prefix = prefixParts.map(escapeInlineMarkdown).join('::');
+    return `${prefix}::${boldLeaf}`;
+}
+
+function findCheapLocalBoundaryEntity(symbolTable: SymbolTable, boundaryLine: number): SymbolTableEntity | undefined {
+    let matched: SymbolTableEntity | undefined;
+    for (const candidate of symbolTable.getAllDefinedEntities()) {
+        if (candidate.definition.start.line !== boundaryLine) {
+            continue;
+        }
+        if (
+            (candidate instanceof Scope && candidate.kind === ScopeKind.Proc)
+            || (candidate instanceof Ca65Symbol && LABEL_SYMBOL_KINDS.has(candidate.kind))
+        ) {
+            matched = candidate;
+        }
+    }
+    return matched;
+}
+
+function formatCheapLocalMarkdownName(
+    label: string,
+    document: TextDocument,
+    defLine: number,
+    symbolTable?: SymbolTable
+): string {
+    const leafName = label.startsWith('@') ? label.slice(1) : label;
+    const escapedLeaf = escapeInlineMarkdown(leafName);
+    const boldLeaf = `**@${escapedLeaf}**`;
+    if (!symbolTable) {
+        return boldLeaf;
+    }
+    const boundaryLine = findPreviousCheapLocalBoundary(document, defLine);
+    if (boundaryLine >= 0) {
+        const boundaryEntity = findCheapLocalBoundaryEntity(symbolTable, boundaryLine);
+        if (boundaryEntity) {
+            const { prefixParts, leaf } = formatQualifiedPrefixAndLeaf(boundaryEntity);
+            const qualifiedBoundary = [...prefixParts, leaf].map(escapeInlineMarkdown).join('::');
+            // Insert U+2060 (Word Joiner, Cf) after ** so CommonMark / VS Code marked parses **@...** as bold right after an alphanumeric parent without visible spacing or line breaks.
+            return `${qualifiedBoundary}**\u2060@${escapedLeaf}**`;
+        }
+    }
+    const enclosingScope = symbolTable.getScopeAtPosition({ line: defLine, character: 0 });
+    if (enclosingScope && enclosingScope !== symbolTable.getRootScope()) {
+        const { prefixParts, leaf } = formatQualifiedPrefixAndLeaf(enclosingScope);
+        const scopeParts = enclosingScope.name.startsWith('<anon') ? prefixParts : [...prefixParts, leaf];
+        if (scopeParts.length > 0) {
+            return `${scopeParts.map(escapeInlineMarkdown).join('::')}::${boldLeaf}`;
+        }
+    }
+    return boldLeaf;
+}
+
 function formatEntityHeaderParts(entity: SymbolTableEntity): {
-    badge?: string;
-    signature: string;
+    segment?: string | null;
+    badges: string[];
+    signatureMarkdown: string;
 } {
     if (entity instanceof Macro) {
+        const boldName = `**${escapeInlineMarkdown(entity.name)}**`;
         if (entity.kind === MacroKind.Define) {
             return {
-                badge: 'DEFINE',
-                signature: entity.params.length > 0
-                    ? `${entity.name}(${entity.params.join(', ')})`
-                    : entity.name,
+                badges: ['define'],
+                signatureMarkdown: entity.params.length > 0
+                    ? `${boldName}${escapeInlineMarkdown(`(${entity.params.join(', ')})`)}`
+                    : boldName,
             };
         }
         return {
-            badge: 'MACRO',
-            signature: entity.params.length > 0
-                ? `${entity.name} ${entity.params.join(', ')}`
-                : entity.name,
+            badges: ['macro'],
+            signatureMarkdown: entity.params.length > 0
+                ? `${boldName} ${escapeInlineMarkdown(entity.params.join(', '))}`
+                : boldName,
         };
     }
+    const qualifiedMarkdown = formatQualifiedMarkdownName(entity);
     if (entity instanceof Scope) {
         return {
-            badge: entity.segment || undefined,
-            signature: `.${entity.kind} ${entity.name}`,
+            segment: entity.segment,
+            badges: [entity.kind],
+            signatureMarkdown: qualifiedMarkdown,
         };
     }
     if (entity instanceof Ca65Symbol) {
         const badgeByKind: Partial<Record<Ca65SymbolKind, string>> = {
-            [Ca65SymbolKind.Constant]: 'CONST',
-            [Ca65SymbolKind.EnumMember]: 'ENUM',
-            [Ca65SymbolKind.Variable]: 'VAR',
+            [Ca65SymbolKind.Constant]: 'const',
+            [Ca65SymbolKind.EnumMember]: 'enum',
+            [Ca65SymbolKind.Variable]: 'var',
+            [Ca65SymbolKind.StructMember]: 'field',
         };
         const symbolBadge = badgeByKind[entity.kind];
         if (symbolBadge) {
             return {
-                badge: symbolBadge,
-                signature: entity.name,
+                badges: [symbolBadge],
+                signatureMarkdown: qualifiedMarkdown,
             };
         }
+        return {
+            segment: entity.segment,
+            badges: LABEL_SYMBOL_KINDS.has(entity.kind) ? ['label'] : [],
+            signatureMarkdown: qualifiedMarkdown,
+        };
     }
     return {
-        badge: entity.segment || undefined,
-        signature: entity.name,
+        segment: entity.segment,
+        badges: [],
+        signatureMarkdown: qualifiedMarkdown,
     };
+}
+
+function assembleEntityHoverMarkdown(
+    header: {
+        segment?: string | null;
+        badges: string[];
+        signatureMarkdown: string;
+        trailingParts?: string[];
+    },
+    uri: string,
+    defLine: number,
+    document: TextDocument
+): string {
+    const headerParts: string[] = [];
+    if (header.segment) {
+        headerParts.push(`\`${header.segment}\``);
+    }
+    for (const badge of header.badges) {
+        headerParts.push(badge);
+    }
+    headerParts.push(header.signatureMarkdown);
+    if (header.trailingParts) {
+        headerParts.push(...header.trailingParts);
+    }
+
+    const sections: string[] = [headerParts.join(' ')];
+    const { docCommentBlock } = extractLeadingDocInfo(document, defLine);
+    if (docCommentBlock) {
+        sections.push('```ca65\n' + docCommentBlock + '\n```');
+    }
+    sections.push(`Defined in ${formatSourceLink(uri, defLine + 1)}`);
+    return sections.join('\n\n');
 }
 
 function generateLocationHoverMarkdown(
@@ -249,39 +412,114 @@ function generateLocationHoverMarkdown(
     uri: string,
     defLine: number,
     document: TextDocument,
-    segment?: string | null
+    segment?: string | null,
+    badges: string[] = []
 ): string {
-    const sections: string[] = [];
-    const header = segment
-        ? `\`${segment}\` ${escapeInlineMarkdown(label)}`
-        : escapeInlineMarkdown(label);
-    sections.push(header);
+    return assembleEntityHoverMarkdown(
+        {
+            segment,
+            badges,
+            signatureMarkdown: `**${escapeInlineMarkdown(label)}**`,
+        },
+        uri,
+        defLine,
+        document
+    );
+}
 
-    const { docCommentBlock } = extractLeadingDocInfo(document, defLine);
-    if (docCommentBlock) {
-        sections.push('```ca65\n' + docCommentBlock + '\n```');
+export function generateCheapLocalHoverMarkdown(
+    label: string,
+    defRange: Range,
+    document: TextDocument,
+    symbolTable?: SymbolTable,
+    implicitImports: boolean = false,
+    binIncludeDirs?: string[]
+): string {
+    const defLine = defRange.start.line;
+    const segment = getEffectiveSegmentAtLine(symbolTable, defLine);
+    const signatureMarkdown = formatCheapLocalMarkdownName(label, document, defLine, symbolTable);
+    const endLine = getCheapLocalScopeEndLine(document, defLine);
+    const resolvedSize = evaluateLocationLabelSize(
+        defRange,
+        endLine,
+        document,
+        symbolTable,
+        symbolTables,
+        includesGraph,
+        implicitImports,
+        binIncludeDirs
+    );
+    const trailingParts: string[] = [];
+    if (resolvedSize !== null && Number.isFinite(resolvedSize) && resolvedSize >= 1) {
+        trailingParts.push(`[${resolvedSize}]`);
     }
-
-    sections.push(`Defined in ${formatSourceLink(uri, defLine + 1)}`);
-    return sections.join('\n\n');
+    return assembleEntityHoverMarkdown(
+        {
+            segment,
+            badges: ['label'],
+            signatureMarkdown,
+            trailingParts,
+        },
+        document.uri,
+        defLine,
+        document
+    );
 }
 
 export function generateSymbolTableEntityMarkdown(
     entity: SymbolTableEntity,
     document: TextDocument,
-    implicitImports: boolean = false
+    implicitImports: boolean = false,
+    binIncludeDirs?: string[]
 ): string {
     const definitionStart = entity.definition.start.line;
-    const { docCommentBlock } = extractLeadingDocInfo(document, definitionStart);
-
-    const { badge, signature } = formatEntityHeaderParts(entity);
-    const headerParts: string[] = [];
-    if (badge) {
-        headerParts.push(`\`${badge}\``);
-    }
-    headerParts.push(escapeInlineMarkdown(signature));
-
     const entitySymTable = symbolTables.get(entity.uri);
+
+    const { segment, badges, signatureMarkdown } = formatEntityHeaderParts(entity);
+    let resolvedSize: number | null = null;
+    if (entity instanceof Scope && (entity.kind === ScopeKind.Struct || entity.kind === ScopeKind.Union)) {
+        resolvedSize = evaluateScopeSize(
+            entity,
+            document,
+            entitySymTable,
+            symbolTables,
+            includesGraph,
+            implicitImports,
+            binIncludeDirs
+        );
+    } else if (entity instanceof Ca65Symbol && LABEL_SYMBOL_KINDS.has(entity.kind)) {
+        resolvedSize = evaluateLabelSize(
+            entity,
+            document,
+            entitySymTable,
+            symbolTables,
+            includesGraph,
+            implicitImports,
+            binIncludeDirs
+        );
+    } else if (entity instanceof Ca65Symbol && entity.kind === Ca65SymbolKind.StructMember) {
+        const fieldInfo = evaluateStructFieldBadge(
+            entity,
+            document,
+            entitySymTable,
+            symbolTables,
+            includesGraph,
+            implicitImports,
+            binIncludeDirs
+        );
+        if (fieldInfo) {
+            if (fieldInfo.badge) {
+                badges.push(fieldInfo.badge);
+            }
+            resolvedSize = fieldInfo.size;
+        }
+    }
+
+    const trailingParts: string[] = [];
+    if (resolvedSize !== null && Number.isFinite(resolvedSize) && resolvedSize >= 1) {
+        trailingParts.push(`[${resolvedSize}]`);
+    }
+
     if (
         entity instanceof Ca65Symbol
         && entitySymTable
@@ -300,24 +538,21 @@ export function generateSymbolTableEntityMarkdown(
             implicitImports
         );
         if (evaluated !== null && Number.isFinite(evaluated)) {
-            headerParts.push(`= ${formatHexAndDecimal(evaluated)}`);
+            trailingParts.push(`= ${formatHexAndDecimal(evaluated)}`);
         }
     }
 
-    const sections: string[] = [];
-    sections.push(headerParts.join(' '));
-
-    if (docCommentBlock) {
-        sections.push('```ca65\n' + docCommentBlock + '\n```');
-    }
-
-    sections.push(`Defined in ${formatSourceLink(entity.uri, definitionStart + 1)}`);
-    return sections.join('\n\n');
+    return assembleEntityHoverMarkdown(
+        { segment, badges, signatureMarkdown, trailingParts },
+        entity.uri,
+        definitionStart,
+        document
+    );
 }
 
 export function generateDirectiveHoverMarkdown(directiveName: string, data: any): string {
     const typeLabel = data.type ? ` · *${String(data.type).toLowerCase().replace(/_/g, ' ')}*` : '';
-    let markdown = `### \`${directiveName.toUpperCase()}\`${typeLabel}\n\n`;
+    let markdown = `\`${directiveName.toLowerCase()}\`${typeLabel}\n\n`;
     markdown += `${data.shortDescription}\n\n`;
     if (data.documentationUrl) {
         markdown += `[View cc65 documentation](${data.documentationUrl})\n`;
@@ -347,16 +582,16 @@ function formatModeCycles(info: MnemonicModeInfo): string {
 
 export function generateMnemonicHoverMarkdown(mnemonic: string, data: MnemonicInfo, cpu?: Ca65Cpu): string {
     const cpuTag = cpu && cpu !== '6502' ? ` (${cpu})` : '';
-    let markdown = `### \`${mnemonic.toUpperCase()}\` — ${data.fullName}${cpuTag}\n\n`;
+    let markdown = `\`${mnemonic.toLowerCase()}\` — **${data.fullName}**${cpuTag}\n\n`;
     if (data.description) markdown += `${data.description}\n\n`;
     if (data.warning) markdown += `⚠️ **Warning**: ${data.warning}\n\n`;
     if (data.note) markdown += `*Note: ${data.note}*\n\n`;
     if (data.flagChanges && Object.keys(data.flagChanges).length > 0) {
-        markdown += `**Flags affected:** `;
-        markdown += Object.keys(data.flagChanges)
-            .map(flag => `\`${flag}\`: ${data.flagChanges[flag]}`)
-            .join(' · ');
-        markdown += `\n\n`;
+        markdown += `**Flags affected:**\n`;
+        for (const flag of Object.keys(data.flagChanges)) {
+            markdown += `- \`${flag}\`: ${data.flagChanges[flag]}\n`;
+        }
+        markdown += `\n`;
     }
     if (data.modes && Object.keys(data.modes).length > 0) {
         markdown += `| Mode | Opcode | Bytes | Cycles |\n`;
@@ -366,8 +601,15 @@ export function generateMnemonicHoverMarkdown(mnemonic: string, data: MnemonicIn
         }
         markdown += `\n`;
     }
-    if (Array.isArray(data.seeAlso) && data.seeAlso.length > 0) {
-        markdown += `**See also:** ${data.seeAlso.map((s: string) => `\`${s}\``).join(', ')}\n`;
-    }
     return markdown;
+}
+
+export function generateNumberHoverMarkdown(hit: NumberLiteralHit, rawToken: string): string {
+    const hexWidth = hit.value <= 0xFF ? 2 : hit.value <= 0xFFFF ? 4 : 8;
+    const hexStr = '$' + hit.value.toString(16).toUpperCase().padStart(hexWidth, '0');
+    const decStr = hit.value.toString(10);
+    const binWidth = hit.value <= 0xFF ? 8 : hit.value <= 0xFFFF ? 16 : 32;
+    const binStr = '%' + hit.value.toString(2).padStart(binWidth, '0');
+
+    return `number **${escapeInlineMarkdown(rawToken)}**\n\nHex: \`${hexStr}\` · Dec: \`${decStr}\` · Bin: \`${binStr}\``;
 }

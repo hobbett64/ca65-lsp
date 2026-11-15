@@ -375,14 +375,14 @@ function buildImportMismatchQuickFix(
     });
 }
 
-interface NumberLiteralHit {
+export interface NumberLiteralHit {
     base: 'hex' | 'bin' | 'dec';
     value: number;
     startChar: number;
     endChar: number;
 }
 
-function findNumberLiteralAtPosition(document: TextDocument, pos: Position): NumberLiteralHit | null {
+export function findNumberLiteralAtPosition(document: TextDocument, pos: Position): NumberLiteralHit | null {
     if (pos.line < 0 || pos.line >= document.lineCount) return null;
     const lineText = getLineText(document, pos.line);
     const commentIdx = findCommentStart(lineText);

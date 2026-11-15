@@ -266,7 +266,7 @@ function posOf(lines, needle, offset = 1) {
         assert(!comp6502.has('bra') && !comp6502.has('stz') && !comp6502.has('jsl') && !comp6502.has('rmb0') && !comp6502.has('wai'),
             '6502 completions must not include 65C02/65816 opcodes');
         const resolvedLda6502 = await request('completionItem/resolve', comp6502.get('lda'));
-        assert(resolvedLda6502.documentation.value.startsWith('### `LDA` — Load Accumulator\n'),
+        assert(resolvedLda6502.documentation.value.startsWith('`lda` — **Load Accumulator**\n'),
             `6502 hover/completion doc should not carry a CPU tag, got: ${resolvedLda6502.documentation.value}`);
 
         const jmp6502 = await analyzeLine('jmp ($1234)');
