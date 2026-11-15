@@ -5,6 +5,7 @@ import {
     TextDocuments,
     CompletionItem,
     CompletionItemKind,
+    InsertTextFormat,
     MarkupKind,
     TextDocumentPositionParams,
     Range,
@@ -14,13 +15,14 @@ import {
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
-import { directiveData, mnemonicData, resolveDirectiveAlias } from './dataManager';
+import { getLineText } from './editUtils';
+import { directiveData, getMnemonicInfo, getMnemonicsForCpu, resolveDirectiveAlias } from './dataManager';
 import { Export, Import, ImportKind, Macro, MacroKind, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
 import { findCheapLocalLabelDefinition, getCheapLocalLabelDefinitions } from './cheapLocalLabelUtils';
 import { IncludesGraph } from './includesGraph';
 import { getLSPSymbolKind, resolveExport, resolveImport } from './symbolResolver';
 import { findCanonicalIncludePath, getSearchDirectories, getWorkspaceRelativePath, uriToFsPath } from './pathUtils';
-import { Ca65Settings } from './settings';
+import { Ca65Cpu, Ca65Settings, normalizeCpu } from './settings';
 import { isAutoIncludable, makeImportEdit, makeIncludeEdit } from './editUtils';
 import { getCachedTextDocument } from './documentCache';
 import {
@@ -34,9 +36,117 @@ import {
 const CHEAP_LOCAL_ITEM_PREFIX = 0;
 const VISIBLE_ITEM_PREFIX = 1;
 const MNEMONIC_ITEM_PREFIX = 2;
+const BLOCK_SNIPPET_ITEM_PREFIX = 2;
 const DIRECTIVE_ITEM_PREFIX = 3;
 const AUTO_INCLUDE_ITEM_PREFIX = 4;
 const AUTO_IMPORT_ITEM_PREFIX = 5;
+const SNIPPET_FALLBACK_DIRECTIVE_PREFIX = 9;
+
+const BLOCK_DIRECTIVE_SNIPPETS: Record<string, { placeholder: string; endDirective: string; detail: string }> = {
+    '.proc': { placeholder: 'name', endDirective: '.endproc', detail: 'Procedure block' },
+    '.macro': { placeholder: 'name', endDirective: '.endmacro', detail: 'Macro block' },
+    '.scope': { placeholder: 'name', endDirective: '.endscope', detail: 'Scope block' },
+    '.struct': { placeholder: 'name', endDirective: '.endstruct', detail: 'Struct block' },
+    '.union': { placeholder: 'name', endDirective: '.endunion', detail: 'Union block' },
+    '.enum': { placeholder: 'name', endDirective: '.endenum', detail: 'Enum block' },
+    '.repeat': { placeholder: 'count', endDirective: '.endrepeat', detail: 'Repeat block' },
+    '.if': { placeholder: 'condition', endDirective: '.endif', detail: 'Conditional block' },
+    '.ifdef': { placeholder: 'symbol', endDirective: '.endif', detail: 'Conditional block (if defined)' },
+    '.ifndef': { placeholder: 'symbol', endDirective: '.endif', detail: 'Conditional block (if not defined)' },
+    '.ifblank': { placeholder: 'tokens', endDirective: '.endif', detail: 'Conditional block (if blank)' },
+    '.ifnblank': { placeholder: 'tokens', endDirective: '.endif', detail: 'Conditional block (if not blank)' },
+    '.ifref': { placeholder: 'symbol', endDirective: '.endif', detail: 'Conditional block (if referenced)' },
+    '.ifnref': { placeholder: 'symbol', endDirective: '.endif', detail: 'Conditional block (if not referenced)' },
+    '.ifconst': { placeholder: 'expression', endDirective: '.endif', detail: 'Conditional block (if constant)' },
+};
+
+const DECLARATION_HEADER_DIRECTIVES = new Set([
+    '.proc', '.macro', '.mac', '.scope', '.struct', '.union', '.enum',
+]);
+
+const ZERO_ARG_DIRECTIVES = new Set([
+    '.endproc', '.endmacro', '.endmac', '.endscope', '.endstruct', '.endunion',
+    '.endenum', '.endrepeat', '.endrep', '.endif', '.else',
+    '.code', '.data', '.bss', '.zeropage', '.rodata', '.reloc', '.pushseg', '.popseg',
+]);
+
+const NUMERIC_LITERAL_AT_CURSOR_RE = /(?:^|[^a-zA-Z0-9_.@])(?:\$[0-9a-fA-F]*|%[01]*|[0-9]+)$/;
+const SINGLE_TRAILING_COLON_RE = /(?:^|[^:]):$/;
+
+function hasUnclosedPriorBlockComment(document: TextDocument, line: number): boolean {
+    const startLine = Math.max(0, line - 200);
+    for (let l = line - 1; l >= startLine; l--) {
+        const text = getLineText(document, l);
+        const closeIdx = text.lastIndexOf('*/');
+        const openIdx = text.lastIndexOf('/*');
+        if (openIdx !== -1 || closeIdx !== -1) {
+            return openIdx > closeIdx;
+        }
+    }
+    return false;
+}
+
+function isInCommentOrString(document: TextDocument, position: Position, lineToCursor: string): boolean {
+    let inBlockComment = hasUnclosedPriorBlockComment(document, position.line);
+    let quote = 0;
+
+    for (let i = 0; i < lineToCursor.length; i++) {
+        const ch = lineToCursor.charCodeAt(i);
+        if (inBlockComment) {
+            if (ch === 42 /* * */ && i + 1 < lineToCursor.length && lineToCursor.charCodeAt(i + 1) === 47 /* / */) {
+                inBlockComment = false;
+                i++;
+            }
+            continue;
+        }
+        if (quote !== 0) {
+            if (ch === 92 /* \ */) {
+                i++;
+            } else if (ch === quote) {
+                quote = 0;
+            }
+            continue;
+        }
+        if (ch === 59 /* ; */) {
+            return true;
+        }
+        if (ch === 47 /* / */ && i + 1 < lineToCursor.length && lineToCursor.charCodeAt(i + 1) === 42 /* * */) {
+            inBlockComment = true;
+            i++;
+            continue;
+        }
+        if (ch === 34 /* " */ || ch === 39 /* ' */) {
+            quote = ch;
+        }
+    }
+
+    return inBlockComment || quote !== 0;
+}
+
+function isInsideDefineHeader(afterDefine: string): boolean {
+    const rest = afterDefine.trimStart();
+    if (!rest) return true;
+
+    let parenDepth = 0;
+    for (let i = 0; i < rest.length; i++) {
+        const ch = rest.charCodeAt(i);
+        if (ch === 40 /* ( */) {
+            parenDepth++;
+        } else if (ch === 41 /* ) */ && parenDepth > 0) {
+            parenDepth--;
+        } else if ((ch === 32 || ch === 9) && parenDepth === 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function isImpliedOnlyMnemonic(cmdToken: string, cpu?: Ca65Cpu): boolean {
+    const info = getMnemonicInfo(cmdToken, cpu);
+    if (!info || !info.modes) return false;
+    const modes = Object.keys(info.modes);
+    return modes.length === 1 && (modes[0] === 'Implied' || modes[0] === 'Accumulator');
+}
 
 function getCompletionItemKind(kind: LSPSymbolKind): CompletionItemKind {
     switch (kind) {
@@ -121,53 +231,77 @@ interface StaticCompletionTemplates {
     operandDirectives: Omit<CompletionItem, 'textEdit'>[];
 }
 
-let cachedStaticTemplates: StaticCompletionTemplates | null = null;
+const cachedMnemonicTemplatesByCpu = new Map<Ca65Cpu, Omit<CompletionItem, 'textEdit'>[]>();
+let cachedDirectiveTemplates: {
+    controlDirectives: Omit<CompletionItem, 'textEdit'>[];
+    operandDirectives: Omit<CompletionItem, 'textEdit'>[];
+} | null = null;
 
-function getStaticTemplates(): StaticCompletionTemplates {
-    if (cachedStaticTemplates) {
-        return cachedStaticTemplates;
-    }
-
-    const mnemonics: Omit<CompletionItem, 'textEdit'>[] = [];
-    for (const key in mnemonicData) {
-        const lowerCaseKey = key.toLowerCase();
-        mnemonics.push({
-            label: lowerCaseKey,
-            kind: CompletionItemKind.Keyword,
-            detail: 'Mnemonic',
-            sortText: MNEMONIC_ITEM_PREFIX + lowerCaseKey,
-            data: { staticKind: 'mnemonic', key },
-        });
-    }
-
-    const controlDirectives: Omit<CompletionItem, 'textEdit'>[] = [];
-    const operandDirectives: Omit<CompletionItem, 'textEdit'>[] = [];
-    for (const key in directiveData) {
-        const directive = resolveDirectiveAlias(key);
-        if (!directive) continue;
-
-        const directiveName = `.${key.toLowerCase()}`;
-        if (directive.type === 'Control command') {
-            controlDirectives.push({
-                label: directiveName,
+function getStaticTemplates(cpu?: Ca65Cpu): StaticCompletionTemplates {
+    const normalizedCpu = normalizeCpu(cpu);
+    let mnemonics = cachedMnemonicTemplatesByCpu.get(normalizedCpu);
+    if (!mnemonics) {
+        mnemonics = [];
+        const cpuMnemonics = getMnemonicsForCpu(normalizedCpu);
+        for (const key in cpuMnemonics) {
+            const lowerCaseKey = key.toLowerCase();
+            mnemonics.push({
+                label: lowerCaseKey,
                 kind: CompletionItemKind.Keyword,
-                detail: 'Control Command',
-                sortText: DIRECTIVE_ITEM_PREFIX + directiveName,
-                data: { staticKind: 'directive', key },
-            });
-        } else if (directive.type === 'Pseudo-function' || directive.type === 'Pseudo-variable') {
-            operandDirectives.push({
-                label: directiveName,
-                kind: directive.type === 'Pseudo-function' ? CompletionItemKind.Function : CompletionItemKind.Variable,
-                detail: directive.type,
-                sortText: DIRECTIVE_ITEM_PREFIX + directiveName,
-                data: { staticKind: 'directive', key },
+                detail: 'Mnemonic',
+                sortText: MNEMONIC_ITEM_PREFIX + lowerCaseKey,
+                data: { staticKind: 'mnemonic', key, cpu: normalizedCpu },
             });
         }
+        cachedMnemonicTemplatesByCpu.set(normalizedCpu, mnemonics);
     }
 
-    cachedStaticTemplates = { mnemonics, controlDirectives, operandDirectives };
-    return cachedStaticTemplates;
+    if (!cachedDirectiveTemplates) {
+        const controlDirectives: Omit<CompletionItem, 'textEdit'>[] = [];
+        const operandDirectives: Omit<CompletionItem, 'textEdit'>[] = [];
+        for (const key in directiveData) {
+            const directive = resolveDirectiveAlias(key);
+            if (!directive) continue;
+
+            const directiveName = `.${key.toLowerCase()}`;
+            if (directive.type === 'Control command') {
+                const snippetDef = BLOCK_DIRECTIVE_SNIPPETS[directiveName];
+                if (snippetDef) {
+                    controlDirectives.push({
+                        label: directiveName,
+                        kind: CompletionItemKind.Snippet,
+                        detail: snippetDef.detail,
+                        insertTextFormat: InsertTextFormat.Snippet,
+                        insertText: `${directiveName} \${1:${snippetDef.placeholder}}\n\t$0\n${snippetDef.endDirective}`,
+                        sortText: BLOCK_SNIPPET_ITEM_PREFIX + directiveName,
+                        data: { staticKind: 'directive', key },
+                    });
+                }
+                controlDirectives.push({
+                    label: directiveName,
+                    kind: CompletionItemKind.Keyword,
+                    detail: 'Control Command',
+                    sortText: (snippetDef ? SNIPPET_FALLBACK_DIRECTIVE_PREFIX : DIRECTIVE_ITEM_PREFIX) + directiveName,
+                    data: { staticKind: 'directive', key },
+                });
+            } else if (directive.type === 'Pseudo-function' || directive.type === 'Pseudo-variable') {
+                operandDirectives.push({
+                    label: directiveName,
+                    kind: directive.type === 'Pseudo-function' ? CompletionItemKind.Function : CompletionItemKind.Variable,
+                    detail: directive.type,
+                    sortText: DIRECTIVE_ITEM_PREFIX + directiveName,
+                    data: { staticKind: 'directive', key },
+                });
+            }
+        }
+        cachedDirectiveTemplates = { controlDirectives, operandDirectives };
+    }
+
+    return {
+        mnemonics,
+        controlDirectives: cachedDirectiveTemplates.controlDirectives,
+        operandDirectives: cachedDirectiveTemplates.operandDirectives,
+    };
 }
 
 function getCheapLocalLabelCompletions(
@@ -283,9 +417,10 @@ function appendStaticTemplates(
             label: t.label,
             kind: t.kind,
             detail: t.detail,
+            insertTextFormat: t.insertTextFormat,
             sortText: t.sortText,
             data: t.data,
-            textEdit: TextEdit.replace(replacementRange, t.label),
+            textEdit: TextEdit.replace(replacementRange, t.insertText ?? t.label),
         });
     }
 }
@@ -313,13 +448,19 @@ export function initializeCompletionProvider(connection: _Connection, documents:
                 return getIncludePathCompletions(document.uri, position, partialPath, isIncbin, settings);
             }
 
+            if (isInCommentOrString(document, position, lineToCursor)) {
+                return [];
+            }
+
             const anonLabelRefRegex = /:[-+<>]+$/;
             if (anonLabelRefRegex.test(lineToCursor)) {
                 // Suppress nuisance completion while typing anonymous label references
                 return [];
             }
 
-            const fullLineUntrimmed = document.getText(Range.create(params.position.line, 0, params.position.line + 1, 0));
+            if (NUMERIC_LITERAL_AT_CURSOR_RE.test(lineToCursor) || SINGLE_TRAILING_COLON_RE.test(lineToCursor)) {
+                return [];
+            }
 
             const wordMatch = lineToCursor.match(/[a-zA-Z0-9_.:@]*$/);
             const currentWord = wordMatch ? wordMatch[0] : '';
@@ -352,13 +493,13 @@ export function initializeCompletionProvider(connection: _Connection, documents:
             );
 
             // --- CONTEXT DETERMINATION ---
-            const prefixMatch = fullLineUntrimmed.match(/^\s*(?:(?:[a-zA-Z_@.][a-zA-Z0-9_@.]*)?:(?![:=<>+-])\s*)?/);
+            const prefixMatch = lineToCursor.match(/^\s*(?:(?:[a-zA-Z_@.][a-zA-Z0-9_@.]*)?:(?![:=<>+-])\s*)?/);
             const prefixLen = prefixMatch ? prefixMatch[0].length : 0;
-            const afterPrefix = fullLineUntrimmed.slice(prefixLen);
-            const cmdMatch = afterPrefix.match(/^([a-zA-Z_.]+)/);
-            const isCommandContext = !cmdMatch || params.position.character <= prefixLen + cmdMatch[1].length;
+            const afterPrefix = lineToCursor.slice(prefixLen);
+            const firstWsIdx = afterPrefix.search(/\s/);
+            const isCommandContext = firstWsIdx === -1;
 
-            const templates = getStaticTemplates();
+            const templates = getStaticTemplates(settings.cpu);
 
             if (isCommandContext) {
                 // --- COMMAND CONTEXT: Suggest mnemonics, control commands, and macros ---
@@ -371,15 +512,40 @@ export function initializeCompletionProvider(connection: _Connection, documents:
                 }
                 return completionItems;
             } else {
-                // --- OPERAND CONTEXT: Suggest labels, constants, variables, and pseudo-functions/variables ---
-                const completionItems: CompletionItem[] = await getCompletionSymbols(
-                    document, position, symbolTables, includesGraph, settings
-                );
-                const cheapLocalItems = getCheapLocalLabelCompletions(document, params.position, replacementRange, currentWord);
-                for (let i = 0; i < cheapLocalItems.length; i++) {
-                    completionItems.push(cheapLocalItems[i]);
+                const cmdToken = afterPrefix.slice(0, firstWsIdx);
+                const cmdLower = cmdToken.toLowerCase();
+                if (
+                    DECLARATION_HEADER_DIRECTIVES.has(cmdLower)
+                    || ZERO_ARG_DIRECTIVES.has(cmdLower)
+                    || (cmdLower === '.define' && isInsideDefineHeader(afterPrefix.slice(firstWsIdx)))
+                    || isImpliedOnlyMnemonic(cmdToken, settings.cpu)
+                ) {
+                    return [];
                 }
-                appendStaticTemplates(completionItems, templates.operandDirectives, replacementRange);
+
+                // --- OPERAND CONTEXT: Suggest labels, constants, variables, and pseudo-functions/variables ---
+                const isSymbolDirective =
+                    cmdLower === '.import'
+                    || cmdLower === '.importzp'
+                    || cmdLower === '.export'
+                    || cmdLower === '.exportzp'
+                    || cmdLower === '.global'
+                    || cmdLower === '.globalzp';
+                const completionItems: CompletionItem[] = await getCompletionSymbols(
+                    document,
+                    position,
+                    symbolTables,
+                    includesGraph,
+                    settings,
+                    cmdLower
+                );
+                if (!isSymbolDirective) {
+                    const cheapLocalItems = getCheapLocalLabelCompletions(document, params.position, replacementRange, currentWord);
+                    for (let i = 0; i < cheapLocalItems.length; i++) {
+                        completionItems.push(cheapLocalItems[i]);
+                    }
+                    appendStaticTemplates(completionItems, templates.operandDirectives, replacementRange);
+                }
                 return completionItems;
             }
         });
@@ -393,11 +559,12 @@ export function initializeCompletionProvider(connection: _Connection, documents:
             }
 
             if (data.staticKind === 'mnemonic' && data.key) {
-                const info = mnemonicData[data.key];
+                const cpu = normalizeCpu(data.cpu);
+                const info = getMnemonicInfo(data.key, cpu);
                 if (info) {
                     item.documentation = {
                         kind: MarkupKind.Markdown,
-                        value: generateMnemonicHoverMarkdown(data.key, info),
+                        value: generateMnemonicHoverMarkdown(data.key, info, cpu),
                     };
                 }
                 return item;
@@ -777,7 +944,8 @@ async function getCompletionSymbols(
     position: Position,
     allSymbolTables: Map<string, SymbolTable>,
     includesGraph: IncludesGraph,
-    settings: Ca65Settings
+    settings: Ca65Settings,
+    cmdLower?: string
 ): Promise<CompletionItem[]> {
     const symbolTable = allSymbolTables.get(document.uri);
     if (!symbolTable) return [];
@@ -785,75 +953,96 @@ async function getCompletionSymbols(
     const currentScope = symbolTable.getScopeAtPosition(position);
     if (!currentScope) return [];
 
+    const isImportDir = cmdLower === '.import' || cmdLower === '.importzp';
+    const isExportDir = cmdLower === '.export' || cmdLower === '.exportzp';
+    const isGlobalDir = cmdLower === '.global' || cmdLower === '.globalzp';
+
     const completionItems: CompletionItem[] = [];
 
     // Gather all locally visible symbols across the current translation unit
     const visibleUriSet = getVisibleTranslationUnitSet(document.uri, includesGraph);
     const seenImports: Set<string> = new Set();
     const visibleFqns: Set<string> = new Set();
-    for (const depUri of visibleUriSet) {
-        const depSymbolTable = allSymbolTables.get(depUri);
-        if (!depSymbolTable) continue;
+    if (!isImportDir) {
+        for (const depUri of visibleUriSet) {
+            const depSymbolTable = allSymbolTables.get(depUri);
+            if (!depSymbolTable) continue;
 
-        const { valueEntities } = getTableCompletionMeta(depSymbolTable);
-        for (let i = 0; i < valueEntities.length; i++) {
-            const entry = valueEntities[i];
-            visibleFqns.add(entry.fqn);
-            const label = currentScope.findRelativeName(entry.entity);
+            const { valueEntities } = getTableCompletionMeta(depSymbolTable);
+            for (let i = 0; i < valueEntities.length; i++) {
+                const entry = valueEntities[i];
+                visibleFqns.add(entry.fqn);
+                const label = currentScope.findRelativeName(entry.entity);
 
-            completionItems.push({
-                label,
-                kind: entry.kind,
-                detail: entry.detail,
-                sortText: VISIBLE_ITEM_PREFIX + label,
-                data: makeTargetData(document.uri, entry.entity),
-            });
-        }
-
-        for (const importEntity of depSymbolTable.imports) {
-            seenImports.add(importEntity.name);
-            visibleFqns.add(importEntity.getFullyQualifiedName());
-
-            const label = currentScope.findRelativeName(importEntity);
-            let kind = getCompletionItemKind(getLSPSymbolKind(importEntity));
-            let detail = getCompletionItemDetail(importEntity);
-            let targetEntity: SymbolTableEntity = importEntity;
-
-            // Try to resolve it to a definition we can use for the details. Otherwise, treat
-            // it as an opaque import, which may be the case if it is a header for a library
-            // file.
-            const resolvedImport =
-                resolveImport(importEntity.name, allSymbolTables, includesGraph);
-            if (resolvedImport) {
-                // This may be a global that is acting as an export, which we should ignore.
-                if (
-                    importEntity.kind === ImportKind.Global
-                    && includesGraph.getTranslationUnitSet(importEntity.uri).has(resolvedImport.uri)
-                ) {
-                    continue;
-                }
-
-                if (visibleUriSet.has(resolvedImport.uri)) continue;
-                kind = getCompletionItemKind(getLSPSymbolKind(resolvedImport));
-                detail = getCompletionItemDetail(resolvedImport);
-                targetEntity = resolvedImport;
+                completionItems.push({
+                    label,
+                    kind: entry.kind,
+                    detail: entry.detail,
+                    sortText: VISIBLE_ITEM_PREFIX + label,
+                    data: makeTargetData(document.uri, entry.entity),
+                });
             }
 
-            completionItems.push({
-                label,
-                kind,
-                detail,
-                sortText: VISIBLE_ITEM_PREFIX + label,
-                data: makeTargetData(document.uri, targetEntity),
-            });
+            if (isExportDir) {
+                for (const importEntity of depSymbolTable.imports) {
+                    seenImports.add(importEntity.name);
+                }
+                continue;
+            }
+
+            for (const importEntity of depSymbolTable.imports) {
+                seenImports.add(importEntity.name);
+                visibleFqns.add(importEntity.getFullyQualifiedName());
+
+                const label = currentScope.findRelativeName(importEntity);
+                let kind = getCompletionItemKind(getLSPSymbolKind(importEntity));
+                let detail = getCompletionItemDetail(importEntity);
+                let targetEntity: SymbolTableEntity = importEntity;
+
+                // Try to resolve it to a definition we can use for the details. Otherwise, treat
+                // it as an opaque import, which may be the case if it is a header for a library
+                // file.
+                const resolvedImport =
+                    resolveImport(importEntity.name, allSymbolTables, includesGraph);
+                if (resolvedImport) {
+                    // This may be a global that is acting as an export, which we should ignore.
+                    if (
+                        importEntity.kind === ImportKind.Global
+                        && includesGraph.getTranslationUnitSet(importEntity.uri).has(resolvedImport.uri)
+                    ) {
+                        continue;
+                    }
+
+                    if (visibleUriSet.has(resolvedImport.uri)) continue;
+                    kind = getCompletionItemKind(getLSPSymbolKind(resolvedImport));
+                    detail = getCompletionItemDetail(resolvedImport);
+                    targetEntity = resolvedImport;
+                }
+
+                completionItems.push({
+                    label,
+                    kind,
+                    detail,
+                    sortText: VISIBLE_ITEM_PREFIX + label,
+                    data: makeTargetData(document.uri, targetEntity),
+                });
+            }
         }
+    } else {
+        for (const imp of symbolTable.imports) {
+            seenImports.add(imp.name);
+        }
+    }
+
+    if (isExportDir) {
+        return completionItems;
     }
 
     // Search the workspace for symbols that we can auto-include or import
     for (const [uri, otherSymbolTable] of allSymbolTables) {
         if (visibleUriSet.has(uri)) continue;
 
-        if (isAutoIncludable(uri, settings)) {
+        if (!isImportDir && !isGlobalDir && isAutoIncludable(uri, settings)) {
             let canonicalPath: string | undefined;
             const getCanonicalPath = () => {
                 if (!canonicalPath) {
@@ -927,7 +1116,7 @@ async function getCompletionSymbols(
                 targetLine: resolvedExport.definition.start.line,
                 targetName: resolvedExport.name,
             };
-            if (!settings.implicitImports) {
+            if (!settings.implicitImports && !isImportDir && !isGlobalDir) {
                 const relativeUri = getWorkspaceRelativePath(resolvedExport.uri);
                 labelDetails = {
                     description: `import from ${relativeUri}`

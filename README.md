@@ -6,23 +6,25 @@ Provides basic LSP-backed language support for **ca65** assembly files.
 
 This extension provides a full-featured language server to make writing `ca65` assembly a modern and productive experience.
 
-* **ca65-backed Diagnostics:**
-    * Live validation by running `ca65` in the background and applying the error output to the corresponding lines in the editor.
+* **ca65-backed & LSP Diagnostics:**
+    * Live validation by running `ca65` in the background and mapping errors to editor lines.
+    * Built-in LSP checks for `.import`/`.importzp` and `.export`/`.exportzp` zeropage mismatches (with one-click Quick Fixes) and unused symbols.
 * **Code Navigation:**
-    * **Go to Definition:** Jump directly to the definition of any label, constant, macro, or scope. Works across local, included, and workspace-exported symbols.
-    * **Find All References:** Quickly find all usages of a symbol across the entire workspace.
-    * **Call Hierarchy:** See who calls a procedure/label (`Incoming Calls`) and who a procedure/label calls (`Outgoing Calls`).  by `jsr` and `jmp` mnemonics.
-    * **Outline view:** Symbols defined in a file are displayed in the `OUTLINE` view in the side panel.
+    * **Go to Definition:** Jump directly to the definition of any label, constant, variable, macro, enum, struct, or scope. Works across local, included, and workspace-exported symbols.
+    * **Find All References & Safe Rename:** Find all usages across the workspace or rename symbols (`F2`) with `prepareRename` validation and cheap local (`@label`) normalization.
+    * **Call Hierarchy:** See incoming and outgoing `jsr`/`jmp` (and `65816` `jsl`/`jml`) calls for procedures and labels.
+    * **Outline view:** Nested file outline with segment-based symbol icons, `(macro)` / `(zp)` annotations, and source-order sorting.
 * **Code Intelligence:**
-    * **Rich Hover Information:** Hover over any symbol, directive, or 6502 mnemonic to see its definition, documentation, and scope context.
-    * **Autocompletion:** Get completion suggestions for all accessible symbols, including local, included, and imported labels and macros. If a label is exported somewhere else in the workspace but not yet imported, the autocompletion will also automatically add an `.import` or `.include` statement at the top of the file.
-    * **Import tracing:** Import statements will have an inlay hint displaying the file the symbol is imported from.
-    * **Anonymous label indexing:** Anonymous labels (declared with a single `:`) will be assigned a unique index value, which will be displayed next to the declaration as an inlay hint. The same index will display next to each relative reference to the label (i.e. with `:++`, `:--` etc) 
-* **Editor Features:**
-    * **Syntax Highlighting:** Basic TextMate grammar for ca65 syntax.
-    * **Snippets:** Snippets for commonly used directives like `.proc` and `.macro`, which expand with their respective closing statements.
-    * **Code Folding and sticky scroll:** Fold regions of code like `.proc`, `.scope`, `.struct`, and other blocks. The last folding region's starting line will display at the top of the screen as a sticky scroll anchor.
-    * **Instruction reference page:** A list of 6502 instructions with basic descriptions is available via the `ca65: Show Instruction Reference` command in the command prompt (`ctrl+shift+p`)
+    * **Rich Hover Information:** Shows segment / kind badges (`CODE`, `ZEROPAGE`, `CONST`, `ENUM`, `VAR`, `MACRO`, `DEFINE`), evaluated constant values, verbatim `;` doc comments, clickable source links, cheap/anonymous label previews, and CPU-aware instruction (`6502`, `65SC02`, `65C02`, `W65C02`, `65816`) & directive references.
+    * **Context-Aware Autocompletion & Snippets:** Suggests CPU-filtered mnemonics, directives, block snippets (`.proc`, `.macro`, `.scope`, `.struct`, `.union`, `.enum`, `.repeat`, `.if*`), `Scope::` members, `.include`/`.incbin` paths, and auto-import/include suggestions — while suppressing nuisance popups inside comments, strings, numbers, and declaration names.
+    * **Signature Help:** Active parameter hints for `.macro` calls and `.define` function-like macros.
+    * **Import Tracing & Anonymous Label Indexing:** Inlay hints for `.import` origins and opt-in `L1`/`L2` anonymous label indices (`ca65.anonymousLabelIndexHints`).
+* **Editor & Assembly Tools:**
+    * **Syntax Highlighting & Semantic Tokens:** TextMate grammar for ca65 syntax (highlighting label declarations, control-flow opcodes, string escapes, and constants) paired with LSP semantic tokens for `.proc`, `.macro`, constants, `.enum`, `.struct`, `.scope`, and `.set` variables.
+    * **Side-by-Side Hex & Address Listing:** Open `ca65: Show Hex & Address Listing Side-by-Side` (`$(file-binary)` editor title icon) to inspect assembled addresses and emitted bytes aligned line-for-line with your source.
+    * **Status Bar Cycle & Byte Counter:** Shows estimated byte sizes and cycle counts (or 8/16-bit `M`/`X` ranges for `65816`) for the current line or selection.
+    * **Code Folding & Sticky Scroll:** Fold `.proc`, `.macro`, `.scope`, `.struct`, `.union`, `.enum`, and conditional blocks.
+    * **Instruction Reference Page:** Open the full opcode reference for the active `ca65.cpu` target via `ca65: Show Instruction Reference`.
     
 ## Known Limitations
 
@@ -64,9 +66,16 @@ For users of the standalone LSP with other IDEs, please use the `ca65.additional
 
 ## Other settings
 
-Paths for `.include` and `.incbin` (i.e. what you would pass into `-I` and `--bin-include-dir` during the assembly step) may be specified by `ca65.includeDirs` and `ca65.binIncludeDirs` settings.
+Select your target processor via `ca65.cpu` (`6502` default, `65SC02`, `65C02`, `W65C02`, or `65816`) to align diagnostics, hover docs, autocomplete, status-bar timing/byte estimates, and the instruction reference panel.
+
+Paths for `.include` and `.incbin` (i.e. what you would pass into `-I` and `--bin-include-dir` during the assembly step) may be specified by `ca65.includeDirs` and `ca65.binIncludeDirs` settings, and custom compiler flags (such as `-D DEBUG=1` or `-t nes`) can be passed via `ca65.additionalArgs`.
 
 Please see the Settings gear icon in the installed extension to easily set this and other settings.
+
+## Running Tests
+```
+npm test
+```
 
 ## Building a standalone LSP executable for other editors
 You can build a standalone LSP executable via the following shell commands. The executable will be placed in `dist/bin/ca65-lsp-<platform>` 

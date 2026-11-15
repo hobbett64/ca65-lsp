@@ -13,7 +13,7 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import { glob } from 'glob';
 
-import { loadAllData } from './dataManager';
+import { getMnemonicsForCpu, loadAllData } from './dataManager';
 import {
     abortValidation,
     addPendingValidationFiles,
@@ -37,14 +37,14 @@ import { initializeRenameProvider } from './renameProvider';
 import { initializeCallHierarchyProvider } from './callHierarchyProvider';
 import { initializeDocumentHighlightProvider } from './documentHighlightProvider';
 import { initializeCompletionProvider } from './completionProvider';
-import { initializeCodeLensProvider } from './codeLensProvider';
 import { initializeSignatureHelpProvider } from './signatureHelpProvider';
 import { initializeCodeActionProvider } from './codeActionProvider';
+import { initializeSemanticTokensProvider, SEMANTIC_TOKENS_LEGEND } from './semanticTokensProvider';
 import { analyzeInstructionRange } from './instructionAnalyzer';
 import { invalidateOverlaySignatures, initializeOverlayProvider } from './overlayProvider';
 import { deleteCachedResolutions } from './symbolResolver';
 import { ExportsMap } from './exportsMap';
-import { Ca65Settings, documentSettings } from './settings';
+import { Ca65Cpu, Ca65Settings, documentSettings, normalizeCpu } from './settings';
 import { Performance as PerformanceMonitor } from './performance';
 import {
     clearResolvedDirsCache,
@@ -98,14 +98,11 @@ connection.onInitialize(async (params: InitializeParams) => {
             foldingRangeProvider: true,
             documentLinkProvider: { resolveProvider: false },
             callHierarchyProvider: true,
-            renameProvider: true,
+            renameProvider: { prepareProvider: true },
             workspaceSymbolProvider: true,
             completionProvider: {
                 triggerCharacters: ['.', '@', ':', '"', '/'],
                 resolveProvider: true,
-            },
-            codeLensProvider: {
-                resolveProvider: false,
             },
             signatureHelpProvider: {
                 triggerCharacters: [' ', '(', ','],
@@ -115,6 +112,10 @@ connection.onInitialize(async (params: InitializeParams) => {
             documentHighlightProvider: true,
             codeActionProvider: {
                 codeActionKinds: [CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite],
+            },
+            semanticTokensProvider: {
+                legend: SEMANTIC_TOKENS_LEGEND,
+                full: true,
             },
             workspace: {
                 workspaceFolders: {
@@ -284,7 +285,7 @@ export function getDocumentSettings(resource: string): Thenable<Ca65Settings> {
             scopeUri: scopeKey,
             section: 'ca65'
         }).then(
-            settings => settings,
+            settings => ({ ...(settings || {}), cpu: normalizeCpu(settings?.cpu) }),
             err => {
                 documentSettings.delete(scopeKey);
                 throw err;
@@ -492,8 +493,23 @@ connection.onRequest('ca65/analyzeSelection', async (params: { uri?: string; ran
         symbolTable,
         symbolTables,
         includesGraph,
-        settings.implicitImports
+        settings.implicitImports,
+        settings.cpu
     );
+});
+
+// Custom request from the client to fetch mnemonic reference tables for a CPU
+connection.onRequest('ca65/getReferenceData', async (params?: { uri?: string; cpu?: unknown }) => {
+    await initializationGate.isInitialized;
+    let cpu: Ca65Cpu | undefined = params?.cpu !== undefined ? normalizeCpu(params.cpu) : undefined;
+    if (!cpu && params?.uri) {
+        cpu = normalizeCpu((await getDocumentSettings(params.uri)).cpu);
+    }
+    const resolvedCpu: Ca65Cpu = cpu ?? '6502';
+    return {
+        cpu: resolvedCpu,
+        mnemonics: getMnemonicsForCpu(resolvedCpu),
+    };
 });
 
 // --- Event Listeners ---
@@ -501,6 +517,14 @@ const lastDocumentVersions = new Map<string, number>();
 
 connection.onDidChangeConfiguration(async () => {
     try {
+        const prevCpuByScope = new Map<string, Ca65Cpu>();
+        for (const [scopeKey, entry] of documentSettings.entries()) {
+            try {
+                prevCpuByScope.set(scopeKey, normalizeCpu((await entry)?.cpu));
+            } catch {
+                // Ignore prior failed configuration reads
+            }
+        }
         documentSettings.clear();
         clearResolvedDirsCache();
         clearExecutablePathCache();
@@ -513,6 +537,27 @@ connection.onDidChangeConfiguration(async () => {
         await mapWithConcurrency(openDocs, 16, async (doc) => {
             await refreshDocumentSymbolTable(doc);
         });
+
+        const openUris = new Set(openDocs.map(doc => doc.uri));
+        const unopenedUris = Array.from(symbolTables.keys()).filter(uri => !openUris.has(uri));
+        if (unopenedUris.length > 0 && prevCpuByScope.size > 0) {
+            let cpuChanged = false;
+            for (const [scopeKey, prevCpu] of prevCpuByScope.entries()) {
+                const nextSettings = await getDocumentSettings(scopeKey);
+                if (normalizeCpu(nextSettings?.cpu) !== prevCpu) {
+                    cpuChanged = true;
+                    break;
+                }
+            }
+            if (cpuChanged) {
+                await mapWithConcurrency(unopenedUris, 16, async (uri) => {
+                    const doc = await getCachedTextDocument(uri, documents);
+                    if (doc) {
+                        await refreshDocumentSymbolTable(doc);
+                    }
+                });
+            }
+        }
 
         const validatedRoots = new Set<string>();
         for (const doc of openDocs) {
@@ -655,7 +700,7 @@ initializeSignatureHelpProvider(connection, documents);
 initializeInlayHintProvider(connection, documents);
 initializeDocumentHighlightProvider(connection, documents);
 initializeCodeActionProvider(connection, documents);
-initializeCodeLensProvider(connection, documents);
+initializeSemanticTokensProvider(connection);
 initializeOverlayProvider(connection, documents);
 
 // --- Start the server ---

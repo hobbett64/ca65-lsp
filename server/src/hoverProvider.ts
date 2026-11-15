@@ -10,7 +10,8 @@ import {
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { URI } from 'vscode-uri';
 
-import { mnemonicData, resolveDirectiveAlias } from './dataManager';
+import { getMnemonicInfo, MnemonicInfo, MnemonicModeInfo, resolveDirectiveAlias } from './dataManager';
+import { Ca65Cpu } from './settings';
 import { Macro, MacroKind, Scope, Symbol as Ca65Symbol, SymbolKind as Ca65SymbolKind, SymbolTableEntity } from './symbolTable';
 import { resolveReference } from './symbolResolver';
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
@@ -113,10 +114,9 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
                         return { contents: { kind: MarkupKind.Markdown, value: generateDirectiveHoverMarkdown(word, data) }, range: hoverRange };
                     }
                 } else {
-                    const name = word.toUpperCase();
-                    const data = mnemonicData[name];
+                    const data = getMnemonicInfo(word, settings.cpu);
                     if (data) {
-                        return { contents: { kind: MarkupKind.Markdown, value: generateMnemonicHoverMarkdown(word, data) }, range: hoverRange };
+                        return { contents: { kind: MarkupKind.Markdown, value: generateMnemonicHoverMarkdown(word, data, settings.cpu) }, range: hoverRange };
                     }
                 }
                 return undefined;
@@ -325,8 +325,29 @@ export function generateDirectiveHoverMarkdown(directiveName: string, data: any)
     return markdown;
 }
 
-export function generateMnemonicHoverMarkdown(mnemonic: string, data: any): string {
-    let markdown = `### \`${mnemonic.toUpperCase()}\` — ${data.fullName}\n\n`;
+function formatModeBytes(info: MnemonicModeInfo): string {
+    if (info.byteVariableM) return `${info.bytes}–${info.bytes + 1} (M)`;
+    if (info.byteVariableX) return `${info.bytes}–${info.bytes + 1} (X)`;
+    return `${info.bytes}`;
+}
+
+function formatModeCycles(info: MnemonicModeInfo): string {
+    if (info.perByteCycles) return `${info.cycles}/byte`;
+    const notes: string[] = [];
+    if (info.branchPenalty) notes.push('+1 branch');
+    if (info.pagePenalty) notes.push('+1 page');
+    if (info.pageOrIndex16Penalty) notes.push('+1 page/16-bit X');
+    if (info.emulationOnlyPagePenalty) notes.push('+1 page if E=1');
+    if (info.cycleVariableM) notes.push(`+${info.cycleVariableM} if 16-bit M`);
+    if (info.cycleVariableX) notes.push(`+${info.cycleVariableX} if 16-bit X`);
+    if (info.dpNonZeroPenalty) notes.push('+1 if DL≠0');
+    if (info.nativeModeCyclePenalty) notes.push(`+${info.nativeModeCyclePenalty} if E=0`);
+    return notes.length > 0 ? `${info.cycles} (${notes.join(', ')})` : `${info.cycles}`;
+}
+
+export function generateMnemonicHoverMarkdown(mnemonic: string, data: MnemonicInfo, cpu?: Ca65Cpu): string {
+    const cpuTag = cpu && cpu !== '6502' ? ` (${cpu})` : '';
+    let markdown = `### \`${mnemonic.toUpperCase()}\` — ${data.fullName}${cpuTag}\n\n`;
     if (data.description) markdown += `${data.description}\n\n`;
     if (data.warning) markdown += `⚠️ **Warning**: ${data.warning}\n\n`;
     if (data.note) markdown += `*Note: ${data.note}*\n\n`;
@@ -340,12 +361,8 @@ export function generateMnemonicHoverMarkdown(mnemonic: string, data: any): stri
     if (data.modes && Object.keys(data.modes).length > 0) {
         markdown += `| Mode | Opcode | Bytes | Cycles |\n`;
         markdown += `| :--- | :---: | :---: | :---: |\n`;
-        for (const [modeName, info] of Object.entries<any>(data.modes)) {
-            const notes: string[] = [];
-            if (info.branchPenalty) notes.push('+1 branch');
-            if (info.pagePenalty) notes.push('+1 page');
-            const cycleStr = notes.length > 0 ? `${info.cycles} (${notes.join(', ')})` : `${info.cycles}`;
-            markdown += `| ${modeName} | \`${info.opcode}\` | ${info.bytes} | ${cycleStr} |\n`;
+        for (const [modeName, info] of Object.entries(data.modes)) {
+            markdown += `| ${modeName} | \`${info.opcode}\` | ${formatModeBytes(info)} | ${formatModeCycles(info)} |\n`;
         }
         markdown += `\n`;
     }

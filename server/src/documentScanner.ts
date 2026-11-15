@@ -19,7 +19,7 @@ import {
 import { getAnonLabelRefOffsetFromPreviousLabel } from './anonymousLabelUtils';
 import { getDocumentSettings, performanceMonitor } from './server';
 import { resolveIncludeUri } from './pathUtils';
-import { mnemonicData } from './dataManager';
+import { getMnemonicInfo } from './dataManager';
 import { Ca65Settings } from './settings';
 
 type LineItem = {
@@ -793,7 +793,7 @@ class DocumentScanner {
 
         const cmd = command.text.toLowerCase();
         const isDirective = cmd.charCodeAt(0) === 46 /* . */;
-        if (!isDirective && !mnemonicData[cmd.toUpperCase()]) {
+        if (!isDirective && !getMnemonicInfo(cmd, this.settings.cpu)) {
             this.addSingleReference('macro', line, command.text, command.index, this.symbolTable.getRootScope());
         }
 
@@ -819,7 +819,7 @@ class DocumentScanner {
         }
 
         let callingEntity: SymbolTableEntity | undefined;
-        if (cmd === 'jsr' || cmd === 'jmp') {
+        if (cmd === 'jsr' || cmd === 'jmp' || (this.settings.cpu === '65816' && (cmd === 'jsl' || cmd === 'jml'))) {
             if (this.currentLabel) {
                 callingEntity = this.currentLabel;
             } else if (this.currentScope.kind === ScopeKind.Proc) {

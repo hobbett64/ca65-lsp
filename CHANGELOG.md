@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+- Target CPU selection via `ca65.cpu` (`6502`, `65SC02`, `65C02`, `W65C02`, and `65816`) updating `ca65` diagnostics, hover cards, autocompletion, status-bar byte/cycle estimates (including min–max `M`/`X` ranges for `65816`), `jsl`/`jml` call hierarchy, and the `ca65: Show Instruction Reference` panel.
+- Side-by-side read-only `ca65 -l` hex & address listing view (`ca65.showHexListing`).
+- Status bar byte-size and cycle-count estimator for the active line or selection (`ca65.enableStatusBarCycleCount`).
+- LSP Semantic Tokens for explicit ca65 constructs (`.proc`, `.macro`, `.define`, `=` constants, `.enum`/members, `.struct`/`.union`, `.scope`, `.set` variables).
+- Diagnostics and Quick Fixes for `.import`/`.importzp` and `.export`/`.exportzp` zeropage mismatches.
+- Signature help for `.macro` calls and parameterized `.define` macros, plus `Scope::` and `.include`/`.incbin` path completions.
+- Support for `ca65.additionalArgs` (forwarded to `ca65` diagnostics and listing generation).
+- `prepareRename` validation and `@`-prefix preservation for cheap local label renames.
+- In-repo test suite (`npm test` via `test/run_all.js`).
+
+### Changed
+- Revamped hover cards with left-aligned segment/kind badges (`CONST`, `ENUM`, `VAR`, `MACRO`, `DEFINE`), evaluated constant values, verbatim `;` comment blocks, and clickable source links.
+- Updated TextMate grammar to highlight regular labels as declarations, focus mnemonic scopes on control-flow instructions, and support string escapes.
+- Simplified Outline details to `(macro)` and `(zp)` with segment-based label icons and source-order sorting.
+- Moved block snippets (`.proc`, `.macro`, `.scope`, `.struct`, `.union`, `.enum`, `.repeat`, `.if*`) into context-aware LSP completion so snippets only trigger in command position and sort ahead of directives.
+- Removed unused `node` runtime dependency and fixed `.vscodeignore` packaging rules so compiled `client/out` and `server/out` files are included in `.vsix` builds.
+
 ## [1.5.8] - 2025-09-14
 - Fix symbols with the same name but different scopes counting towards each other's reference counts for symbol not used diagnostics.
 

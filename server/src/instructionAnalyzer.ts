@@ -1,9 +1,10 @@
 import { Range } from 'vscode-languageserver-types';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { mnemonicData } from './dataManager';
+import { getMnemonicInfo, MnemonicModeInfo } from './dataManager';
 import { findCommentStart, parseLine } from './documentScanner';
 import { getLineText } from './editUtils';
 import { IncludesGraph } from './includesGraph';
+import { Ca65Cpu, normalizeCpu } from './settings';
 import { resolveImport, resolveReference } from './symbolResolver';
 import { Import, Scope, ScopeKind, Symbol, SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
 
@@ -18,9 +19,14 @@ export interface InstructionAnalysisItem {
     uncertainMode?: boolean;
     hasBranchPenalty?: boolean;
     hasPagePenalty?: boolean;
+    hasVariableWidth16?: boolean;
+    hasDpOffsetPenalty?: boolean;
+    hasEmulationPagePenalty?: boolean;
+    hasPerByteCycles?: boolean;
 }
 
 export interface InstructionAnalysisSummary {
+    cpu?: Ca65Cpu;
     instructionCount: number;
     minBytes: number;
     maxBytes: number;
@@ -29,18 +35,14 @@ export interface InstructionAnalysisSummary {
     uncertainCount: number;
     hasBranchPenalty: boolean;
     hasPagePenalty: boolean;
+    hasVariableWidth16: boolean;
+    hasDpOffsetPenalty: boolean;
+    hasEmulationPagePenalty: boolean;
+    hasPerByteCycles: boolean;
     items: InstructionAnalysisItem[];
 }
 
-interface ModeEntry {
-    opcode: string;
-    bytes: number;
-    cycles: number;
-    branchPenalty?: boolean;
-    pagePenalty?: boolean;
-}
-
-type AddressWidth = 'zp' | 'abs' | 'unknown';
+type AddressWidth = 'zp' | 'abs' | 'far' | 'unknown';
 
 interface ExprToken {
     type: 'num' | 'op' | 'lparen' | 'rparen' | 'ident';
@@ -369,8 +371,9 @@ export function tryEvaluateNumericExpr(
 /**
  * Splits a top-level trailing `, X` or `, Y` index suffix (outside parentheses and quotes).
  */
-function splitIndexSuffix(operand: string): { base: string; indexReg?: 'X' | 'Y' } {
-    let depth = 0;
+function splitIndexSuffix(operand: string): { base: string; indexReg?: 'X' | 'Y' | 'S' } {
+    let parenDepth = 0;
+    let bracketDepth = 0;
     let quote: '"' | "'" | null = null;
     let lastTopComma = -1;
 
@@ -381,17 +384,21 @@ function splitIndexSuffix(operand: string): { base: string; indexReg?: 'X' | 'Y'
         } else if (ch === '"' || ch === "'") {
             quote = ch;
         } else if (ch === '(') {
-            depth++;
-        } else if (ch === ')' && depth > 0) {
-            depth--;
-        } else if (ch === ',' && depth === 0) {
+            parenDepth++;
+        } else if (ch === ')' && parenDepth > 0) {
+            parenDepth--;
+        } else if (ch === '[') {
+            bracketDepth++;
+        } else if (ch === ']' && bracketDepth > 0) {
+            bracketDepth--;
+        } else if (ch === ',' && parenDepth === 0 && bracketDepth === 0) {
             lastTopComma = i;
         }
     }
 
     if (lastTopComma >= 0) {
         const suffix = operand.slice(lastTopComma + 1).trim().toUpperCase();
-        if (suffix === 'X' || suffix === 'Y') {
+        if (suffix === 'X' || suffix === 'Y' || suffix === 'S') {
             return { base: operand.slice(0, lastTopComma).trim(), indexReg: suffix };
         }
     }
@@ -400,11 +407,15 @@ function splitIndexSuffix(operand: string): { base: string; indexReg?: 'X' | 'Y'
 }
 
 /**
- * Checks if `operand` begins with a matching `(` ... `)` group covering the entire string
- * or ending right before `, Y` / `, X`.
+ * Checks if `operand` begins with a matching `open` ... `close` group covering the
+ * operand up to an optional trailing `, Y` / `, X` index suffix.
  */
-function matchOuterParentheses(operand: string): { inside: string; trailing: string } | null {
-    if (!operand.startsWith('(')) return null;
+function matchOuterDelimited(
+    operand: string,
+    open: '(' | '[',
+    close: ')' | ']'
+): { inside: string; trailing: string } | null {
+    if (!operand.startsWith(open)) return null;
     let depth = 0;
     let quote: '"' | "'" | null = null;
 
@@ -414,9 +425,9 @@ function matchOuterParentheses(operand: string): { inside: string; trailing: str
             if (ch === quote) quote = null;
         } else if (ch === '"' || ch === "'") {
             quote = ch;
-        } else if (ch === '(') {
+        } else if (ch === open) {
             depth++;
-        } else if (ch === ')') {
+        } else if (ch === close) {
             depth--;
             if (depth === 0) {
                 return {
@@ -531,7 +542,9 @@ function classifyEntityWidth(
 
     if (entity.segment) {
         const segUpper = entity.segment.toUpperCase();
-        return (segUpper === 'ZEROPAGE' || segUpper === 'ZP') ? 'zp' : 'abs';
+        return (segUpper === 'ZEROPAGE' || segUpper === 'ZP' || segUpper === 'DIRECTPAGE' || segUpper === 'DP')
+            ? 'zp'
+            : 'abs';
     }
 
     if (entity instanceof Symbol && entity.kind === SymbolKind.Constant) {
@@ -546,11 +559,45 @@ function classifyEntityWidth(
             constCache
         );
         if (val !== null) {
-            return (val >= 0 && val <= 0xFF) ? 'zp' : 'abs';
+            if (val >= 0 && val <= 0xFF) return 'zp';
+            if (val > 0xFFFF && val <= 0xFFFFFF) return 'far';
+            return 'abs';
         }
     }
 
     return 'unknown';
+}
+
+function createIdentValueResolver(
+    lineNum: number,
+    operandStartCol: number,
+    document: TextDocument,
+    symbolTable: SymbolTable | undefined,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+    implicitImports: boolean,
+    constCache?: Map<SymbolTableEntity, number | null>
+): ((identName: string) => number | null) | undefined {
+    if (!symbolTable) return undefined;
+    const lineRefs = symbolTable.getReferencesOnLine(lineNum);
+    return (identName: string): number | null => {
+        const ref = lineRefs.find(
+            r => r.name === identName && r.location.start.character >= operandStartCol
+        );
+        if (!ref) return null;
+        const resolved = resolveReference(ref, allSymbolTables, includesGraph, implicitImports);
+        if (!resolved) return null;
+        return tryResolveLocalConstantValue(
+            resolved,
+            document,
+            symbolTable,
+            allSymbolTables,
+            includesGraph,
+            implicitImports,
+            new Set(),
+            constCache
+        );
+    };
 }
 
 function classifyOperandWidth(
@@ -569,40 +616,34 @@ function classifyOperandWidth(
     if (overrideMatch) {
         const prefix = overrideMatch[1].toLowerCase();
         if (prefix === 'z') return 'zp';
-        if (prefix === 'a' || prefix === 'f') return 'abs';
+        if (prefix === 'a') return 'abs';
+        if (prefix === 'f') return 'far';
     }
 
     const lineRefs = symbolTable?.getReferencesOnLine(lineNum) ?? [];
-    const resolveIdentValue = symbolTable
-        ? (identName: string): number | null => {
-            const ref = lineRefs.find(
-                r => r.name === identName && r.location.start.character >= operandStartCol
-            );
-            if (!ref) return null;
-            const resolved = resolveReference(ref, allSymbolTables, includesGraph, implicitImports);
-            if (!resolved) return null;
-            return tryResolveLocalConstantValue(
-                resolved,
-                document,
-                symbolTable,
-                allSymbolTables,
-                includesGraph,
-                implicitImports,
-                new Set(),
-                constCache
-            );
-        }
-        : undefined;
+    const resolveIdentValue = createIdentValueResolver(
+        lineNum,
+        operandStartCol,
+        document,
+        symbolTable,
+        allSymbolTables,
+        includesGraph,
+        implicitImports,
+        constCache
+    );
 
     const evaluated = tryEvaluateNumericExpr(baseExpr, resolveIdentValue);
     if (evaluated !== null) {
-        return (evaluated >= 0 && evaluated <= 0xFF) ? 'zp' : 'abs';
+        if (evaluated >= 0 && evaluated <= 0xFF) return 'zp';
+        if (evaluated > 0xFFFF && evaluated <= 0xFFFFFF) return 'far';
+        return 'abs';
     }
 
     // Fall back to resolved symbol segment / .importzp metadata if any identifier exists in baseExpr.
     if (symbolTable) {
         let sawZp = false;
         let sawAbs = false;
+        let sawFar = false;
         let sawUnknown = false;
         let matchedAny = false;
 
@@ -628,11 +669,13 @@ function classifyOperandWidth(
                 constCache
             );
             if (width === 'zp') sawZp = true;
+            else if (width === 'far') sawFar = true;
             else if (width === 'abs') sawAbs = true;
             else sawUnknown = true;
         }
 
         if (matchedAny) {
+            if (sawFar) return 'far';
             if (sawAbs) return 'abs';
             if (sawZp && !sawUnknown) return 'zp';
         }
@@ -641,8 +684,214 @@ function classifyOperandWidth(
     return 'unknown';
 }
 
+function pickDirectOrZeroPageMode(
+    modes: Record<string, MnemonicModeInfo>,
+    indexReg?: 'X' | 'Y'
+): string | undefined {
+    const candidates = indexReg
+        ? [`Direct Page, ${indexReg}`, `Zero Page, ${indexReg}`]
+        : ['Direct Page', 'Zero Page'];
+    return candidates.find(m => Boolean(modes[m]));
+}
+
+function resolveInstructionModes(
+    modes: Record<string, MnemonicModeInfo>,
+    modeCount: number,
+    singleModeName: string,
+    operand: string,
+    lineNum: number,
+    operandCol: number,
+    document: TextDocument,
+    symbolTable: SymbolTable | undefined,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+    implicitImports: boolean,
+    constCache: Map<SymbolTableEntity, number | null>
+): { modeA: string; modeB: string } {
+    if (!operand) {
+        if (modes['Implied']) return { modeA: 'Implied', modeB: '' };
+        if (modes['Accumulator']) return { modeA: 'Accumulator', modeB: '' };
+        return { modeA: '', modeB: '' };
+    }
+
+    if (modeCount === 1) {
+        return { modeA: singleModeName, modeB: '' };
+    }
+
+    if (modes['Signature']) {
+        return { modeA: 'Signature', modeB: '' };
+    }
+
+    if (/^[aA]$/.test(operand) && modes['Accumulator']) {
+        return { modeA: 'Accumulator', modeB: '' };
+    }
+
+    if (operand.startsWith('#') && modes['Immediate']) {
+        return { modeA: 'Immediate', modeB: '' };
+    }
+
+    const bracket = matchOuterDelimited(operand, '[', ']');
+    if (bracket) {
+        if (bracket.trailing === '') {
+            if (modes['[Direct Page]']) return { modeA: '[Direct Page]', modeB: '' };
+            if (modes['[Indirect Long]']) return { modeA: '[Indirect Long]', modeB: '' };
+        } else if (/^,\s*[yY]$/.test(bracket.trailing) && modes['[Direct Page], Y']) {
+            return { modeA: '[Direct Page], Y', modeB: '' };
+        }
+        return { modeA: '', modeB: '' };
+    }
+
+    const paren = matchOuterDelimited(operand, '(', ')');
+    if (paren) {
+        const innerSplit = splitIndexSuffix(paren.inside);
+        if (paren.trailing === '') {
+            if (innerSplit.indexReg === 'X') {
+                if (modes['(Indirect, X)']) return { modeA: '(Indirect, X)', modeB: '' };
+                if (modes['(Direct Page, X)']) return { modeA: '(Direct Page, X)', modeB: '' };
+                if (modes['(Absolute, X)']) return { modeA: '(Absolute, X)', modeB: '' };
+            } else if (!innerSplit.indexReg) {
+                if (modes['Indirect']) return { modeA: 'Indirect', modeB: '' };
+                if (modes['(Zero Page)']) return { modeA: '(Zero Page)', modeB: '' };
+                if (modes['(Direct Page)']) return { modeA: '(Direct Page)', modeB: '' };
+            }
+        } else if (/^,\s*[yY]$/.test(paren.trailing)) {
+            if (innerSplit.indexReg === 'S' && modes['(Stack Relative, S), Y']) {
+                return { modeA: '(Stack Relative, S), Y', modeB: '' };
+            }
+            if (!innerSplit.indexReg) {
+                if (modes['(Indirect), Y']) return { modeA: '(Indirect), Y', modeB: '' };
+                if (modes['(Direct Page), Y']) return { modeA: '(Direct Page), Y', modeB: '' };
+            }
+        }
+        return { modeA: '', modeB: '' };
+    }
+
+    const { base, indexReg } = splitIndexSuffix(operand);
+    if (indexReg === 'S') {
+        return modes['Stack Relative']
+            ? { modeA: 'Stack Relative', modeB: '' }
+            : { modeA: '', modeB: '' };
+    }
+
+    const zpMode = pickDirectOrZeroPageMode(modes, indexReg);
+    const absCandidate = indexReg ? `Absolute, ${indexReg}` : 'Absolute';
+    const absMode = modes[absCandidate] ? absCandidate : undefined;
+    const farCandidate = indexReg === 'X' ? 'Absolute Long, X' : (!indexReg ? 'Absolute Long' : undefined);
+    const farMode = farCandidate && modes[farCandidate] ? farCandidate : undefined;
+
+    if (zpMode && absMode) {
+        const width = classifyOperandWidth(
+            base,
+            lineNum,
+            operandCol,
+            document,
+            symbolTable,
+            allSymbolTables,
+            includesGraph,
+            implicitImports,
+            constCache
+        );
+        if (width === 'zp') return { modeA: zpMode, modeB: '' };
+        if (width === 'far' && farMode) return { modeA: farMode, modeB: '' };
+        if (width === 'abs' || width === 'far') return { modeA: absMode, modeB: '' };
+        return { modeA: zpMode, modeB: absMode };
+    }
+
+    if (absMode && farMode) {
+        const width = classifyOperandWidth(
+            base,
+            lineNum,
+            operandCol,
+            document,
+            symbolTable,
+            allSymbolTables,
+            includesGraph,
+            implicitImports,
+            constCache
+        );
+        return { modeA: width === 'far' ? farMode : absMode, modeB: '' };
+    }
+
+    if (zpMode) return { modeA: zpMode, modeB: '' };
+    if (absMode) return { modeA: absMode, modeB: '' };
+    if (farMode) return { modeA: farMode, modeB: '' };
+    return { modeA: '', modeB: '' };
+}
+
+interface ModeMetrics {
+    minBytes: number;
+    maxBytes: number;
+    minCycles: number;
+    maxCycles: number;
+    hasBranchPenalty: boolean;
+    hasPagePenalty: boolean;
+    hasVariableWidth16: boolean;
+    hasDpOffsetPenalty: boolean;
+    hasEmulationPagePenalty: boolean;
+    hasPerByteCycles: boolean;
+}
+
+function computeModeMetrics(
+    modeName: string,
+    info: MnemonicModeInfo,
+    operand: string,
+    lineNum: number,
+    operandCol: number,
+    document: TextDocument,
+    symbolTable: SymbolTable | undefined,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+    implicitImports: boolean,
+    constCache: Map<SymbolTableEntity, number | null>
+): ModeMetrics {
+    const varByte = (info.byteVariableM || info.byteVariableX) ? 1 : 0;
+    const varCycle = (info.cycleVariableM ?? 0) + (info.cycleVariableX ?? 0);
+    let narrowed16 = false;
+
+    if (varByte && modeName === 'Immediate' && operand.startsWith('#')) {
+        const resolveIdentValue = createIdentValueResolver(
+            lineNum,
+            operandCol,
+            document,
+            symbolTable,
+            allSymbolTables,
+            includesGraph,
+            implicitImports,
+            constCache
+        );
+        const immVal = tryEvaluateNumericExpr(operand.slice(1).trim(), resolveIdentValue);
+        if (immVal !== null && immVal > 0xFF) {
+            narrowed16 = true;
+        }
+    }
+
+    const extraFixedCycles = (info.branchPenalty ? 1 : 0)
+        + (info.pagePenalty ? 1 : 0)
+        + (info.pageOrIndex16Penalty ? 1 : 0)
+        + (info.nativeModeCyclePenalty ?? 0);
+
+    const minBytes = info.bytes + (narrowed16 ? 1 : 0);
+    const maxBytes = info.bytes + varByte;
+    const minCycles = info.cycles + (narrowed16 ? varCycle : 0);
+    const maxCycles = info.cycles + extraFixedCycles + varCycle;
+
+    return {
+        minBytes,
+        maxBytes,
+        minCycles,
+        maxCycles,
+        hasBranchPenalty: Boolean(info.branchPenalty),
+        hasPagePenalty: Boolean(info.pagePenalty || info.pageOrIndex16Penalty),
+        hasVariableWidth16: !narrowed16 && (varByte > 0 || varCycle > 0),
+        hasDpOffsetPenalty: Boolean(info.dpNonZeroPenalty),
+        hasEmulationPagePenalty: Boolean(info.emulationOnlyPagePenalty),
+        hasPerByteCycles: Boolean(info.perByteCycles),
+    };
+}
+
 /**
- * Analyzes 6502 instructions within a document range and returns cycle and byte estimates.
+ * Analyzes assembly instructions within a document range for the active CPU target
+ * and returns byte and cycle estimates.
  */
 export function analyzeInstructionRange(
     document: TextDocument,
@@ -650,8 +899,10 @@ export function analyzeInstructionRange(
     symbolTable: SymbolTable | undefined,
     allSymbolTables: Map<string, SymbolTable>,
     includesGraph: IncludesGraph,
-    implicitImports: boolean
+    implicitImports: boolean,
+    cpu?: unknown
 ): InstructionAnalysisSummary {
+    const normalizedCpu = normalizeCpu(cpu);
     const startLine = Math.max(0, range.start.line);
     let endLine = Math.min(document.lineCount - 1, range.end.line);
     if (endLine > startLine && range.end.character === 0) {
@@ -666,6 +917,10 @@ export function analyzeInstructionRange(
     let uncertainCount = 0;
     let hasBranchPenalty = false;
     let hasPagePenalty = false;
+    let hasVariableWidth16 = false;
+    let hasDpOffsetPenalty = false;
+    let hasEmulationPagePenalty = false;
+    let hasPerByteCycles = false;
 
     const docText = document.getText();
     const constCache = new Map<SymbolTableEntity, number | null>();
@@ -694,12 +949,12 @@ export function analyzeInstructionRange(
         }
 
         const mnemonic = parsed.command.text.toUpperCase();
-        const entry = mnemonicData[mnemonic];
+        const entry = getMnemonicInfo(mnemonic, normalizedCpu);
         if (!entry || !entry.modes) {
             continue;
         }
 
-        const modes = entry.modes as Record<string, ModeEntry>;
+        const modes = entry.modes;
         let modeCount = 0;
         let singleModeName = '';
         for (const k in modes) {
@@ -715,96 +970,86 @@ export function analyzeInstructionRange(
         const operand = parsed.args?.text.trim() ?? '';
         const operandCol = parsed.args?.index ?? (parsed.command.index + parsed.command.text.length);
 
-        let modeA = '';
-        let modeB = '';
-
-        if (!operand) {
-            if (modes['Implied']) modeA = 'Implied';
-            else if (modes['Accumulator']) modeA = 'Accumulator';
-        } else if (modeCount === 1) {
-            modeA = singleModeName;
-        } else if (/^[aA]$/.test(operand) && modes['Accumulator']) {
-            modeA = 'Accumulator';
-        } else if (operand.startsWith('#') && modes['Immediate']) {
-            modeA = 'Immediate';
-        } else {
-            const paren = matchOuterParentheses(operand);
-            if (paren) {
-                if (paren.trailing === '' && modes['Indirect'] && !/,/i.test(paren.inside)) {
-                    modeA = 'Indirect';
-                } else if (paren.trailing === '' && modes['(Indirect, X)']) {
-                    const innerSplit = splitIndexSuffix(paren.inside);
-                    if (innerSplit.indexReg === 'X') {
-                        modeA = '(Indirect, X)';
-                    }
-                } else if (/^,\s*[yY]$/.test(paren.trailing) && modes['(Indirect), Y']) {
-                    modeA = '(Indirect), Y';
-                }
-            }
-
-            if (!modeA) {
-                const { base, indexReg } = splitIndexSuffix(operand);
-                const zpMode = indexReg ? `Zero Page, ${indexReg}` : 'Zero Page';
-                const absMode = indexReg ? `Absolute, ${indexReg}` : 'Absolute';
-                const hasZp = Boolean(modes[zpMode]);
-                const hasAbs = Boolean(modes[absMode]);
-
-                if (hasZp && hasAbs) {
-                    const width = classifyOperandWidth(
-                        base,
-                        lineNum,
-                        operandCol,
-                        document,
-                        symbolTable,
-                        allSymbolTables,
-                        includesGraph,
-                        implicitImports,
-                        constCache
-                    );
-                    if (width === 'zp') modeA = zpMode;
-                    else if (width === 'abs') modeA = absMode;
-                    else {
-                        modeA = zpMode;
-                        modeB = absMode;
-                    }
-                } else if (hasZp) {
-                    modeA = zpMode;
-                } else if (hasAbs) {
-                    modeA = absMode;
-                }
-            }
-        }
+        const { modeA, modeB } = resolveInstructionModes(
+            modes,
+            modeCount,
+            singleModeName,
+            operand,
+            lineNum,
+            operandCol,
+            document,
+            symbolTable,
+            allSymbolTables,
+            includesGraph,
+            implicitImports,
+            constCache
+        );
 
         if (!modeA) {
             continue;
         }
 
-        const infoA = modes[modeA];
-        let instMinBytes = infoA.bytes;
-        let instMaxBytes = infoA.bytes;
-        let instMinCycles = infoA.cycles;
-        let instMaxCycles = infoA.cycles + (infoA.branchPenalty ? 1 : 0) + (infoA.pagePenalty ? 1 : 0);
-        let instBranchPenalty = Boolean(infoA.branchPenalty);
-        let instPagePenalty = Boolean(infoA.pagePenalty);
+        const metricsA = computeModeMetrics(
+            modeA,
+            modes[modeA],
+            operand,
+            lineNum,
+            operandCol,
+            document,
+            symbolTable,
+            allSymbolTables,
+            includesGraph,
+            implicitImports,
+            constCache
+        );
+        let instMinBytes = metricsA.minBytes;
+        let instMaxBytes = metricsA.maxBytes;
+        let instMinCycles = metricsA.minCycles;
+        let instMaxCycles = metricsA.maxCycles;
+        let instBranchPenalty = metricsA.hasBranchPenalty;
+        let instPagePenalty = metricsA.hasPagePenalty;
+        let instVarWidth16 = metricsA.hasVariableWidth16;
+        let instDpPenalty = metricsA.hasDpOffsetPenalty;
+        let instEmuPagePenalty = metricsA.hasEmulationPagePenalty;
+        let instPerByteCycles = metricsA.hasPerByteCycles;
         let modeLabel = modeA;
         let uncertain = false;
 
         if (modeB) {
-            const infoB = modes[modeB];
+            const metricsB = computeModeMetrics(
+                modeB,
+                modes[modeB],
+                operand,
+                lineNum,
+                operandCol,
+                document,
+                symbolTable,
+                allSymbolTables,
+                includesGraph,
+                implicitImports,
+                constCache
+            );
             uncertain = true;
-            if (infoB.bytes < instMinBytes) instMinBytes = infoB.bytes;
-            if (infoB.bytes > instMaxBytes) instMaxBytes = infoB.bytes;
-            if (infoB.cycles < instMinCycles) instMinCycles = infoB.cycles;
-            const bMaxCyc = infoB.cycles + (infoB.branchPenalty ? 1 : 0) + (infoB.pagePenalty ? 1 : 0);
-            if (bMaxCyc > instMaxCycles) instMaxCycles = bMaxCyc;
-            if (infoB.branchPenalty) instBranchPenalty = true;
-            if (infoB.pagePenalty) instPagePenalty = true;
+            if (metricsB.minBytes < instMinBytes) instMinBytes = metricsB.minBytes;
+            if (metricsB.maxBytes > instMaxBytes) instMaxBytes = metricsB.maxBytes;
+            if (metricsB.minCycles < instMinCycles) instMinCycles = metricsB.minCycles;
+            if (metricsB.maxCycles > instMaxCycles) instMaxCycles = metricsB.maxCycles;
+            if (metricsB.hasBranchPenalty) instBranchPenalty = true;
+            if (metricsB.hasPagePenalty) instPagePenalty = true;
+            if (metricsB.hasVariableWidth16) instVarWidth16 = true;
+            if (metricsB.hasDpOffsetPenalty) instDpPenalty = true;
+            if (metricsB.hasEmulationPagePenalty) instEmuPagePenalty = true;
+            if (metricsB.hasPerByteCycles) instPerByteCycles = true;
             modeLabel = `${modeA} / ${modeB}`;
         }
 
         if (uncertain) uncertainCount++;
         if (instBranchPenalty) hasBranchPenalty = true;
         if (instPagePenalty) hasPagePenalty = true;
+        if (instVarWidth16) hasVariableWidth16 = true;
+        if (instDpPenalty) hasDpOffsetPenalty = true;
+        if (instEmuPagePenalty) hasEmulationPagePenalty = true;
+        if (instPerByteCycles) hasPerByteCycles = true;
 
         minBytes += instMinBytes;
         maxBytes += instMaxBytes;
@@ -822,10 +1067,15 @@ export function analyzeInstructionRange(
             uncertainMode: uncertain || undefined,
             hasBranchPenalty: instBranchPenalty || undefined,
             hasPagePenalty: instPagePenalty || undefined,
+            hasVariableWidth16: instVarWidth16 || undefined,
+            hasDpOffsetPenalty: instDpPenalty || undefined,
+            hasEmulationPagePenalty: instEmuPagePenalty || undefined,
+            hasPerByteCycles: instPerByteCycles || undefined,
         });
     }
 
     return {
+        cpu: normalizedCpu,
         instructionCount: items.length,
         minBytes,
         maxBytes,
@@ -834,6 +1084,10 @@ export function analyzeInstructionRange(
         uncertainCount,
         hasBranchPenalty,
         hasPagePenalty,
+        hasVariableWidth16,
+        hasDpOffsetPenalty,
+        hasEmulationPagePenalty,
+        hasPerByteCycles,
         items,
     };
 }

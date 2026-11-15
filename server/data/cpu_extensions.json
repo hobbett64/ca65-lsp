@@ -1,0 +1,763 @@
+{
+  "65SC02": {
+    "updates": {
+      "ADC": {
+        "note": "Clear the *carry flag* with **`CLC`** before adding the first byte in a sequence. On CMOS 65C02 variants, decimal mode (**`D`**=1) sets **N** and **Z** accurately and adds 1 extra cycle.",
+        "modes": {
+          "(Zero Page)": { "opcode": "72", "bytes": 2, "cycles": 5 }
+        }
+      },
+      "AND": {
+        "modes": {
+          "(Zero Page)": { "opcode": "32", "bytes": 2, "cycles": 5 }
+        }
+      },
+      "ASL": {
+        "note": "CMOS 65C02 performs a dummy read rather than the NMOS dummy write on read-modify-write instructions.",
+        "modes": {
+          "Absolute, X": { "opcode": "1E", "bytes": 3, "cycles": 6, "pagePenalty": true }
+        }
+      },
+      "BIT": {
+        "note": "Immediate mode (`BIT #imm`) updates only the **Z** flag and leaves **N** and **V** unchanged.",
+        "modes": {
+          "Immediate": { "opcode": "89", "bytes": 2, "cycles": 2 },
+          "Zero Page, X": { "opcode": "34", "bytes": 2, "cycles": 4 },
+          "Absolute, X": { "opcode": "3C", "bytes": 3, "cycles": 4, "pagePenalty": true }
+        }
+      },
+      "BRK": {
+        "note": "CMOS 65C02 clears the **D** (decimal) flag to 0 after pushing `P`, ensuring interrupts execute in binary mode.",
+        "flagChanges": {
+          "I": "Set to 1 (disables interrupts).",
+          "D": "Cleared to 0."
+        }
+      },
+      "CMP": {
+        "modes": {
+          "(Zero Page)": { "opcode": "D2", "bytes": 2, "cycles": 5 }
+        }
+      },
+      "DEC": {
+        "note": "CMOS 65C02 adds `DEC A` (also written `DEC` with no operand or `DEA`) and performs a dummy read rather than the NMOS dummy write.",
+        "modes": {
+          "Accumulator": { "opcode": "3A", "bytes": 1, "cycles": 2 }
+        }
+      },
+      "EOR": {
+        "modes": {
+          "(Zero Page)": { "opcode": "52", "bytes": 2, "cycles": 5 }
+        }
+      },
+      "INC": {
+        "note": "CMOS 65C02 adds `INC A` (also written `INC` with no operand or `INA`) and performs a dummy read rather than the NMOS dummy write.",
+        "modes": {
+          "Accumulator": { "opcode": "1A", "bytes": 1, "cycles": 2 }
+        }
+      },
+      "JMP": {
+        "clearWarning": true,
+        "note": "CMOS 65C02 fixes the NMOS indirect page-boundary wrap bug on `JMP ($xxFF)` (adding 1 cycle to `Indirect` mode).",
+        "modes": {
+          "Indirect": { "opcode": "6C", "bytes": 3, "cycles": 6 },
+          "(Absolute, X)": { "opcode": "7C", "bytes": 3, "cycles": 6 }
+        }
+      },
+      "LDA": {
+        "modes": {
+          "(Zero Page)": { "opcode": "B2", "bytes": 2, "cycles": 5 }
+        }
+      },
+      "LSR": {
+        "note": "CMOS 65C02 performs a dummy read rather than the NMOS dummy write on read-modify-write instructions.",
+        "modes": {
+          "Absolute, X": { "opcode": "5E", "bytes": 3, "cycles": 6, "pagePenalty": true }
+        }
+      },
+      "ORA": {
+        "modes": {
+          "(Zero Page)": { "opcode": "12", "bytes": 2, "cycles": 5 }
+        }
+      },
+      "ROL": {
+        "note": "CMOS 65C02 performs a dummy read rather than the NMOS dummy write on read-modify-write instructions.",
+        "modes": {
+          "Absolute, X": { "opcode": "3E", "bytes": 3, "cycles": 6, "pagePenalty": true }
+        }
+      },
+      "ROR": {
+        "note": "CMOS 65C02 performs a dummy read rather than the NMOS dummy write on read-modify-write instructions.",
+        "modes": {
+          "Absolute, X": { "opcode": "7E", "bytes": 3, "cycles": 6, "pagePenalty": true }
+        }
+      },
+      "SBC": {
+        "note": "Set the *carry flag* with **`SEC`** before subtracting the first byte in a sequence. On CMOS 65C02 variants, decimal mode (**`D`**=1) sets **N** and **Z** accurately and adds 1 extra cycle.",
+        "modes": {
+          "(Zero Page)": { "opcode": "F2", "bytes": 2, "cycles": 5 }
+        }
+      },
+      "STA": {
+        "modes": {
+          "(Zero Page)": { "opcode": "92", "bytes": 2, "cycles": 5 }
+        }
+      }
+    },
+    "additions": {
+      "BRA": {
+        "fullName": "Branch Always",
+        "description": "Unconditionally branches to a target within -128 to +127 bytes of the next instruction.",
+        "seeAlso": ["JMP", "BCC", "BEQ"],
+        "modes": {
+          "Relative": { "opcode": "80", "bytes": 2, "cycles": 3, "pagePenalty": true }
+        },
+        "flagChanges": {}
+      },
+      "DEA": {
+        "fullName": "Decrement Accumulator",
+        "description": "`ca65` alias for `DEC A`. Subtracts 1 from the *accumulator*.",
+        "aliasOf": "DEC",
+        "seeAlso": ["DEC", "INA", "DEX", "DEY"],
+        "modes": {
+          "Accumulator": { "opcode": "3A", "bytes": 1, "cycles": 2 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 7 of the result is 1, cleared otherwise.",
+          "Z": "Set if the result is 0, cleared otherwise."
+        }
+      },
+      "INA": {
+        "fullName": "Increment Accumulator",
+        "description": "`ca65` alias for `INC A`. Adds 1 to the *accumulator*.",
+        "aliasOf": "INC",
+        "seeAlso": ["INC", "DEA", "INX", "INY"],
+        "modes": {
+          "Accumulator": { "opcode": "1A", "bytes": 1, "cycles": 2 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 7 of the result is 1, cleared otherwise.",
+          "Z": "Set if the result is 0, cleared otherwise."
+        }
+      },
+      "PHX": {
+        "fullName": "Push X Register on Stack",
+        "description": "Pushes a copy of the **X** index register onto the stack.",
+        "seeAlso": ["PLX", "PHY", "PHA"],
+        "modes": {
+          "Implied": { "opcode": "DA", "bytes": 1, "cycles": 3 }
+        },
+        "flagChanges": {}
+      },
+      "PHY": {
+        "fullName": "Push Y Register on Stack",
+        "description": "Pushes a copy of the **Y** index register onto the stack.",
+        "seeAlso": ["PLY", "PHX", "PHA"],
+        "modes": {
+          "Implied": { "opcode": "5A", "bytes": 1, "cycles": 3 }
+        },
+        "flagChanges": {}
+      },
+      "PLX": {
+        "fullName": "Pull X Register from Stack",
+        "description": "Pulls a value from the stack into the **X** index register.",
+        "seeAlso": ["PHX", "PLY", "PLA"],
+        "modes": {
+          "Implied": { "opcode": "FA", "bytes": 1, "cycles": 4 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 7 of the pulled value is 1, cleared otherwise.",
+          "Z": "Set if the pulled value is 0, cleared otherwise."
+        }
+      },
+      "PLY": {
+        "fullName": "Pull Y Register from Stack",
+        "description": "Pulls a value from the stack into the **Y** index register.",
+        "seeAlso": ["PHY", "PLX", "PLA"],
+        "modes": {
+          "Implied": { "opcode": "7A", "bytes": 1, "cycles": 4 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 7 of the pulled value is 1, cleared otherwise.",
+          "Z": "Set if the pulled value is 0, cleared otherwise."
+        }
+      },
+      "STZ": {
+        "fullName": "Store Zero in Memory",
+        "description": "Writes `$00` directly into memory without modifying any CPU registers or status flags.",
+        "seeAlso": ["STA", "STX", "STY"],
+        "modes": {
+          "Zero Page": { "opcode": "64", "bytes": 2, "cycles": 3 },
+          "Zero Page, X": { "opcode": "74", "bytes": 2, "cycles": 4 },
+          "Absolute": { "opcode": "9C", "bytes": 3, "cycles": 4 },
+          "Absolute, X": { "opcode": "9E", "bytes": 3, "cycles": 5 }
+        },
+        "flagChanges": {}
+      },
+      "TRB": {
+        "fullName": "Test and Reset Memory Bits",
+        "description": "Tests memory with the *accumulator* (`A AND mem`) to set **Z**, then clears every bit in memory that is 1 in `A` (`mem := mem AND (NOT A)`).",
+        "seeAlso": ["TSB", "BIT", "AND"],
+        "modes": {
+          "Zero Page": { "opcode": "14", "bytes": 2, "cycles": 5 },
+          "Absolute": { "opcode": "1C", "bytes": 3, "cycles": 6 }
+        },
+        "flagChanges": {
+          "Z": "Set if (`A AND mem`) before modification is 0, cleared otherwise."
+        }
+      },
+      "TSB": {
+        "fullName": "Test and Set Memory Bits",
+        "description": "Tests memory with the *accumulator* (`A AND mem`) to set **Z**, then sets every bit in memory that is 1 in `A` (`mem := mem OR A`).",
+        "seeAlso": ["TRB", "BIT", "ORA"],
+        "modes": {
+          "Zero Page": { "opcode": "04", "bytes": 2, "cycles": 5 },
+          "Absolute": { "opcode": "0C", "bytes": 3, "cycles": 6 }
+        },
+        "flagChanges": {
+          "Z": "Set if (`A AND mem`) before modification is 0, cleared otherwise."
+        }
+      }
+    }
+  },
+  "W65C02": {
+    "additions": {
+      "STP": {
+        "fullName": "Stop the Processor",
+        "description": "Halts the internal system clock, putting the processor into static low-power standby until a hardware `RES` reset.",
+        "seeAlso": ["WAI"],
+        "modes": {
+          "Implied": { "opcode": "DB", "bytes": 1, "cycles": 3 }
+        },
+        "flagChanges": {}
+      },
+      "WAI": {
+        "fullName": "Wait for Interrupt",
+        "description": "Suspends instruction execution until a hardware interrupt (`IRQ`, `NMI`, or `RES`) is asserted, minimizing interrupt latency.",
+        "seeAlso": ["STP", "CLI"],
+        "modes": {
+          "Implied": { "opcode": "CB", "bytes": 1, "cycles": 3 }
+        },
+        "flagChanges": {}
+      }
+    }
+  },
+  "65816": {
+    "updates": {
+      "ADC": {
+        "note": "Clear **C** with **`CLC`** before multi-word addition. Unlike the 65C02, the 65816 performs BCD without an extra cycle.",
+        "modes": {
+          "[Direct Page]": { "opcode": "67", "bytes": 2, "cycles": 6 },
+          "[Direct Page], Y": { "opcode": "77", "bytes": 2, "cycles": 6 },
+          "Stack Relative": { "opcode": "63", "bytes": 2, "cycles": 4 },
+          "(Stack Relative, S), Y": { "opcode": "73", "bytes": 2, "cycles": 7 },
+          "Absolute Long": { "opcode": "6F", "bytes": 4, "cycles": 4 },
+          "Absolute Long, X": { "opcode": "7F", "bytes": 4, "cycles": 5 }
+        }
+      },
+      "AND": {
+        "modes": {
+          "[Direct Page]": { "opcode": "27", "bytes": 2, "cycles": 6 },
+          "[Direct Page], Y": { "opcode": "37", "bytes": 2, "cycles": 6 },
+          "Stack Relative": { "opcode": "23", "bytes": 2, "cycles": 4 },
+          "(Stack Relative, S), Y": { "opcode": "33", "bytes": 2, "cycles": 7 },
+          "Absolute Long": { "opcode": "2F", "bytes": 4, "cycles": 4 },
+          "Absolute Long, X": { "opcode": "3F", "bytes": 4, "cycles": 5 }
+        }
+      },
+      "ASL": {
+        "clearNote": true,
+        "modes": {
+          "Absolute, X": { "opcode": "1E", "bytes": 3, "cycles": 7 }
+        }
+      },
+      "BRA": {
+        "description": "Unconditionally branches to a target within -128 to +127 bytes. In Native mode (`E`=0), page crossings incur no extra cycle.",
+        "seeAlso": ["BRL", "JMP", "BCC", "BEQ"],
+        "modes": {
+          "Relative": { "opcode": "80", "bytes": 2, "cycles": 3, "emulationOnlyPagePenalty": true }
+        }
+      },
+      "BRK": {
+        "note": "In Native mode (`E`=0), `BRK` pushes `PBR`, 16-bit `PC`, and `P` (8 cycles total) and clears **D**=0. In `ca65`, an optional signature byte may be supplied (`brk $00`).",
+        "modes": {
+          "Implied": { "opcode": "00", "bytes": 1, "cycles": 7, "nativeModeCyclePenalty": 1 },
+          "Signature": { "opcode": "00", "bytes": 2, "cycles": 7, "nativeModeCyclePenalty": 1 }
+        }
+      },
+      "CMP": {
+        "modes": {
+          "[Direct Page]": { "opcode": "C7", "bytes": 2, "cycles": 6 },
+          "[Direct Page], Y": { "opcode": "D7", "bytes": 2, "cycles": 6 },
+          "Stack Relative": { "opcode": "C3", "bytes": 2, "cycles": 4 },
+          "(Stack Relative, S), Y": { "opcode": "D3", "bytes": 2, "cycles": 7 },
+          "Absolute Long": { "opcode": "CF", "bytes": 4, "cycles": 4 },
+          "Absolute Long, X": { "opcode": "DF", "bytes": 4, "cycles": 5 }
+        }
+      },
+      "DEC": {
+        "note": "Writes only once (no dummy write). `DEC A` / `DEA` always takes 2 cycles regardless of **M**."
+      },
+      "DEA": {
+        "description": "`ca65` alias for `DEC A`. Subtracts 1 from the 8-bit or 16-bit *accumulator*."
+      },
+      "EOR": {
+        "modes": {
+          "[Direct Page]": { "opcode": "47", "bytes": 2, "cycles": 6 },
+          "[Direct Page], Y": { "opcode": "57", "bytes": 2, "cycles": 6 },
+          "Stack Relative": { "opcode": "43", "bytes": 2, "cycles": 4 },
+          "(Stack Relative, S), Y": { "opcode": "53", "bytes": 2, "cycles": 7 },
+          "Absolute Long": { "opcode": "4F", "bytes": 4, "cycles": 4 },
+          "Absolute Long, X": { "opcode": "5F", "bytes": 4, "cycles": 5 }
+        }
+      },
+      "INC": {
+        "note": "Writes only once (no dummy write). `INC A` / `INA` always takes 2 cycles regardless of **M**."
+      },
+      "INA": {
+        "description": "`ca65` alias for `INC A`. Adds 1 to the 8-bit or 16-bit *accumulator*."
+      },
+      "JMP": {
+        "note": "`JMP ($abs)` always takes 5 cycles on 65816 with the indirect page-boundary bug fixed. 24-bit `JMP long` and `JMP [abs]` are aliases for `JML`.",
+        "seeAlso": ["JML", "JSR", "BRL"],
+        "modes": {
+          "Indirect": { "opcode": "6C", "bytes": 3, "cycles": 5 },
+          "Absolute Long": { "opcode": "5C", "bytes": 4, "cycles": 4 },
+          "[Indirect Long]": { "opcode": "DC", "bytes": 3, "cycles": 6 }
+        }
+      },
+      "JSR": {
+        "seeAlso": ["JSL", "RTS", "RTL", "JMP"],
+        "modes": {
+          "Absolute Long": { "opcode": "22", "bytes": 4, "cycles": 8 },
+          "(Absolute, X)": { "opcode": "FC", "bytes": 3, "cycles": 8 }
+        }
+      },
+      "LDA": {
+        "modes": {
+          "[Direct Page]": { "opcode": "A7", "bytes": 2, "cycles": 6 },
+          "[Direct Page], Y": { "opcode": "B7", "bytes": 2, "cycles": 6 },
+          "Stack Relative": { "opcode": "A3", "bytes": 2, "cycles": 4 },
+          "(Stack Relative, S), Y": { "opcode": "B3", "bytes": 2, "cycles": 7 },
+          "Absolute Long": { "opcode": "AF", "bytes": 4, "cycles": 4 },
+          "Absolute Long, X": { "opcode": "BF", "bytes": 4, "cycles": 5 }
+        }
+      },
+      "LSR": {
+        "clearNote": true,
+        "modes": {
+          "Absolute, X": { "opcode": "5E", "bytes": 3, "cycles": 7 }
+        }
+      },
+      "ORA": {
+        "modes": {
+          "[Direct Page]": { "opcode": "07", "bytes": 2, "cycles": 6 },
+          "[Direct Page], Y": { "opcode": "17", "bytes": 2, "cycles": 6 },
+          "Stack Relative": { "opcode": "03", "bytes": 2, "cycles": 4 },
+          "(Stack Relative, S), Y": { "opcode": "13", "bytes": 2, "cycles": 7 },
+          "Absolute Long": { "opcode": "0F", "bytes": 4, "cycles": 4 },
+          "Absolute Long, X": { "opcode": "1F", "bytes": 4, "cycles": 5 }
+        }
+      },
+      "ROL": {
+        "clearNote": true,
+        "modes": {
+          "Absolute, X": { "opcode": "3E", "bytes": 3, "cycles": 7 }
+        }
+      },
+      "ROR": {
+        "clearNote": true,
+        "modes": {
+          "Absolute, X": { "opcode": "7E", "bytes": 3, "cycles": 7 }
+        }
+      },
+      "RTI": {
+        "description": "Returns from an interrupt by pulling `P`, `PC`, and (in Native mode `E`=0) `PBR` from the stack.",
+        "modes": {
+          "Implied": { "opcode": "40", "bytes": 1, "cycles": 6, "nativeModeCyclePenalty": 1 }
+        }
+      },
+      "SBC": {
+        "note": "Set **C** with **`SEC`** before multi-word subtraction. Unlike the 65C02, the 65816 performs BCD without an extra cycle.",
+        "modes": {
+          "[Direct Page]": { "opcode": "E7", "bytes": 2, "cycles": 6 },
+          "[Direct Page], Y": { "opcode": "F7", "bytes": 2, "cycles": 6 },
+          "Stack Relative": { "opcode": "E3", "bytes": 2, "cycles": 4 },
+          "(Stack Relative, S), Y": { "opcode": "F3", "bytes": 2, "cycles": 7 },
+          "Absolute Long": { "opcode": "EF", "bytes": 4, "cycles": 4 },
+          "Absolute Long, X": { "opcode": "FF", "bytes": 4, "cycles": 5 }
+        }
+      },
+      "STA": {
+        "modes": {
+          "[Direct Page]": { "opcode": "87", "bytes": 2, "cycles": 6 },
+          "[Direct Page], Y": { "opcode": "97", "bytes": 2, "cycles": 6 },
+          "Stack Relative": { "opcode": "83", "bytes": 2, "cycles": 4 },
+          "(Stack Relative, S), Y": { "opcode": "93", "bytes": 2, "cycles": 7 },
+          "Absolute Long": { "opcode": "8F", "bytes": 4, "cycles": 4 },
+          "Absolute Long, X": { "opcode": "9F", "bytes": 4, "cycles": 5 }
+        }
+      }
+    },
+    "additions": {
+      "BRL": {
+        "fullName": "Branch Always Long",
+        "description": "Unconditionally branches to a target within -32768 to +32767 bytes within the current 64KB program bank.",
+        "seeAlso": ["BRA", "JMP", "PER"],
+        "modes": {
+          "Relative Long": { "opcode": "82", "bytes": 3, "cycles": 4 }
+        },
+        "flagChanges": {}
+      },
+      "COP": {
+        "fullName": "Co-Processor Software Interrupt",
+        "description": "Triggers the COP interrupt vector, pushing `PBR` (in Native mode), 16-bit `PC`, and `P` onto the stack. Takes an immediate signature byte (`cop $00` in `ca65`).",
+        "seeAlso": ["BRK", "RTI"],
+        "modes": {
+          "Signature": { "opcode": "02", "bytes": 2, "cycles": 7, "nativeModeCyclePenalty": 1 }
+        },
+        "flagChanges": {
+          "I": "Set to 1 (disables IRQs).",
+          "D": "Cleared to 0."
+        }
+      },
+      "CPA": {
+        "fullName": "Compare Memory and Accumulator",
+        "description": "`ca65` alias for `CMP` in 65816 mode.",
+        "aliasOf": "CMP",
+        "seeAlso": ["CMP", "CPX", "CPY"],
+        "modes": {},
+        "flagChanges": {}
+      },
+      "JML": {
+        "fullName": "Jump Long",
+        "description": "Unconditionally sets both the Program Bank Register (`PBR`) and Program Counter (`PC`) to a 24-bit target address.",
+        "seeAlso": ["JMP", "JSL", "RTL"],
+        "modes": {
+          "Absolute Long": { "opcode": "5C", "bytes": 4, "cycles": 4 },
+          "[Indirect Long]": { "opcode": "DC", "bytes": 3, "cycles": 6 }
+        },
+        "flagChanges": {}
+      },
+      "JSL": {
+        "fullName": "Jump to Subroutine Long",
+        "description": "Pushes the current 24-bit return address (`PBR` and `PC - 1`) onto the stack and jumps to a 24-bit subroutine address.",
+        "seeAlso": ["RTL", "JSR", "JML"],
+        "modes": {
+          "Absolute Long": { "opcode": "22", "bytes": 4, "cycles": 8 }
+        },
+        "flagChanges": {}
+      },
+      "MVN": {
+        "fullName": "Block Move Negative",
+        "description": "Copies `C + 1` bytes from `srcBank:X` to `dstBank:Y`, incrementing `X` and `Y` and decrementing `C` (`16-bit A`). Syntax in `ca65`: `mvn src, dst`.",
+        "note": "Executes 7 clock cycles per byte transferred (`7 * (C + 1)` total) and updates `DBR` to `dstBank`.",
+        "seeAlso": ["MVP"],
+        "modes": {
+          "Block Move": { "opcode": "54", "bytes": 3, "cycles": 7, "perByteCycles": true }
+        },
+        "flagChanges": {}
+      },
+      "MVP": {
+        "fullName": "Block Move Positive",
+        "description": "Copies `C + 1` bytes from `srcBank:X` to `dstBank:Y`, decrementing `X`, `Y`, and `C` (`16-bit A`). Syntax in `ca65`: `mvp src, dst`.",
+        "note": "Executes 7 clock cycles per byte transferred (`7 * (C + 1)` total) and updates `DBR` to `dstBank`.",
+        "seeAlso": ["MVN"],
+        "modes": {
+          "Block Move": { "opcode": "44", "bytes": 3, "cycles": 7, "perByteCycles": true }
+        },
+        "flagChanges": {}
+      },
+      "PEA": {
+        "fullName": "Push Effective Absolute Address",
+        "description": "Pushes a 16-bit immediate constant/address operand onto the stack without altering registers or flags (written `pea $1234` in `ca65`).",
+        "seeAlso": ["PEI", "PER"],
+        "modes": {
+          "Absolute": { "opcode": "F4", "bytes": 3, "cycles": 5 }
+        },
+        "flagChanges": {}
+      },
+      "PEI": {
+        "fullName": "Push Effective Indirect Address",
+        "description": "Reads a 16-bit pointer from Direct Page memory and pushes it onto the stack (written `pei ($10)` in `ca65`).",
+        "seeAlso": ["PEA", "PER"],
+        "modes": {
+          "(Direct Page)": { "opcode": "D4", "bytes": 2, "cycles": 6 }
+        },
+        "flagChanges": {}
+      },
+      "PER": {
+        "fullName": "Push Effective PC-Relative Address",
+        "description": "Adds a signed 16-bit offset to the updated `PC` and pushes the resulting 16-bit address onto the stack.",
+        "seeAlso": ["PEA", "PEI", "BRL"],
+        "modes": {
+          "Relative Long": { "opcode": "62", "bytes": 3, "cycles": 6 }
+        },
+        "flagChanges": {}
+      },
+      "PHB": {
+        "fullName": "Push Data Bank Register",
+        "description": "Pushes the 8-bit Data Bank Register (`DBR`) onto the stack.",
+        "seeAlso": ["PLB", "PHK", "PHD"],
+        "modes": {
+          "Implied": { "opcode": "8B", "bytes": 1, "cycles": 3 }
+        },
+        "flagChanges": {}
+      },
+      "PHD": {
+        "fullName": "Push Direct Page Register",
+        "description": "Pushes the 16-bit Direct Page Register (`D`) onto the stack.",
+        "seeAlso": ["PLD", "TCD", "TDC"],
+        "modes": {
+          "Implied": { "opcode": "0B", "bytes": 1, "cycles": 4 }
+        },
+        "flagChanges": {}
+      },
+      "PHK": {
+        "fullName": "Push Program Bank Register",
+        "description": "Pushes the 8-bit Program Bank Register (`PBR`) onto the stack.",
+        "seeAlso": ["PHB", "PLB", "JSL"],
+        "modes": {
+          "Implied": { "opcode": "4B", "bytes": 1, "cycles": 3 }
+        },
+        "flagChanges": {}
+      },
+      "PLB": {
+        "fullName": "Pull Data Bank Register",
+        "description": "Pulls an 8-bit value from the stack into the Data Bank Register (`DBR`).",
+        "seeAlso": ["PHB", "PLD"],
+        "modes": {
+          "Implied": { "opcode": "AB", "bytes": 1, "cycles": 4 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 7 of the pulled byte is 1, cleared otherwise.",
+          "Z": "Set if the pulled byte is 0, cleared otherwise."
+        }
+      },
+      "PLD": {
+        "fullName": "Pull Direct Page Register",
+        "description": "Pulls a 16-bit value from the stack into the Direct Page Register (`D`).",
+        "seeAlso": ["PHD", "TCD", "TDC"],
+        "modes": {
+          "Implied": { "opcode": "2B", "bytes": 1, "cycles": 5 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 15 of the pulled word is 1, cleared otherwise.",
+          "Z": "Set if the pulled word is 0, cleared otherwise."
+        }
+      },
+      "REP": {
+        "fullName": "Reset Status Bits",
+        "description": "Clears bits in the Processor Status Register (`P`) where the immediate operand bit is 1. Commonly used with `.a16`/`.i16` (`rep #$20`, `rep #$10`, `rep #$30`) to enable 16-bit modes.",
+        "seeAlso": ["SEP", "XCE", "PLP"],
+        "modes": {
+          "Immediate": { "opcode": "C2", "bytes": 2, "cycles": 3 }
+        },
+        "flagChanges": {
+          "P": "Bits set in the immediate mask are cleared to 0 (`M` and `X` switch `A`/`X`/`Y` to 16-bit in Native mode)."
+        }
+      },
+      "RTL": {
+        "fullName": "Return from Subroutine Long",
+        "description": "Pulls a 16-bit `PC` and 8-bit `PBR` pushed by `JSL` and resumes execution at `PC + 1` in the caller's bank.",
+        "seeAlso": ["JSL", "RTS", "RTI"],
+        "modes": {
+          "Implied": { "opcode": "6B", "bytes": 1, "cycles": 6 }
+        },
+        "flagChanges": {}
+      },
+      "SEP": {
+        "fullName": "Set Status Bits",
+        "description": "Sets bits in the Processor Status Register (`P`) where the immediate operand bit is 1. Commonly used with `.a8`/`.i8` (`sep #$20`, `sep #$10`, `sep #$30`) to enable 8-bit modes.",
+        "seeAlso": ["REP", "XCE", "PLP"],
+        "modes": {
+          "Immediate": { "opcode": "E2", "bytes": 2, "cycles": 3 }
+        },
+        "flagChanges": {
+          "P": "Bits set in the immediate mask are set to 1 (`M` and `X` switch `A`/`X`/`Y` to 8-bit)."
+        }
+      },
+      "STP": {
+        "fullName": "Stop the Processor",
+        "description": "Halts the internal system clock until a hardware `RES` reset occurs.",
+        "seeAlso": ["WAI"],
+        "modes": {
+          "Implied": { "opcode": "DB", "bytes": 1, "cycles": 3 }
+        },
+        "flagChanges": {}
+      },
+      "SWA": {
+        "fullName": "Swap Accumulator Halves",
+        "description": "`ca65` alias for `XBA`. Exchanges the low (`A`) and high (`B`) bytes of the 16-bit `C` accumulator.",
+        "aliasOf": "XBA",
+        "seeAlso": ["XBA"],
+        "modes": {
+          "Implied": { "opcode": "EB", "bytes": 1, "cycles": 3 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 7 of the new low byte (`A`) is 1, cleared otherwise.",
+          "Z": "Set if the new low byte (`A`) is 0, cleared otherwise."
+        }
+      },
+      "TAD": {
+        "fullName": "Transfer C Accumulator to Direct Page",
+        "description": "`ca65` alias for `TCD`. Transfers the 16-bit `C` accumulator into the Direct Page Register (`D`).",
+        "aliasOf": "TCD",
+        "seeAlso": ["TCD", "TDA", "TDC"],
+        "modes": {
+          "Implied": { "opcode": "5B", "bytes": 1, "cycles": 2 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 15 of `D` is 1, cleared otherwise.",
+          "Z": "Set if `D` is 0, cleared otherwise."
+        }
+      },
+      "TAS": {
+        "fullName": "Transfer C Accumulator to Stack Pointer",
+        "description": "`ca65` alias for `TCS`. Transfers the 16-bit `C` accumulator into the Stack Pointer (`S`).",
+        "aliasOf": "TCS",
+        "seeAlso": ["TCS", "TSA", "TSC"],
+        "modes": {
+          "Implied": { "opcode": "1B", "bytes": 1, "cycles": 2 }
+        },
+        "flagChanges": {}
+      },
+      "TCD": {
+        "fullName": "Transfer C Accumulator to Direct Page",
+        "description": "Transfers the full 16-bit `C` (`B:A`) accumulator into the Direct Page Register (`D`), regardless of the **M** flag.",
+        "seeAlso": ["TDC", "PHD", "PLD"],
+        "modes": {
+          "Implied": { "opcode": "5B", "bytes": 1, "cycles": 2 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 15 of `D` is 1, cleared otherwise.",
+          "Z": "Set if `D` is 0, cleared otherwise."
+        }
+      },
+      "TCS": {
+        "fullName": "Transfer C Accumulator to Stack Pointer",
+        "description": "Transfers the 16-bit `C` accumulator into the Stack Pointer (`S`). In Emulation mode (`E`=1), the high byte of `S` remains `$01`.",
+        "seeAlso": ["TSC", "TXS"],
+        "modes": {
+          "Implied": { "opcode": "1B", "bytes": 1, "cycles": 2 }
+        },
+        "flagChanges": {}
+      },
+      "TDA": {
+        "fullName": "Transfer Direct Page to C Accumulator",
+        "description": "`ca65` alias for `TDC`. Transfers the 16-bit Direct Page Register (`D`) into the `C` accumulator.",
+        "aliasOf": "TDC",
+        "seeAlso": ["TDC", "TCD", "TAD"],
+        "modes": {
+          "Implied": { "opcode": "7B", "bytes": 1, "cycles": 2 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 15 of `C` is 1, cleared otherwise.",
+          "Z": "Set if `C` is 0, cleared otherwise."
+        }
+      },
+      "TDC": {
+        "fullName": "Transfer Direct Page to C Accumulator",
+        "description": "Transfers the 16-bit Direct Page Register (`D`) into the full 16-bit `C` accumulator, regardless of the **M** flag.",
+        "seeAlso": ["TCD", "PHD", "PLD"],
+        "modes": {
+          "Implied": { "opcode": "7B", "bytes": 1, "cycles": 2 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 15 of `C` is 1, cleared otherwise.",
+          "Z": "Set if `C` is 0, cleared otherwise."
+        }
+      },
+      "TSA": {
+        "fullName": "Transfer Stack Pointer to C Accumulator",
+        "description": "`ca65` alias for `TSC`. Transfers the 16-bit Stack Pointer (`S`) into the `C` accumulator.",
+        "aliasOf": "TSC",
+        "seeAlso": ["TSC", "TCS", "TAS"],
+        "modes": {
+          "Implied": { "opcode": "3B", "bytes": 1, "cycles": 2 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 15 of `C` is 1, cleared otherwise.",
+          "Z": "Set if `C` is 0, cleared otherwise."
+        }
+      },
+      "TSC": {
+        "fullName": "Transfer Stack Pointer to C Accumulator",
+        "description": "Transfers the 16-bit Stack Pointer (`S`) into the 16-bit `C` accumulator, regardless of the **M** flag.",
+        "seeAlso": ["TCS", "TSX"],
+        "modes": {
+          "Implied": { "opcode": "3B", "bytes": 1, "cycles": 2 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 15 of `C` is 1, cleared otherwise.",
+          "Z": "Set if `C` is 0, cleared otherwise."
+        }
+      },
+      "TXY": {
+        "fullName": "Transfer X to Y",
+        "description": "Copies the value in **X** into **Y** (8-bit or 16-bit depending on the **X** flag).",
+        "seeAlso": ["TYX", "TAX", "TAY"],
+        "modes": {
+          "Implied": { "opcode": "9B", "bytes": 1, "cycles": 2 }
+        },
+        "flagChanges": {
+          "N": "Set if the MSB (bit 7 or bit 15) of the transferred value is 1, cleared otherwise.",
+          "Z": "Set if the transferred value is 0, cleared otherwise."
+        }
+      },
+      "TYX": {
+        "fullName": "Transfer Y to X",
+        "description": "Copies the value in **Y** into **X** (8-bit or 16-bit depending on the **X** flag).",
+        "seeAlso": ["TXY", "TXA", "TYA"],
+        "modes": {
+          "Implied": { "opcode": "BB", "bytes": 1, "cycles": 2 }
+        },
+        "flagChanges": {
+          "N": "Set if the MSB (bit 7 or bit 15) of the transferred value is 1, cleared otherwise.",
+          "Z": "Set if the transferred value is 0, cleared otherwise."
+        }
+      },
+      "WAI": {
+        "fullName": "Wait for Interrupt",
+        "description": "Suspends execution until a hardware interrupt (`IRQ`, `NMI`, or `RES`) occurs.",
+        "seeAlso": ["STP", "CLI"],
+        "modes": {
+          "Implied": { "opcode": "CB", "bytes": 1, "cycles": 3 }
+        },
+        "flagChanges": {}
+      },
+      "WDM": {
+        "fullName": "William D. Mensch Reserved Opcode",
+        "description": "Reserved 2-byte no-op opcode (`wdm $00` in `ca65`). Commonly used as an emulator/debugger software trap.",
+        "seeAlso": ["NOP", "COP"],
+        "modes": {
+          "Signature": { "opcode": "42", "bytes": 2, "cycles": 2 }
+        },
+        "flagChanges": {}
+      },
+      "XBA": {
+        "fullName": "Exchange B and A Accumulators",
+        "description": "Swaps the low byte (`A`) and high byte (`B`) of the 16-bit `C` accumulator, regardless of the **M** flag.",
+        "seeAlso": ["SWA"],
+        "modes": {
+          "Implied": { "opcode": "EB", "bytes": 1, "cycles": 3 }
+        },
+        "flagChanges": {
+          "N": "Set if bit 7 of the new low byte (`A`) is 1, cleared otherwise.",
+          "Z": "Set if the new low byte (`A`) is 0, cleared otherwise."
+        }
+      },
+      "XCE": {
+        "fullName": "Exchange Carry and Emulation Flags",
+        "description": "Exchanges the **C** (carry) flag with the hidden **E** (emulation mode) flag. Use `clc; xce` to enter 65816 Native mode (`E`=0) or `sec; xce` to enter 6502 Emulation mode (`E`=1).",
+        "seeAlso": ["REP", "SEP", "CLC", "SEC"],
+        "modes": {
+          "Implied": { "opcode": "FB", "bytes": 1, "cycles": 2 }
+        },
+        "flagChanges": {
+          "C": "Set to previous value of **E**.",
+          "E": "Set to previous value of **C** (`0` = Native, `1` = Emulation)."
+        }
+      }
+    }
+  }
+}

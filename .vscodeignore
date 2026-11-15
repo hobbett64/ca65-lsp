@@ -1,17 +1,14 @@
-# Ignore build output
-/client/out/
-/server/out/
+# Ignore packaged artifacts and build intermediates
 dist/
 **/*.vsix
 **/*.tsbuildinfo
-
-# Ignore source maps
 **/*.js.map
+tsconfig.json
 
-# Ignore TypeScript source files (we only need the compiled JavaScript)
+# Ignore TypeScript source files and tests (compiled JS lives in client/out and server/out)
 client/src/
 server/src/
-!server/src/data/
+test/
 
 # Ignore development and testing files
 .vscode-test/

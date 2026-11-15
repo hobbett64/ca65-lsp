@@ -41,7 +41,9 @@
         ],
         "configurationDefaults": {
             "[ca65]": {
-                "editor.stickyScroll.defaultModel": "foldingProviderModel"
+                "editor.stickyScroll.defaultModel": "foldingProviderModel",
+                "editor.wordBasedSuggestions": "off",
+                "editor.suggest.snippetsPreventQuickSuggestions": true
             }
         },
         "configuration": {
@@ -120,9 +122,28 @@
                     "description": "Enables `--feature line_continuations` for ca65 diagnostics. Please ensure that your ca65 executable supports this feature if you enable this setting.",
                     "default": false
                 },
+                "ca65.cpu": {
+                    "type": "string",
+                    "enum": [
+                        "6502",
+                        "65SC02",
+                        "65C02",
+                        "W65C02",
+                        "65816"
+                    ],
+                    "enumDescriptions": [
+                        "NMOS 6502 (NES, C64, Atari 2600/800, Apple II)",
+                        "CMOS 65SC02 (Atari Lynx, early Apple IIc; no bit ops or WAI/STP)",
+                        "CMOS 65C02 with Rockwell bit instructions (BBR/BBS/RMB/SMB)",
+                        "Full WDC 65C02S with Rockwell bit ops plus WAI/STP (Commander X16; requires cc65 2.19+)",
+                        "WDC 65C816 16-bit (SNES / Super Famicom, Apple IIgs)"
+                    ],
+                    "description": "Target CPU architecture used for instruction hovers, completions, timing/size estimates, reference guide, and `ca65 --cpu` diagnostics.",
+                    "default": "6502"
+                },
                 "ca65.additionalArgs": {
                     "type": "array",
-                    "description": "Additional command-line arguments to pass to `ca65` during diagnostics and side-by-side listing generation (e.g. `\"-D\"`, `\"DEBUG=1\"`, `\"--cpu\"`, `\"65C02\"`). Output flags (`-o`, `-l`, `--listing`) are ignored.",
+                    "description": "Additional command-line arguments to pass to `ca65` during diagnostics and side-by-side listing generation (e.g. `\"-D\"`, `\"DEBUG=1\"`). Use `ca65.cpu` to choose the CPU target. Output flags (`-o`, `-l`, `--listing`) are ignored.",
                     "items": {
                         "type": "string"
                     },
@@ -130,12 +151,7 @@
                 },
                 "ca65.enableStatusBarCycleCount": {
                     "type": "boolean",
-                    "description": "Shows estimated 6502 cycle count and byte size for the selected instructions (or current line) in the status bar.",
-                    "default": true
-                },
-                "ca65.enableProcCodeLens": {
-                    "type": "boolean",
-                    "description": "Shows byte size, cycle estimate, and reference count CodeLens annotations above `.proc` definitions.",
+                    "description": "Shows estimated cycle count and byte size for the selected instructions (or current line) in the status bar.",
                     "default": true
                 }
             }
@@ -181,6 +197,7 @@
         "vscode:prepublish": "npm run compile",
         "compile": "tsc -b tsconfig.json",
         "watch": "tsc -b tsconfig.json -w",
+        "test": "npm run compile && node test/run_all.js",
         "package-lsp": "npm run package-lsp:linux && npm run package-lsp:win && npm run package-lsp:macos",
         "package-lsp:linux": "npm run compile && pkg --targets node18-linux-x64 --output dist/bin/ca65-lsp-linux server/out/server.js",
         "package-lsp:win": "npm run compile && pkg --targets node18-win-x64 --output dist/bin/ca65-lsp-win.exe server/out/server.js",
@@ -199,7 +216,6 @@
     },
     "dependencies": {
         "glob": "^14.0.6",
-        "node": "^27.0.0-alpha.0.1.0",
         "vscode-languageclient": "^9.0.1",
         "vscode-languageserver": "^9.0.1",
         "vscode-languageserver-protocol": "^3.17.5",

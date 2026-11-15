@@ -2,23 +2,65 @@ import {
     _Connection,
     TextDocuments,
     RenameParams,
+    PrepareRenameParams,
+    Range,
     WorkspaceEdit,
     TextEdit,
     Location,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, symbolTables } from './server';
-import { getAllReferenceLocationsForEntity, resolveReferenceAtPosition } from './symbolResolver';
+import { getAllReferenceLocationsForEntity, resolveReference } from './symbolResolver';
 import { findAllCheapLocalLabelReferences } from './cheapLocalLabelUtils';
+import { SymbolTable, SymbolTableEntity } from './symbolTable';
+import { Ca65Settings } from './settings';
+
+interface RenameTarget {
+    range: Range;
+    placeholder: string;
+    entity?: SymbolTableEntity;
+    cheapLocations?: Location[];
+}
+
+function resolveRenameTarget(
+    uri: string,
+    position: { line: number; character: number },
+    document: TextDocument,
+    symbolTable: SymbolTable,
+    settings: Ca65Settings
+): RenameTarget | null {
+    const ref = symbolTable.getReferenceAtPosition(position);
+    if (ref) {
+        const entity = resolveReference(ref, symbolTables, includesGraph, settings.implicitImports);
+        if (entity) {
+            return {
+                range: ref.location,
+                placeholder: ref.name,
+                entity,
+            };
+        }
+    }
+
+    const cheapLocations = findAllCheapLocalLabelReferences(document, position);
+    if (cheapLocations.length > 0) {
+        const hit = cheapLocations.find(loc => symbolTable.isPositionInRange(position, loc.range));
+        if (hit) {
+            return {
+                range: hit.range,
+                placeholder: document.getText(hit.range),
+                cheapLocations,
+            };
+        }
+    }
+
+    return null;
+}
 
 export function initializeRenameProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
-    /**
-     * Handles the "Rename Symbol" request.
-     */
-    connection.onRenameRequest(async (params: RenameParams): Promise<WorkspaceEdit | null> => {
+    connection.onPrepareRename(async (params: PrepareRenameParams) => {
         await initializationGate.isInitialized;
         await ensureDocumentRefreshed?.(params.textDocument.uri);
-        
+
         const uri = params.textDocument.uri;
         const document = documents.get(uri);
         const symbolTable = symbolTables.get(uri);
@@ -27,35 +69,61 @@ export function initializeRenameProvider(connection: _Connection, documents: Tex
         }
 
         const settings = await getDocumentSettings(uri);
+        const target = resolveRenameTarget(uri, params.position, document, symbolTable, settings);
+        if (!target) {
+            return null;
+        }
 
-        const edits: { [uri: string]: TextEdit[] } = {};
+        return {
+            range: target.range,
+            placeholder: target.placeholder,
+        };
+    });
+
+    /**
+     * Handles the "Rename Symbol" request.
+     */
+    connection.onRenameRequest(async (params: RenameParams): Promise<WorkspaceEdit | null> => {
+        await initializationGate.isInitialized;
+        await ensureDocumentRefreshed?.(params.textDocument.uri);
+
+        const uri = params.textDocument.uri;
+        const document = documents.get(uri);
+        const symbolTable = symbolTables.get(uri);
+        if (!document || !symbolTable) {
+            return null;
+        }
+
+        const settings = await getDocumentSettings(uri);
+        const target = resolveRenameTarget(uri, params.position, document, symbolTable, settings);
+        if (!target) {
+            return null;
+        }
+
         let allLocations: Location[];
-
-        const foundEntity = resolveReferenceAtPosition(
-            uri, params.position, symbolTables, includesGraph, settings.implicitImports
-        );
-        if (foundEntity) {
+        let effectiveNewName = params.newName;
+        if (target.entity) {
             allLocations = getAllReferenceLocationsForEntity(
-                foundEntity,
+                target.entity,
                 symbolTables,
                 includesGraph,
                 settings.implicitImports
             );
         } else {
-            // Didn't find a real symbol, check if it's a cheap label
-            allLocations = findAllCheapLocalLabelReferences(document, params.position);
+            allLocations = target.cheapLocations || [];
+            if (!effectiveNewName.startsWith('@')) {
+                effectiveNewName = `@${effectiveNewName}`;
+            }
         }
 
-        allLocations.forEach(location => {
+        const edits: { [uri: string]: TextEdit[] } = {};
+        for (const location of allLocations) {
             if (!edits[location.uri]) {
                 edits[location.uri] = [];
             }
-            const textEdit = TextEdit.replace(location.range, params.newName);
-            edits[location.uri].push(textEdit);
-        });;
-        const workspaceEdit: WorkspaceEdit = {
-            changes: edits,
-        };
-        return workspaceEdit;
+            edits[location.uri].push(TextEdit.replace(location.range, effectiveNewName));
+        }
+
+        return { changes: edits };
     });
 }

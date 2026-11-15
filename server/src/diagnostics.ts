@@ -18,7 +18,7 @@ import { ensureDocumentRefreshed, exportsMap, getDocumentSettings, includesGraph
 import * as fs from 'fs/promises';
 import * as os from "os";
 import { promisify } from 'util';
-import { Ca65Settings } from './settings';
+import { Ca65Settings, normalizeCpu } from './settings';
 import which from "which";
 import { fsPathToUri, getWorkspaceFolderOfFile, resolveWorkspaceRelativeDirs, uriToFsPath } from './pathUtils';
 import { countReferencesByFile, isEntityUsed, resolveImport } from './symbolResolver';
@@ -32,6 +32,7 @@ const validationTimers: Map<string, NodeJS.Timeout> = new Map();
 const pendingFilesToUpdate: Map<string, Set<string>> = new Map();
 const activeValidationControllers: Set<AbortController> = new Set();
 const cachedExecutablePaths: Map<string, string | null> = new Map();
+const w65c02UnsupportedPaths: Set<string> = new Set();
 const VALIDATION_ROOT_CONCURRENCY = 4;
 const SHADOW_IO_CONCURRENCY = 16;
 let connection: _Connection;
@@ -40,6 +41,7 @@ let hasShownCa65NotFoundMessage = false;
 
 export function clearExecutablePathCache(): void {
     cachedExecutablePaths.clear();
+    w65c02UnsupportedPaths.clear();
 }
 
 export function initializeDiagnostics(conn: _Connection, docs: TextDocuments<TextDocument>) {
@@ -116,7 +118,7 @@ async function findUnusedSymbolDiagnostics(
 function isZeroPageSegmentName(segment: string | null | undefined): boolean {
     if (!segment) return false;
     const upper = segment.toUpperCase();
-    return upper === 'ZEROPAGE' || upper === 'ZP';
+    return upper === 'ZEROPAGE' || upper === 'ZP' || upper === 'DIRECTPAGE' || upper === 'DP';
 }
 
 function entityCarriesSegmentAddress(entity: SymbolTableEntity): boolean {
@@ -413,6 +415,14 @@ export async function assembleTranslationUnit(
                 args.push('--feature', 'line_continuations');
             }
 
+            const cpu = normalizeCpu(settings.cpu);
+            if (cpu !== '6502') {
+                const effectiveCpu = (cpu === 'W65C02' && w65c02UnsupportedPaths.has(ca65Path))
+                    ? '65C02'
+                    : cpu;
+                args.push('--cpu', effectiveCpu);
+            }
+
             args.push(...sanitizeAdditionalCa65Args(settings.additionalArgs));
 
             try {
@@ -421,6 +431,22 @@ export async function assembleTranslationUnit(
             } catch (err: any) {
                 hasErrors = true;
                 if (err && err.stderr) stderr = err.stderr;
+                if (cpu === 'W65C02' && stderr.includes("Invalid CPU: 'W65C02'")) {
+                    w65c02UnsupportedPaths.add(ca65Path);
+                    const cpuFlagIndex = args.indexOf('--cpu');
+                    if (cpuFlagIndex !== -1 && args[cpuFlagIndex + 1] === 'W65C02') {
+                        args[cpuFlagIndex + 1] = '65C02';
+                        hasErrors = false;
+                        stderr = '';
+                        try {
+                            const retryResult = await execFileAsync(ca65Path, args, { cwd: effectiveCwd, signal });
+                            stderr = retryResult.stderr;
+                        } catch (retryErr: any) {
+                            hasErrors = true;
+                            if (retryErr && retryErr.stderr) stderr = retryErr.stderr;
+                        }
+                    }
+                }
             }
 
             if (listingPath && !hasErrors && !signal.aborted) {

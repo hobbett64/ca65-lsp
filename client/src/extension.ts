@@ -12,8 +12,6 @@ import {
 	EventEmitter,
 	ViewColumn,
 	Range as VscodeRange,
-	Position as VscodePosition,
-	Location as VscodeLocation,
 } from "vscode";
 import {
 	LanguageClient,
@@ -102,28 +100,8 @@ export function activate(context: ExtensionContext) {
 
 	// --- Register the "Show Reference" Command ---
 	context.subscriptions.push(commands.registerCommand('ca65.showReference', () => {
-		return showReferencePanel(context);
+		return showReferencePanel(context, clientReady);
 	}));
-
-	context.subscriptions.push(commands.registerCommand(
-		'ca65.showProcReferences',
-		async (
-			uriStr: string,
-			position: { line: number; character: number },
-			locations: Array<{ uri: string; range: { start: { line: number; character: number }; end: { line: number; character: number } } }>
-		) => {
-			if (!locations || locations.length === 0) {
-				return;
-			}
-			const parsedUri = Uri.parse(uriStr);
-			const vscodePos = new VscodePosition(position.line, position.character);
-			const vscodeLocs = locations.map(loc => new VscodeLocation(
-				Uri.parse(loc.uri),
-				new VscodeRange(loc.range.start.line, loc.range.start.character, loc.range.end.line, loc.range.end.character)
-			));
-			return commands.executeCommand('editor.action.showReferences', parsedUri, vscodePos, vscodeLocs);
-		}
-	));
 
 	const dumpCommands: ReadonlyArray<[string, string]> = [
 		['ca65.dumpPerformanceStats', 'ca65/dumpPerformanceStats'],
@@ -158,9 +136,14 @@ interface InstructionAnalysisItem {
 	uncertainMode?: boolean;
 	hasBranchPenalty?: boolean;
 	hasPagePenalty?: boolean;
+	hasVariableWidth16?: boolean;
+	hasDpOffsetPenalty?: boolean;
+	hasEmulationPagePenalty?: boolean;
+	hasPerByteCycles?: boolean;
 }
 
 interface InstructionAnalysisSummary {
+	cpu?: string;
 	instructionCount: number;
 	minBytes: number;
 	maxBytes: number;
@@ -169,6 +152,10 @@ interface InstructionAnalysisSummary {
 	uncertainCount: number;
 	hasBranchPenalty: boolean;
 	hasPagePenalty: boolean;
+	hasVariableWidth16?: boolean;
+	hasDpOffsetPenalty?: boolean;
+	hasEmulationPagePenalty?: boolean;
+	hasPerByteCycles?: boolean;
 	items: InstructionAnalysisItem[];
 }
 
@@ -178,11 +165,12 @@ function formatRangeValue(min: number, max: number, unit: string): string {
 
 function buildCycleTooltip(result: InstructionAnalysisSummary, isSelection: boolean): MarkdownString {
 	const header = isSelection ? 'Selection Timing & Size' : 'Instruction Timing & Size';
+	const cpuTag = result.cpu && result.cpu !== '6502' ? ` (${result.cpu})` : '';
 	const cycText = formatRangeValue(result.minCycles, result.maxCycles, 'cycles');
 	const byteText = formatRangeValue(result.minBytes, result.maxBytes, 'bytes');
 
 	const lines: string[] = [
-		`**${header}**`,
+		`**${header}${cpuTag}**`,
 		``,
 		`- **Instructions:** ${result.instructionCount}`,
 		`- **Bytes:** ${byteText}`,
@@ -191,13 +179,35 @@ function buildCycleTooltip(result: InstructionAnalysisSummary, isSelection: bool
 
 	const notes: string[] = [];
 	if (result.hasBranchPenalty) {
-		notes.push('Branch instructions add +1 cycle when taken (+1 more if crossing a page)');
+		const branchHasPagePenalty = result.items.some(item => item.hasBranchPenalty && item.hasPagePenalty);
+		notes.push(
+			branchHasPagePenalty
+				? 'Branch instructions add +1 cycle when taken (+1 more if crossing a page)'
+				: 'Branch instructions add +1 cycle when taken'
+		);
 	}
 	if (result.items.some(item => item.hasPagePenalty && !item.hasBranchPenalty)) {
-		notes.push('Indexed/indirect modes may add +1 cycle when crossing a page boundary');
+		notes.push(
+			result.cpu === '65816'
+				? 'Indexed reads may add +1 cycle when crossing a page boundary or with 16-bit X/Y'
+				: 'Indexed/indirect modes may add +1 cycle when crossing a page boundary'
+		);
+	}
+	if (result.hasVariableWidth16) {
+		notes.push('65816 M/X flags: cycles and immediate bytes shown as 8-bit to 16-bit range');
+	}
+	if (result.hasDpOffsetPenalty) {
+		notes.push('Direct Page modes add +1 cycle when Direct Page register low byte DL ≠ 0');
+	}
+	if (result.hasEmulationPagePenalty) {
+		notes.push('In Emulation mode (E=1), branch page crossings add +1 cycle');
+	}
+	if (result.hasPerByteCycles) {
+		notes.push('Block move (MVN/MVP) executes 7 cycles per byte transferred (C + 1 bytes)');
 	}
 	if (result.uncertainCount > 0) {
-		notes.push(`${result.uncertainCount} instruction(s) have unknown Zero Page vs Absolute width (shown as range)`);
+		const zpName = result.cpu === '65816' ? 'Direct Page' : 'Zero Page';
+		notes.push(`${result.uncertainCount} instruction(s) have unknown ${zpName} vs Absolute width (shown as range)`);
 	}
 	if (notes.length > 0) {
 		lines.push('', ...notes.map(n => `*${n}*`));
@@ -317,7 +327,7 @@ function setupCycleStatusBar(context: ExtensionContext, clientReady: Promise<voi
 			}
 		}),
 		workspace.onDidChangeConfiguration((event) => {
-			if (event.affectsConfiguration('ca65.enableStatusBarCycleCount')) {
+			if (event.affectsConfiguration('ca65.enableStatusBarCycleCount') || event.affectsConfiguration('ca65.cpu')) {
 				updateForEditor(window.activeTextEditor, true);
 			}
 		}),
@@ -534,24 +544,50 @@ export function deactivate(): Thenable<void> | undefined {
 	return client.stop();
 }
 
-let cachedReferenceMarkdown: string | undefined;
+const cachedReferenceMarkdownByCpu = new Map<string, string>();
 
 // --- Implementation for the "Show Reference" Panel ---
-async function showReferencePanel(context: ExtensionContext) {
-	if (!cachedReferenceMarkdown) {
-		// 1. Load the JSON data
-		const dataPath = context.asAbsolutePath(path.join('server', 'data', '6502_mnemonics.json'));
-		const rawData = await fs.readFile(dataPath, 'utf8');
-		const jsonData = JSON.parse(rawData);
+async function showReferencePanel(context: ExtensionContext, clientReady: Promise<void>) {
+	const activeUri = window.activeTextEditor?.document.uri;
+	const configuredCpu = workspace.getConfiguration('ca65', activeUri).get<string>('cpu') || '6502';
 
-		// 2. Generate the full Markdown string
-		cachedReferenceMarkdown = generateFullMarkdown(jsonData);
+	let targetCpu = configuredCpu;
+	let markdown = cachedReferenceMarkdownByCpu.get(configuredCpu);
+
+	if (!markdown) {
+		let jsonData: Record<string, any> | undefined;
+		if (client) {
+			try {
+				await clientReady;
+				const response = await client.sendRequest<{ cpu: string; mnemonics: Record<string, any> }>(
+					'ca65/getReferenceData',
+					{ uri: activeUri?.toString(), cpu: configuredCpu }
+				);
+				if (response?.mnemonics) {
+					targetCpu = response.cpu || configuredCpu;
+					jsonData = response.mnemonics;
+				}
+			} catch {
+				// Fall back to base 6502 reference JSON if server request fails
+			}
+		}
+
+		if (!jsonData) {
+			const dataPath = context.asAbsolutePath(path.join('server', 'data', '6502_mnemonics.json'));
+			const rawData = await fs.readFile(dataPath, 'utf8');
+			jsonData = JSON.parse(rawData);
+			targetCpu = '6502';
+		}
+
+		markdown = generateFullMarkdown(jsonData!, targetCpu);
+		cachedReferenceMarkdownByCpu.set(targetCpu, markdown);
 	}
 
 	// Save to a temp file
 	const tmpDir = os.tmpdir();
-	const filePath = path.join(tmpDir, 'ca65-reference.md');
-	await fs.writeFile(filePath, cachedReferenceMarkdown, 'utf-8');
+	const safeCpuSlug = targetCpu.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+	const filePath = path.join(tmpDir, `ca65-reference-${safeCpuSlug}.md`);
+	await fs.writeFile(filePath, markdown, 'utf-8');
 	const fileUri = Uri.file(filePath);
 
 	// Show the preview (no editor tab)
@@ -565,39 +601,72 @@ const FLAG_NAMES: Record<string, string> = {
 	D: "Decimal",
 	I: "Interrupt",
 	Z: "Zero",
-	C: "Carry"
+	C: "Carry",
+	E: "Emulation",
+	P: "Processor Status"
 };
 
-function generateTypeTable(): string {
+function generateTypeTable(jsonData: Record<string, any>): string {
 	const link = (mnemonic: string) => `[${mnemonic}](#${mnemonic.toLowerCase()})`;
+	const formatGroup = (list: string[]) => list.filter(m => Boolean(jsonData[m])).map(link).join(', ');
 
-	return `
-| Type      | Instructions                                                                 |
-|-----------|------------------------------------------------------------------------------|
-| Access    | ${link('LDA')}, ${link('STA')}, ${link('LDX')}, ${link('STX')}, ${link('LDY')}, ${link('STY')}                                                 |
-| Transfer  | ${link('TAX')}, ${link('TXA')}, ${link('TAY')}, ${link('TYA')}                                                           |
-| Arithmetic| ${link('ADC')}, ${link('SBC')}, ${link('INC')}, ${link('DEC')}, ${link('INX')}, ${link('DEX')}, ${link('INY')}, ${link('DEY')}                                       |
-| Shift     | ${link('ASL')}, ${link('LSR')}, ${link('ROL')}, ${link('ROR')}                                                           |
-| Bitwise   | ${link('AND')}, ${link('ORA')}, ${link('EOR')}, ${link('BIT')}                                                           |
-| Compare   | ${link('CMP')}, ${link('CPX')}, ${link('CPY')}                                                                |
-| Branch    | ${link('BCC')}, ${link('BCS')}, ${link('BEQ')}, ${link('BNE')}, ${link('BPL')}, ${link('BMI')}, ${link('BVC')}, ${link('BVS')}                                       |
-| Jump      | ${link('JMP')}, ${link('JSR')}, ${link('RTS')}, ${link('BRK')}, ${link('RTI')}                                                      |
-| Stack     | ${link('PHA')}, ${link('PLA')}, ${link('PHP')}, ${link('PLP')}, ${link('TXS')}, ${link('TSX')}                                                 |
-| Flags     | ${link('CLC')}, ${link('SEC')}, ${link('CLI')}, ${link('SEI')}, ${link('CLD')}, ${link('SED')}, ${link('CLV')}                                            |
-| Other     | ${link('NOP')}                                                                          |
-\n`;
+	const rows: Array<[string, string[]]> = [
+		['Access', ['LDA', 'STA', 'LDX', 'STX', 'LDY', 'STY', 'STZ']],
+		['Transfer', ['TAX', 'TXA', 'TAY', 'TYA', 'TCD', 'TAD', 'TDC', 'TDA', 'TCS', 'TAS', 'TSC', 'TSA', 'TXY', 'TYX', 'XBA', 'SWA', 'XCE']],
+		['Arithmetic', ['ADC', 'SBC', 'INC', 'INA', 'DEC', 'DEA', 'INX', 'DEX', 'INY', 'DEY']],
+		['Shift', ['ASL', 'LSR', 'ROL', 'ROR']],
+		['Bitwise', ['AND', 'ORA', 'EOR', 'BIT', 'TSB', 'TRB', 'RMB0', 'RMB1', 'RMB2', 'RMB3', 'RMB4', 'RMB5', 'RMB6', 'RMB7', 'SMB0', 'SMB1', 'SMB2', 'SMB3', 'SMB4', 'SMB5', 'SMB6', 'SMB7']],
+		['Compare', ['CMP', 'CPA', 'CPX', 'CPY']],
+		['Branch', ['BCC', 'BCS', 'BEQ', 'BNE', 'BPL', 'BMI', 'BVC', 'BVS', 'BRA', 'BRL', 'BBR0', 'BBR1', 'BBR2', 'BBR3', 'BBR4', 'BBR5', 'BBR6', 'BBR7', 'BBS0', 'BBS1', 'BBS2', 'BBS3', 'BBS4', 'BBS5', 'BBS6', 'BBS7']],
+		['Jump & Call', ['JMP', 'JML', 'JSR', 'JSL', 'RTS', 'RTL', 'BRK', 'COP', 'RTI']],
+		['Stack', ['PHA', 'PLA', 'PHP', 'PLP', 'PHX', 'PLX', 'PHY', 'PLY', 'PHB', 'PLB', 'PHD', 'PLD', 'PHK', 'PEA', 'PEI', 'PER', 'TXS', 'TSX']],
+		['Flags & Ctrl', ['CLC', 'SEC', 'CLI', 'SEI', 'CLD', 'SED', 'CLV', 'REP', 'SEP']],
+		['Block & Other', ['MVN', 'MVP', 'NOP', 'WAI', 'STP', 'WDM']],
+	];
+
+	let table = `\n| Type | Instructions |\n|------|--------------|\n`;
+	for (const [label, candidates] of rows) {
+		const formatted = formatGroup(candidates);
+		if (formatted) {
+			table += `| ${label} | ${formatted} |\n`;
+		}
+	}
+	return `${table}\n`;
+}
+
+function formatReferenceModeBytes(mode: any): string {
+	if (mode.bytes === undefined) return '';
+	if (mode.byteVariableM) return `${mode.bytes}–${mode.bytes + 1} (M)`;
+	if (mode.byteVariableX) return `${mode.bytes}–${mode.bytes + 1} (X)`;
+	return `${mode.bytes}`;
+}
+
+function formatReferenceModeCycles(mode: any): string {
+	if (mode.cycles === undefined) return '';
+	if (mode.perByteCycles) return `${mode.cycles}/byte`;
+	const notes: string[] = [];
+	if (mode.branchPenalty) notes.push("+1 if branch taken");
+	if (mode.pagePenalty) notes.push("+1 if page boundary crossed");
+	if (mode.pageOrIndex16Penalty) notes.push("+1 if page crossed or 16-bit X/Y");
+	if (mode.emulationOnlyPagePenalty) notes.push("+1 page if E=1");
+	if (mode.cycleVariableM) notes.push(`+${mode.cycleVariableM} if 16-bit M`);
+	if (mode.cycleVariableX) notes.push(`+${mode.cycleVariableX} if 16-bit X`);
+	if (mode.dpNonZeroPenalty) notes.push("+1 if DL≠0");
+	if (mode.nativeModeCyclePenalty) notes.push(`+${mode.nativeModeCyclePenalty} if E=0`);
+	return notes.length > 0 ? `${mode.cycles} (${notes.join(", ")})` : `${mode.cycles}`;
 }
 
 // --- Helper to Generate the Full Markdown Reference ---
-function generateFullMarkdown(jsonData: any): string {
-	let fullMarkdown = "# Instruction reference\n\n";
-	fullMarkdown += "## Official instructions by type\n\n";
-	fullMarkdown += generateTypeTable();
+function generateFullMarkdown(jsonData: Record<string, any>, cpu: string = '6502'): string {
+	let fullMarkdown = `# Instruction reference (${cpu})\n\n`;
+	fullMarkdown += "## Instructions by type\n\n";
+	fullMarkdown += generateTypeTable(jsonData);
 	fullMarkdown += "\n___\n\n";
 
-	fullMarkdown += "## Official instructions\n\n";
+	fullMarkdown += "## Instructions\n\n";
 
-	for (const mnemonic in jsonData) {
+	const sortedMnemonics = Object.keys(jsonData).sort();
+	for (const mnemonic of sortedMnemonics) {
 		const data = jsonData[mnemonic];
 
 		// Title
@@ -634,22 +703,22 @@ function generateFullMarkdown(jsonData: any): string {
 			fullMarkdown += `|------|--------|-------|--------|\n`;
 			for (const modeName of Object.keys(data.modes)) {
 				const mode = data.modes[modeName];
-				let cycles = mode.cycles !== undefined ? `${mode.cycles}` : '';
-				let notes: string[] = [];
-				if (mode.branchPenalty) notes.push("+1 if branch taken");
-				if (mode.pagePenalty) notes.push("+1 if page boundary crossed");
-				if (notes.length > 0) cycles += ` (${notes.join(", ")})`;
-				fullMarkdown += `| ${modeName} | \`${mode.opcode}\` | ${mode.bytes || ''} | ${cycles} |\n`;
+				const bytes = formatReferenceModeBytes(mode);
+				const cycles = formatReferenceModeCycles(mode);
+				fullMarkdown += `| ${modeName} | \`${mode.opcode}\` | ${bytes} | ${cycles} |\n`;
 			}
 			fullMarkdown += `\n`;
 		}
 
 		// See also
 		if (data.seeAlso && Array.isArray(data.seeAlso) && data.seeAlso.length > 0) {
-			const seeAlsoLinks = data.seeAlso.map(
-				(link: string) => `[${link}](#${link.toLowerCase()})`
-			).join(', ');
-			fullMarkdown += `**See also:** ${seeAlsoLinks}\n\n`;
+			const seeAlsoLinks = data.seeAlso
+				.filter((link: string) => Boolean(jsonData[link]))
+				.map((link: string) => `[${link}](#${link.toLowerCase()})`)
+				.join(', ');
+			if (seeAlsoLinks) {
+				fullMarkdown += `**See also:** ${seeAlsoLinks}\n\n`;
+			}
 		}
 
 		fullMarkdown += "---\n\n";

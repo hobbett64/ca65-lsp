@@ -11,7 +11,7 @@ import {
     initializationGate,
     performanceMonitor,
 } from './server';
-import { Ca65Settings } from './settings';
+import { Ca65Settings, normalizeCpu } from './settings';
 
 export type OverlaySourceKind = 'live-lst' | 'none';
 
@@ -97,10 +97,11 @@ function getTuSignature(
         const openDoc = documents.get(uri);
         docVersions.push(`${uri}@${openDoc ? openDoc.version : 'disk'}`);
     }
+    const cpuKey = normalizeCpu(settings?.cpu);
     const includeDirsKey = Array.isArray(settings?.includeDirs) ? settings.includeDirs.join(',') : '';
     const binIncludeDirsKey = Array.isArray(settings?.binIncludeDirs) ? settings.binIncludeDirs.join(',') : '';
     const additionalArgsKey = Array.isArray(settings?.additionalArgs) ? settings.additionalArgs.join(' ') : '';
-    return `${rootUri}|${Boolean(settings?.implicitImports)}|${Boolean(settings?.lineContinuations)}|${includeDirsKey}|${binIncludeDirsKey}|${additionalArgsKey}|${docVersions.join(';')}`;
+    return `${rootUri}|${cpuKey}|${Boolean(settings?.implicitImports)}|${Boolean(settings?.lineContinuations)}|${includeDirsKey}|${binIncludeDirsKey}|${additionalArgsKey}|${docVersions.join(';')}`;
 }
 
 export function initializeOverlayProvider(connection: _Connection, documents: TextDocuments<TextDocument>): void {

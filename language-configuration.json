@@ -59,6 +59,10 @@
     ]
   ],
   "wordPattern": "(:[-+<>]+)|(@[a-zA-Z0-9_]+|[a-zA-Z_.][a-zA-Z0-9_]*)|(^\\s*:)",
+  "indentationRules": {
+    "increaseIndentPattern": "^\\s*(?:\\.(?:proc|macro|mac|scope|struct|union|enum|repeat|if[a-z0-9]*|else|elseif)|\\.(?:PROC|MACRO|MAC|SCOPE|STRUCT|UNION|ENUM|REPEAT|IF[A-Z0-9]*|ELSE|ELSEIF))\\b",
+    "decreaseIndentPattern": "^\\s*(?:\\.(?:end(?:proc|macro|mac|scope|struct|union|enum|repeat|rep)|endif|else|elseif)|\\.(?:END(?:PROC|MACRO|MAC|SCOPE|STRUCT|UNION|ENUM|REPEAT|REP)|ENDIF|ELSE|ELSEIF))\\b"
+  },
   "onEnterRules": [
     {
       "beforeText": "^\\s*(:|[a-zA-Z_@.][a-zA-Z0-9_@.]*:)\\s*(;.*)?$",
