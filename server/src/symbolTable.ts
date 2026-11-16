@@ -22,6 +22,44 @@ const BUILTIN_SEGMENTS = new Set([
     'NULL',
 ]);
 
+export type SegmentAddrSize = 'zp' | 'abs' | 'far' | 'long';
+
+const SEGMENT_ADDR_SIZE_MAP: Record<string, SegmentAddrSize> = {
+    zeropage: 'zp',
+    zp: 'zp',
+    direct: 'zp',
+    absolute: 'abs',
+    abs: 'abs',
+    near: 'abs',
+    far: 'far',
+    long: 'long',
+    dword: 'long',
+};
+
+/**
+ * Parses `.segment "NAME" [: address_size]` arguments into the segment name and optional address size.
+ */
+export function parseSegmentDirectiveArgs(argsText: string): { segment: string; addrSize?: SegmentAddrSize } {
+    const trimmed = argsText.trim();
+    const quotedMatch = trimmed.match(/^"([^"]*)"(?:\s*:\s*([a-zA-Z_][a-zA-Z0-9_]*))?/);
+    let segment: string;
+    let rawAddrSize: string | undefined;
+    if (quotedMatch) {
+        segment = quotedMatch[1];
+        rawAddrSize = quotedMatch[2];
+    } else {
+        const colonIdx = trimmed.indexOf(':');
+        if (colonIdx >= 0) {
+            segment = trimmed.slice(0, colonIdx).replace(/"/g, '').trim();
+            rawAddrSize = trimmed.slice(colonIdx + 1).trim();
+        } else {
+            segment = trimmed.replace(/"/g, '').trim();
+        }
+    }
+    const addrSize = rawAddrSize ? SEGMENT_ADDR_SIZE_MAP[rawAddrSize.toLowerCase()] : undefined;
+    return { segment, addrSize };
+}
+
 /**
  * Returns true if `segment` uses a standard zero-page or direct-page segment name.
  */
@@ -30,14 +68,50 @@ export function isZeroPageSegmentName(segment: string | null | undefined): boole
     return ZERO_PAGE_SEGMENTS.has(segment.trim().toUpperCase());
 }
 
+/**
+ * Resolves the explicit or workspace-wide address size (`zp`, `abs`, `far`, `long`) for `segment`.
+ */
+export function resolveSegmentAddrSize(
+    segment: string | null | undefined,
+    ownerTable?: SymbolTable,
+    allSymbolTables?: Map<string, SymbolTable>
+): SegmentAddrSize | undefined {
+    if (!segment) return undefined;
+    const own = ownerTable?.getSegmentAddrSize(segment);
+    if (own) return own;
+    if (allSymbolTables) {
+        for (const st of allSymbolTables.values()) {
+            const declared = st.getSegmentAddrSize(segment);
+            if (declared) return declared;
+        }
+    }
+    return isZeroPageSegmentName(segment) ? 'zp' : undefined;
+}
+
+/**
+ * Returns true if `segment` is configured as zero-page (`: zeropage`/`: zp`/`: direct`) or uses a standard ZP/DP name.
+ */
+export function isZeroPageSegment(
+    segment: string | null | undefined,
+    ownerTable?: SymbolTable,
+    allSymbolTables?: Map<string, SymbolTable>
+): boolean {
+    return resolveSegmentAddrSize(segment, ownerTable, allSymbolTables) === 'zp';
+}
+
 export type LabelSegmentCategory = 'code' | 'rodata' | 'data' | 'bss' | 'unknown';
 
 /**
  * Classifies a segment name into code, read-only data, initialized RAM, uninitialized RAM/ZP, or unknown.
  */
-export function classifyLabelSegment(segment: string | null | undefined): LabelSegmentCategory {
+export function classifyLabelSegment(
+    segment: string | null | undefined,
+    explicitAddrSize?: SegmentAddrSize
+): LabelSegmentCategory {
     if (!segment) return 'unknown';
-    if (isZeroPageSegmentName(segment)) return 'bss';
+    if (explicitAddrSize === 'zp' || (explicitAddrSize === undefined && isZeroPageSegmentName(segment))) {
+        return 'bss';
+    }
     switch (segment.trim().toUpperCase()) {
         case 'CODE':
             return 'code';
@@ -474,6 +548,7 @@ export class SymbolTable {
     private segmentHistory: Array<{ line: number; segment: string; explicit: boolean }> = [
         { line: 0, segment: 'CODE', explicit: false },
     ];
+    private readonly segmentAddrSizes: Map<string, SegmentAddrSize> = new Map();
 
     public imports: Import[] = [];
     public exports: Export[] = [];
@@ -523,6 +598,16 @@ export class SymbolTable {
         if (this.cachedDefinedEntities !== null) {
             this.cachedDefinedEntities = null;
         }
+    }
+
+    public recordSegmentAddrSize(segment: string, addrSize: SegmentAddrSize): void {
+        if (!segment) return;
+        this.segmentAddrSizes.set(segment, addrSize);
+    }
+
+    public getSegmentAddrSize(segment: string | null | undefined): SegmentAddrSize | undefined {
+        if (!segment) return undefined;
+        return this.segmentAddrSizes.get(segment);
     }
 
     public recordSegmentChange(line: number, segment: string): void {

@@ -3,9 +3,16 @@ dist/
 **/*.vsix
 **/*.tsbuildinfo
 **/*.js.map
-tsconfig.json
+**/tsconfig.json
 
-# Ignore TypeScript source files and tests (compiled JS lives in client/out and server/out)
+# Exclude bundled node_modules and unbundled tsc intermediates (only esbuild entry bundles ship)
+node_modules/**
+client/out/*.js
+!client/out/extension.js
+server/out/*.js
+!server/out/server.js
+
+# Ignore TypeScript source files and tests
 client/src/
 server/src/
 test/
@@ -24,11 +31,3 @@ test/
 .DS_Store
 Thumbs.db
 *.log
-
-# Aggressively clean up packaged dependencies
-**/node_modules/**/*.md
-**/node_modules/**/LICENSE*
-**/node_modules/**/test*
-**/node_modules/**/example*
-**/node_modules/**/.bin
-**/node_modules/**/*.d.ts

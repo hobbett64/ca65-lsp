@@ -39,17 +39,13 @@ function makeLspClient(extraSettings = {}) {
                     const results = items.map((item) => {
                         if (item.section === 'ca65') {
                             return {
-                                enableCa65StdErrDiagnostics: true,
+                                enableStderrDiagnostics: true,
                                 enableUnusedSymbolDiagnostics: false,
-                                includeDirs: ['**/include'],
-                                binIncludeDirs: [],
                                 autoIncludeExtensions: ['.inc', '.s'],
                                 anonymousLabelIndexHints: false,
                                 importFromHints: true,
-                                additionalExtensions: [],
+                                fileExtensions: ['.s', '.asm', '.inc'],
                                 smartFolding: true,
-                                implicitImports: false,
-                                lineContinuations: false,
                                 enableStatusBarCycleCount: true,
                                 ...extraSettings,
                             };
@@ -165,6 +161,41 @@ function makeLspClient(extraSettings = {}) {
         assert(!lst1.error);
         const byLine1 = new Map(lst1.lines.map(l => [l.line, l]));
 
+        const cleanSel = await client.request('ca65/analyzeSelection', {
+            uri: mainUri,
+            range: { start: { line: 6, character: 0 }, end: { line: 7, character: 20 } },
+        });
+        assert.strictEqual(cleanSel.listingStatus, 'ready', 'Clean build should mark listingStatus ready');
+        assert.strictEqual(cleanSel.usedListing, true, 'Clean file should use listing cache for analyzeSelection');
+        assert.strictEqual(cleanSel.uncertainCount, 0);
+        assert.strictEqual(cleanSel.items[1].bytesText, '20 rr rr');
+
+        // Single-line `.byte` and `.res` should surface `lineListing` for bottom status bar hex display
+        const dataLineSel = await client.request('ca65/analyzeSelection', {
+            uri: mainUri,
+            range: { start: { line: 8, character: 0 }, end: { line: 8, character: 20 } },
+        });
+        assert.strictEqual(dataLineSel.instructionCount, 0);
+        assert.strictEqual(dataLineSel.lineListing.bytesText, '01 02 03 04 05 06 07 08');
+        assert.strictEqual(dataLineSel.lineListing.byteCount, 8);
+
+        const resLineSel = await client.request('ca65/analyzeSelection', {
+            uri: mainUri,
+            range: { start: { line: 3, character: 0 }, end: { line: 3, character: 12 } },
+        });
+        assert.strictEqual(resLineSel.instructionCount, 0);
+        assert.strictEqual(resLineSel.lineListing.bytesText, 'res 2B');
+        assert.strictEqual(resLineSel.lineListing.byteCount, 2);
+
+        // Multi-line non-instruction selection (`.byte` + blank/.res) sums emitted listing bytes
+        const multiDataSel = await client.request('ca65/analyzeSelection', {
+            uri: mainUri,
+            range: { start: { line: 2, character: 0 }, end: { line: 4, character: 10 } },
+        });
+        assert.strictEqual(multiDataSel.instructionCount, 0);
+        assert.strictEqual(multiDataSel.lineListing.byteCount, 2);
+        assert.strictEqual(multiDataSel.lineListing.bytesText, 'res 2B');
+
         assert.strictEqual(byLine1.get(3).bytesText, 'res 2B');
         assert.strictEqual(byLine1.get(3).byteCount, 2);
         assert.strictEqual(byLine1.get(6).byteCount, 2);
@@ -192,8 +223,19 @@ function makeLspClient(extraSettings = {}) {
         assert.strictEqual(errLst.source, 'live-lst', 'Should preserve last valid listing on error');
         assert.strictEqual(errLst.stale, true, 'Listing should be marked stale when error occurs');
         assert.strictEqual(errLst.error, true, 'Error flag should be set');
+        assert(Array.isArray(errLst.errors) && errLst.errors.some(e => e.includes('NONEXISTENT_LABEL')),
+            'Should include ca65 error details when stale/error');
         const byLineErr = new Map(errLst.lines.map(l => [l.line, l]));
         assert.strictEqual(byLineErr.get(9).bytesText, '60', 'Preserved last valid line bytes');
+
+        // Stale listing must NOT be used by analyzeSelection for broken buffers; should fall back cleanly to static analysis
+        const errSel = await client.request('ca65/analyzeSelection', {
+            uri: mainUri,
+            range: { start: { line: 6, character: 0 }, end: { line: 7, character: 20 } },
+        });
+        assert.strictEqual(errSel.listingStatus, 'error', 'Broken build should mark listingStatus error');
+        assert.strictEqual(errSel.usedListing, undefined, 'Dirty/broken buffer must fall back to static analysis instead of stale listing');
+        assert.strictEqual(errSel.items.length, 2);
 
         // 4. Fix error -> updates and clears stale/error
         const fixedMainText = mainText.replace('  rts\n', '  nop\n  rts\n');
@@ -215,6 +257,8 @@ function makeLspClient(extraSettings = {}) {
         const badLst = await client.request('ca65/getOverlayData', { uri: badUri });
         assert.strictEqual(badLst.source, 'none');
         assert.strictEqual(badLst.error, true);
+        assert(Array.isArray(badLst.errors) && badLst.errors.some(e => e.includes('NO_SUCH_SYMBOL_EVER')),
+            'Should include ca65 error details for invalid file');
         assert.deepStrictEqual(badLst.lines, []);
 
         console.log('ALL OVERLAY E2E CHECKS PASSED!');

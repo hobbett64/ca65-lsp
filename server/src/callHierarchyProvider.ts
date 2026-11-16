@@ -15,7 +15,7 @@ import { Scope, ScopeKind, Symbol, SymbolTableEntity } from './symbolTable';
 
 function toCallHierarchyItem(entity: SymbolTableEntity): CallHierarchyItem {
     return {
-        kind: getLSPSymbolKind(entity),
+        kind: getLSPSymbolKind(entity, symbolTables),
         name: entity.getQualifiedName(),
         uri: entity.uri,
         range: entity.range,

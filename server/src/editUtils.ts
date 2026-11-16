@@ -1,6 +1,7 @@
 import { Position, Range, TextEdit } from 'vscode-languageserver-types';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { Ca65Settings } from './settings';
+import { stripCommentsInLine } from './documentScanner';
 
 /**
  * Returns the text of a single 0-based line without trailing CR/LF characters.
@@ -52,8 +53,18 @@ class DocumentLineReader {
 function skipCommentBlock(reader: DocumentLineReader): number {
     let top = 0;
     let foundComment = false;
+    let inBlock = false;
     let line: string | undefined;
-    while ((line = reader.getLine(top)) !== undefined && line.trim().startsWith(';')) {
+    while ((line = reader.getLine(top)) !== undefined) {
+        const trimmed = line.trim();
+        if (!inBlock && trimmed.length === 0) {
+            break;
+        }
+        const stripped = stripCommentsInLine(line, inBlock);
+        if (stripped.code.trim().length > 0) {
+            break;
+        }
+        inBlock = stripped.inBlockComment;
         foundComment = true;
         top++;
     }

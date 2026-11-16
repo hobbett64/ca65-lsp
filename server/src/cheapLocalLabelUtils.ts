@@ -1,6 +1,6 @@
 import { Location, Position, Range } from 'vscode-languageserver-types';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { findCommentStart } from './documentScanner';
+import { findCommentStart, isInBlockCommentBeforeLine, stripCommentsInLine } from './documentScanner';
 
 export const CHEAP_LOCAL_BOUNDARY_REGEX = /^\s*(?:[a-zA-Z_.][a-zA-Z0-9_@.]*:(?![:=<>+-])|\.(?:proc|struct|union)\b)/i;
 const CHEAP_LOCAL_DEF_LINE_REGEX = /^\s*(@[a-zA-Z0-9_@.]+):/;
@@ -18,6 +18,28 @@ function extractCodeSlice(text: string, lineStart: number, lineEnd: number): str
     const raw = text.slice(lineStart, end);
     const commentIdx = findCommentStart(raw);
     return commentIdx >= 0 ? raw.slice(0, commentIdx) : raw;
+}
+
+function getRawLineSlice(text: string, lineStart: number, lineEnd: number): string {
+    const end = (lineEnd > lineStart && text.charCodeAt(lineEnd - 1) === 13) ? lineEnd - 1 : lineEnd;
+    return end <= lineStart ? '' : text.slice(lineStart, end);
+}
+
+function extractMaskedCodeAtLine(
+    text: string,
+    document: TextDocument,
+    line: number,
+    lineStart: number,
+    lineEnd: number,
+    hasBlockComments: boolean
+): string {
+    if (!hasBlockComments) {
+        return extractCodeSlice(text, lineStart, lineEnd);
+    }
+    const raw = getRawLineSlice(text, lineStart, lineEnd);
+    if (!raw) return '';
+    const inBlock = isInBlockCommentBeforeLine(document, line, text);
+    return stripCommentsInLine(raw, inBlock).code;
 }
 
 function getLineBounds(text: string, document: TextDocument, line: number): { start: number; end: number } {
@@ -65,16 +87,24 @@ function startsWithCheapLocalDef(text: string, lineStart: number, lineEnd: numbe
 
 function findPreviousBoundaryFromOffset(
     text: string,
+    document: TextDocument,
     startLine: number,
     startLineOffset: number,
-    startLineEnd: number
+    startLineEnd: number,
+    hasBlockComments: boolean
 ): { line: number; startOffset: number; endOffset: number } {
     let line = startLine;
     let lineStart = startLineOffset;
     let lineEnd = startLineEnd;
 
     while (line >= 0) {
-        if (
+        if (hasBlockComments) {
+            const raw = getRawLineSlice(text, lineStart, lineEnd);
+            if ((raw.includes(':') || raw.includes('.'))
+                && CHEAP_LOCAL_BOUNDARY_REGEX.test(extractMaskedCodeAtLine(text, document, line, lineStart, lineEnd, true))) {
+                return { line, startOffset: lineStart, endOffset: lineEnd };
+            }
+        } else if (
             mayBeCheapLocalBoundary(text, lineStart, lineEnd)
             && CHEAP_LOCAL_BOUNDARY_REGEX.test(extractCodeSlice(text, lineStart, lineEnd))
         ) {
@@ -93,10 +123,11 @@ function findPreviousBoundaryFromOffset(
 function getCheapLocalScopeSpan(
     text: string,
     document: TextDocument,
-    line: number
+    line: number,
+    hasBlockComments: boolean
 ): { startLine: number; startOffset: number; startEndOffset: number; endLine: number } {
     const targetBounds = getLineBounds(text, document, line);
-    const boundary = findPreviousBoundaryFromOffset(text, line, targetBounds.start, targetBounds.end);
+    const boundary = findPreviousBoundaryFromOffset(text, document, line, targetBounds.start, targetBounds.end, hasBlockComments);
 
     let startLine: number;
     let startOffset: number;
@@ -116,11 +147,22 @@ function getCheapLocalScopeSpan(
     let endLine = totalLines - 1;
     let curLine = startLine + 1;
     let curStart = startEndOffset + 1;
+    let inBlock = hasBlockComments && curLine < totalLines
+        ? isInBlockCommentBeforeLine(document, curLine, text)
+        : false;
 
     while (curLine < totalLines && curStart <= text.length) {
         const nl = text.indexOf('\n', curStart);
         const curEnd = nl === -1 ? text.length : nl;
-        if (
+        if (hasBlockComments) {
+            const stripped = stripCommentsInLine(getRawLineSlice(text, curStart, curEnd), inBlock);
+            inBlock = stripped.inBlockComment;
+            if ((stripped.code.includes(':') || stripped.code.includes('.'))
+                && CHEAP_LOCAL_BOUNDARY_REGEX.test(stripped.code)) {
+                endLine = curLine - 1;
+                break;
+            }
+        } else if (
             mayBeCheapLocalBoundary(text, curStart, curEnd)
             && CHEAP_LOCAL_BOUNDARY_REGEX.test(extractCodeSlice(text, curStart, curEnd))
         ) {
@@ -142,7 +184,8 @@ export function getCheapLocalScopeEndLine(document: TextDocument, line: number):
     if (line < 0 || line >= document.lineCount) {
         return Math.max(0, document.lineCount - 1);
     }
-    return getCheapLocalScopeSpan(document.getText(), document, line).endLine;
+    const text = document.getText();
+    return getCheapLocalScopeSpan(text, document, line, text.indexOf('/*') !== -1).endLine;
 }
 
 /**
@@ -157,12 +200,13 @@ export function findPreviousCheapLocalBoundary(document: TextDocument, startLine
     }
     const text = document.getText();
     const bounds = getLineBounds(text, document, startLine);
-    return findPreviousBoundaryFromOffset(text, startLine, bounds.start, bounds.end).line;
+    return findPreviousBoundaryFromOffset(text, document, startLine, bounds.start, bounds.end, text.indexOf('/*') !== -1).line;
 }
 
 function findCheapLocalLabelInText(text: string, document: TextDocument, position: Position): string | null {
     const { start, end } = getLineBounds(text, document, position.line);
-    const codeLine = extractCodeSlice(text, start, end);
+    const hasBlockComments = text.indexOf('/*') !== -1;
+    const codeLine = extractMaskedCodeAtLine(text, document, position.line, start, end, hasBlockComments);
     CHEAP_LOCAL_TOKEN_REGEX.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = CHEAP_LOCAL_TOKEN_REGEX.exec(codeLine)) !== null) {
@@ -187,15 +231,24 @@ export function findCheapLocalLabelAtPosition(document: TextDocument, position: 
  */
 export function getCheapLocalLabelDefinitions(document: TextDocument, position: Position): string[] {
     const text = document.getText();
-    const { startLine, startOffset, endLine } = getCheapLocalScopeSpan(text, document, position.line);
+    const hasBlockComments = text.indexOf('/*') !== -1;
+    const { startLine, startOffset, endLine } = getCheapLocalScopeSpan(text, document, position.line, hasBlockComments);
     const labels: string[] = [];
 
     let curLine = startLine;
     let curStart = startOffset;
+    let inBlock = hasBlockComments ? isInBlockCommentBeforeLine(document, startLine, text) : false;
     while (curLine <= endLine) {
         const nl = text.indexOf('\n', curStart);
         const curEnd = nl === -1 ? text.length : nl;
-        if (startsWithCheapLocalDef(text, curStart, curEnd)) {
+        if (hasBlockComments) {
+            const stripped = stripCommentsInLine(getRawLineSlice(text, curStart, curEnd), inBlock);
+            inBlock = stripped.inBlockComment;
+            const match = stripped.code.match(CHEAP_LOCAL_DEF_LINE_REGEX);
+            if (match) {
+                labels.push(match[1]);
+            }
+        } else if (startsWithCheapLocalDef(text, curStart, curEnd)) {
             const match = extractCodeSlice(text, curStart, curEnd).match(CHEAP_LOCAL_DEF_LINE_REGEX);
             if (match) {
                 labels.push(match[1]);
@@ -213,15 +266,24 @@ export function getCheapLocalLabelDefinitions(document: TextDocument, position: 
  */
 export function findCheapLocalLabelDefinition(document: TextDocument, position: Position, name: string): Location | null {
     const text = document.getText();
-    const { startLine, startOffset, endLine } = getCheapLocalScopeSpan(text, document, position.line);
+    const hasBlockComments = text.indexOf('/*') !== -1;
+    const { startLine, startOffset, endLine } = getCheapLocalScopeSpan(text, document, position.line, hasBlockComments);
     const defRegex = CHEAP_LOCAL_DEF_REGEX(name);
 
     let curLine = startLine;
     let curStart = startOffset;
+    let inBlock = hasBlockComments ? isInBlockCommentBeforeLine(document, startLine, text) : false;
     while (curLine <= endLine) {
         const nl = text.indexOf('\n', curStart);
         const curEnd = nl === -1 ? text.length : nl;
-        const codeLine = extractCodeSlice(text, curStart, curEnd);
+        let codeLine: string;
+        if (hasBlockComments) {
+            const stripped = stripCommentsInLine(getRawLineSlice(text, curStart, curEnd), inBlock);
+            inBlock = stripped.inBlockComment;
+            codeLine = stripped.code;
+        } else {
+            codeLine = extractCodeSlice(text, curStart, curEnd);
+        }
         if (defRegex.test(codeLine)) {
             const startChar = codeLine.indexOf(name);
             const endChar = startChar + name.length;
@@ -248,7 +310,8 @@ export function findAllCheapLocalLabelReferences(
         return [];
     }
 
-    const { startLine, startOffset, endLine } = getCheapLocalScopeSpan(text, document, position.line);
+    const hasBlockComments = text.indexOf('/*') !== -1;
+    const { startLine, startOffset, endLine } = getCheapLocalScopeSpan(text, document, position.line, hasBlockComments);
     const defRegex = CHEAP_LOCAL_DEF_REGEX(name);
     const referenceRegex = new RegExp(`(?<![a-zA-Z0-9_@.])${escapeRegExp(name)}(?![a-zA-Z0-9_@.])`, 'g');
 
@@ -257,10 +320,18 @@ export function findAllCheapLocalLabelReferences(
 
     let curLine = startLine;
     let curStart = startOffset;
+    let inBlock = hasBlockComments ? isInBlockCommentBeforeLine(document, startLine, text) : false;
     while (curLine <= endLine) {
         const nl = text.indexOf('\n', curStart);
         const curEnd = nl === -1 ? text.length : nl;
-        const codeLine = extractCodeSlice(text, curStart, curEnd);
+        let codeLine: string;
+        if (hasBlockComments) {
+            const stripped = stripCommentsInLine(getRawLineSlice(text, curStart, curEnd), inBlock);
+            inBlock = stripped.inBlockComment;
+            codeLine = stripped.code;
+        } else {
+            codeLine = extractCodeSlice(text, curStart, curEnd);
+        }
         if (defRegex.test(codeLine)) {
             hasDefinition = true;
         }

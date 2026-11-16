@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-11-16
+### Added
+- Added a shared `ca65 -l` listing cache (`listingCache`) reusing background validation results across diagnostics, the side-by-side hex listing, and the status bar byte/cycle analyzer.
+
+### Changed
+- **Instruction Hovercard & Reference Panel:**
+  - Replaced the Markdown preview with a dedicated, theme-aware `WebviewPanel` (`ca65 Reference`) so clicking **See details** jumps directly to and highlights the target opcode, reuses the open panel across clicks, and supports in-page `#anchor` and `↑ Top` navigation.
+  - Streamlined instruction hovercards to show compact `Affected flags` and badge-styled `Addressing modes` with a **See details** link (while keeping detailed flag/mode tables in completion item resolution).
+  - Normalized instruction titles, addressing modes (`Zero page`, `Direct page`, `Absolute long`, `Stack relative`, etc.), table headers, and prose to consistent sentence case, and made `CLD`/`SED` descriptions platform-neutral.
+- **Listing & Status Bar Polish:**
+  - Unified the status bar counter (`$(file-binary) <bytes> $(clock) <cycles>`) and `Line | Hex | Cycles` tooltip (showing `n/a` for non-instruction lines and disabling click-to-open when assembly fails).
+  - Updated `ca65.showHexListing` to open in the same side split with viewport-synced scrolling, cleaner formatting without `;` prefixes, and live `ca65` stderr errors instead of stale hex when assembly fails.
+
+## [2.2.0] - 2026-11-16
+### Added
+- Full support for C-style block comments (`/* ... */` / `--feature c_comments`) and backslash line continuations (`\` / `--feature line_continuations`) across document scanning, hovers, completions, signature help, comment masking, and instruction cycle analysis.
+- Added **`ca65.fileExtensions`** (prepopulated with `[".s", ".asm", ".inc"]`), **`ca65.cComments`** (`default: true`, auto-skipping if unsupported by your `ca65` executable), and **`ca65.enableStderrDiagnostics`** (`default: true`), with settings reordered into executable, extensions, assembler options, and UX toggles.
+- JSDoc-style `/** ... */` auto-closing, `Enter` expansion and `* ` continuation, `unIndentedLinePattern` alignment rules, and verbatim `ca65` doc-comment rendering across hovers, completions, and signature help (preserving monospace alignment and comment structure).
+- Surfaced un-located `ca65:` CLI error lines (such as invalid flags in `ca65.additionalArgs`) as deduplicated error notifications instead of dropping them silently.
+
+### Changed
+- Defaulted `ca65.lineContinuations` and `ca65.anonymousLabelIndexHints` to `true` (with automatic fallback if your `ca65` executable lacks `--feature line_continuations`), and normalized `ca65.additionalArgs` to explicitly default to `[]` while ignoring `-o`, `-l`, `--listing`, `--create-dep`, and `--create-full-dep`.
+- Deprecated `ca65.enableCa65StdErrDiagnostics` (in favor of `ca65.enableStderrDiagnostics`) and `ca65.additionalExtensions` (in favor of `ca65.fileExtensions`) with full backwards-compatible runtime fallback.
+- Replaced the `glob` dependency tree with a built-in recursive file/directory matcher, bundled extension client/server entry points with `esbuild`, removed unused `package-lsp` scripts, and consolidated the `ca65.dump*` debug commands into `ca65.dumpDebugInfo`.
+
+### Fixed
+- Parsed optional `.segment "NAME": address_size` modifiers (`zeropage`/`zp`/`direct`, `absolute`/`abs`/`near`, `far`, `long`/`dword`) cleanly so custom zero-page and far segments work across segment names/completions, semantic tokens, `.importzp` diagnostics/Quick Fixes, outline icons, and instruction size/cycle estimation.
+- Stopped `.include` directives from overwriting the active segment with synthetic `segment from ...` labels, skipped transparent directives (`.repeat`, `.assert`, `.if`/`.else`/`.endif`, etc.) when inferring post-label kind, and recognized null/newline-terminated `.byte`/`.byt` string lists as string labels.
+- Fixed cross-file `.import`/`.importzp` diagnostic revalidation when an exporter's segment or `.exportzp` changes, `-I` include-directory stderr URI resolution, range-filtered/fallback inlay hints, `cComments`/`lineContinuations` gating in scanner/comment utilities, live `ca65.fileExtensions` watcher/index updates, and typing-time multi-root `ca65` CLI throttling on shared `.inc` edits.
+
 ## [2.1.0] - 2026-11-16
 ### Added
 - **Active Segment Status Bar Indicator** (`ca65.enableStatusBarSegment`): Shows the active segment for the cursor line (tracking `.segment`, `.code`, `.zeropage`, `.rodata`, `.bss`, `.data`, and `.pushseg`/`.popseg`) with click-to-jump navigation to the directive that set it.

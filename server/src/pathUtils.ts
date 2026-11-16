@@ -2,8 +2,217 @@ import * as path from 'path';
 import * as fsSync from 'fs';
 import { URI } from 'vscode-uri';
 import { symbolTables, workspaceFolderUris } from './server';
-import { globSync } from 'glob';
 import * as fs from 'fs/promises';
+
+const IGNORED_WALK_DIRS = new Set(['.git', 'node_modules', 'build', 'dist', 'out']);
+
+function hasGlobMagic(pattern: string): boolean {
+    return /[*?{[]/.test(pattern);
+}
+
+/**
+ * Converts a workspace-relative glob pattern (`**`, `*`, `?`, `{a,b}`, `[...]`) into an anchored RegExp matching `/`-normalized relative paths.
+ */
+export function globPatternToRegExp(pattern: string): RegExp {
+    const normalized = pattern.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '').replace(/^\/+/, '').replace(/\/+$/, '');
+    let out = '^';
+    let i = 0;
+
+    while (i < normalized.length) {
+        if (normalized.startsWith('**/', i)) {
+            out += '(?:.+/)?';
+            i += 3;
+            continue;
+        }
+        if (normalized.startsWith('/**', i) && i + 3 === normalized.length) {
+            out += '(?:/.*)?';
+            i += 3;
+            continue;
+        }
+        if (normalized.startsWith('**', i)) {
+            out += '.*';
+            i += 2;
+            continue;
+        }
+
+        const ch = normalized[i];
+        if (ch === '*') {
+            out += '[^/]*';
+            i++;
+        } else if (ch === '?') {
+            out += '[^/]';
+            i++;
+        } else if (ch === '{') {
+            const closeIdx = normalized.indexOf('}', i + 1);
+            if (closeIdx > i + 1 && !normalized.slice(i + 1, closeIdx).includes('{')) {
+                const parts = normalized.slice(i + 1, closeIdx).split(',').map(part =>
+                    globPatternToRegExp(part).source.slice(1, -1)
+                );
+                out += `(?:${parts.join('|')})`;
+                i = closeIdx + 1;
+                continue;
+            }
+            out += '\\{';
+            i++;
+        } else if (ch === '[') {
+            const closeIdx = normalized.indexOf(']', i + 1);
+            if (closeIdx > i + 1) {
+                let inner = normalized.slice(i + 1, closeIdx);
+                if (inner.startsWith('!')) {
+                    inner = `^${inner.slice(1)}`;
+                }
+                out += `[${inner}]`;
+                i = closeIdx + 1;
+                continue;
+            }
+            out += '\\[';
+            i++;
+        } else if ('.+^$()|\\'.includes(ch)) {
+            out += `\\${ch}`;
+            i++;
+        } else {
+            out += ch;
+            i++;
+        }
+    }
+
+    return new RegExp(`${out}$`);
+}
+
+function buildFileMatcher(patterns: readonly string[]): (relSlashPath: string, entryName: string) => boolean {
+    const extMatches: string[] = [];
+    const regexes: RegExp[] = [];
+
+    for (const pat of patterns) {
+        const trimmed = pat.trim();
+        if (!trimmed) continue;
+        // Fast path for `**/*.ext` or `*.ext`
+        const simpleExt = trimmed.match(/^(?:\*\*\/)?\*(\.[^*/?{}[\]\\]+)$/);
+        if (simpleExt) {
+            extMatches.push(simpleExt[1]);
+        } else {
+            regexes.push(globPatternToRegExp(trimmed));
+        }
+    }
+
+    return (relSlashPath: string, entryName: string): boolean => {
+        for (let i = 0; i < extMatches.length; i++) {
+            if (entryName.endsWith(extMatches[i])) return true;
+        }
+        for (let i = 0; i < regexes.length; i++) {
+            if (regexes[i].test(relSlashPath)) return true;
+        }
+        return false;
+    };
+}
+
+/**
+ * Walks `rootDir` (skipping `.git`, `node_modules`, `build`, `dist`, `out`) and returns relative paths matching `patterns`.
+ */
+export async function findMatchingFiles(rootDir: string, patterns: readonly string[]): Promise<string[]> {
+    if (patterns.length === 0) return [];
+    const matches = buildFileMatcher(patterns);
+    const results: string[] = [];
+    const visitedRealDirs = new Set<string>();
+
+    const walk = async (absDir: string, relDirSlash: string): Promise<void> => {
+        let realDir: string;
+        try {
+            realDir = await fs.realpath(absDir);
+        } catch {
+            return;
+        }
+        if (visitedRealDirs.has(realDir)) return;
+        visitedRealDirs.add(realDir);
+
+        let entries: fsSync.Dirent[];
+        try {
+            entries = await fs.readdir(absDir, { withFileTypes: true });
+        } catch {
+            return;
+        }
+
+        const subdirs: Array<{ abs: string; relSlash: string }> = [];
+        for (const entry of entries) {
+            if (IGNORED_WALK_DIRS.has(entry.name)) continue;
+
+            let isDir = entry.isDirectory();
+            let isFile = entry.isFile();
+            if (!isDir && !isFile && entry.isSymbolicLink()) {
+                try {
+                    const st = await fs.stat(path.join(absDir, entry.name));
+                    isDir = st.isDirectory();
+                    isFile = st.isFile();
+                } catch {
+                    continue;
+                }
+            }
+
+            const relSlash = relDirSlash ? `${relDirSlash}/${entry.name}` : entry.name;
+            if (isDir) {
+                subdirs.push({ abs: path.join(absDir, entry.name), relSlash });
+            } else if (isFile && matches(relSlash, entry.name)) {
+                results.push(path.sep === '/' ? relSlash : relSlash.replace(/\//g, path.sep));
+            }
+        }
+
+        for (const sub of subdirs) {
+            await walk(sub.abs, sub.relSlash);
+        }
+    };
+
+    await walk(rootDir, '');
+    return results;
+}
+
+function findMatchingDirsSync(rootDir: string, patterns: readonly string[]): string[] {
+    if (patterns.length === 0) return [];
+    const regexes = patterns.map(globPatternToRegExp);
+    const results: string[] = [];
+    const visitedRealDirs = new Set<string>();
+
+    const walkSync = (absDir: string, relDirSlash: string): void => {
+        let realDir: string;
+        try {
+            realDir = fsSync.realpathSync(absDir);
+        } catch {
+            return;
+        }
+        if (visitedRealDirs.has(realDir)) return;
+        visitedRealDirs.add(realDir);
+
+        let entries: fsSync.Dirent[];
+        try {
+            entries = fsSync.readdirSync(absDir, { withFileTypes: true });
+        } catch {
+            return;
+        }
+
+        for (const entry of entries) {
+            if (IGNORED_WALK_DIRS.has(entry.name)) continue;
+
+            const absEntry = path.join(absDir, entry.name);
+            let isDir = entry.isDirectory();
+            if (!isDir && entry.isSymbolicLink()) {
+                try {
+                    isDir = fsSync.statSync(absEntry).isDirectory();
+                } catch {
+                    continue;
+                }
+            }
+            if (!isDir) continue;
+
+            const relSlash = relDirSlash ? `${relDirSlash}/${entry.name}` : entry.name;
+            if (regexes.some(re => re.test(relSlash))) {
+                results.push(absEntry);
+            }
+            walkSync(absEntry, relSlash);
+        }
+    };
+
+    walkSync(rootDir, '');
+    return results;
+}
 
 const MAX_URI_CACHE_SIZE = 4096;
 
@@ -149,27 +358,26 @@ export function resolveWorkspaceRelativeDirs(
     }
 
     const resolvedPaths: string[] = [];
+    const globPatterns: string[] = [];
 
     for (const dirPattern of relativeDirs) {
-        if (!dirPattern.includes('*') && !dirPattern.includes('?') && !dirPattern.includes('{') && !dirPattern.includes('[')) {
+        if (!hasGlobMagic(dirPattern)) {
             const candidate = path.resolve(workspaceRoot, dirPattern);
             if (fsSync.existsSync(candidate)) {
                 resolvedPaths.push(candidate);
             }
             continue;
         }
-
-        const expandedDirs = globSync(dirPattern, {
-            cwd: workspaceRoot,
-            absolute: true,
-            nodir: false,
-            ignore: ['**/.git/**', '**/node_modules/**', '**/build/**', '**/dist/**', '**/out/**']
-        });
-        resolvedPaths.push(...expandedDirs);
+        globPatterns.push(dirPattern);
     }
 
-    resolvedDirsCache.set(cacheKey, resolvedPaths);
-    return resolvedPaths;
+    if (globPatterns.length > 0) {
+        resolvedPaths.push(...findMatchingDirsSync(workspaceRoot, globPatterns));
+    }
+
+    const uniquePaths = Array.from(new Set(resolvedPaths));
+    resolvedDirsCache.set(cacheKey, uniquePaths);
+    return uniquePaths;
 }
 
 export function getSearchDirectories(

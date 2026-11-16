@@ -1,6 +1,7 @@
 import { Location, Position, Range } from 'vscode-languageserver-types';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { symbolTables } from './server';
+import { maskCommentsAtDocumentLine, maskQuotedLiterals } from './documentScanner';
 
 /**
  * Finds the definition location for an anonymous label reference.
@@ -20,7 +21,8 @@ export function getAnonymousLabelDefinition(
     const defLine = symbolTable.anonymousLabelLines[index]
     if (defLine === undefined) return null;
 
-    const defPos = document.getText(Range.create(defLine, 0, defLine + 1, 0)).indexOf(':');
+    const defPos = maskCommentsAtDocumentLine(document, defLine).indexOf(':');
+    if (defPos < 0) return null;
     return Location.create(
         document.uri,
         Range.create(
@@ -71,7 +73,7 @@ export function getAnonymousLabelIndex(
     document: TextDocument,
     position: Position,
 ): number | undefined {
-    const text = document.getText(Range.create(position.line, 0, position.line + 1, 0));
+    const text = maskCommentsAtDocumentLine(document, position.line);
     const symbolTable = symbolTables.get(document.uri);
     if (!symbolTable) return undefined;
 
@@ -86,8 +88,9 @@ export function getAnonymousLabelIndex(
     }
 
     let match;
+    const maskedText = maskQuotedLiterals(text);
     const anonRefRegex = /:([-+<>]+)/g;
-    while ((match = anonRefRegex.exec(text)) !== null) {
+    while ((match = anonRefRegex.exec(maskedText)) !== null) {
         const refText = match[0];
         if (position.character < match.index
             || position.character > match.index + refText.length) {

@@ -1,8 +1,20 @@
+import * as path from 'path';
 import { _Connection, TextDocuments } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { assembleTranslationUnit } from './diagnostics';
+import { assembleTranslationUnit, Ca65AssembleResult } from './diagnostics';
 import { getCachedTextDocument } from './documentCache';
-import { LstLineInfo, parseLstContent } from './lstParser';
+import {
+    clearLstCache,
+    collectRootTuUris,
+    computeTuSignature,
+    getCachedLstEntry,
+    getOrParseLstByUri,
+    invalidateLstSignatures,
+    storeFailedLstAttempt,
+    storeValidLstEntry,
+    ValidLstCacheEntry,
+} from './listingCache';
+import { formatListingAddressLabel, LstLineInfo, normalizeListingBytesText } from './lstParser';
 import { resolveWorkspaceRelativeDirs } from './pathUtils';
 import {
     ensureDocumentRefreshed,
@@ -11,7 +23,6 @@ import {
     initializationGate,
     performanceMonitor,
 } from './server';
-import { Ca65Settings, normalizeCpu } from './settings';
 
 export type OverlaySourceKind = 'live-lst' | 'none';
 
@@ -26,82 +37,75 @@ export interface OverlayDataResponse {
     source: OverlaySourceKind;
     stale?: boolean;
     error?: boolean;
+    errors?: string[];
     lines: OverlayLineItem[];
 }
 
-interface ValidLstCacheEntry {
-    signature: string;
-    byUri: Map<string, Map<number, LstLineInfo>>;
-    mappedByUri: Map<string, OverlayLineItem[]>;
+const MAX_OVERLAY_ERROR_LINES = 50;
+
+function formatOverlayErrors(assembled: Ca65AssembleResult | null): string[] | undefined {
+    if (!assembled?.hasErrors || !assembled.stderr) return undefined;
+    const lines: string[] = [];
+    const shadowFwd = assembled.shadowDir ? `${assembled.shadowDir.replace(/\\/g, '/')}/` : undefined;
+    const shadowNative = assembled.shadowDir ? `${assembled.shadowDir}${path.sep}` : undefined;
+
+    for (const rawLine of assembled.stderr.split(/\r?\n/)) {
+        let line = rawLine.trimEnd();
+        if (!line) continue;
+        if (shadowNative) {
+            line = line.split(shadowNative).join('');
+        }
+        if (shadowFwd && shadowFwd !== shadowNative) {
+            line = line.split(shadowFwd).join('');
+        }
+        lines.push(line);
+        if (lines.length >= MAX_OVERLAY_ERROR_LINES) {
+            lines.push('…');
+            break;
+        }
+    }
+    return lines.length > 0 ? lines : undefined;
 }
 
+const mappedOverlayCache = new WeakMap<ValidLstCacheEntry, Map<string, OverlayLineItem[]>>();
+
 function getMappedOverlayLines(entry: ValidLstCacheEntry, uri: string): OverlayLineItem[] {
-    let mapped = entry.mappedByUri.get(uri);
+    let perEntry = mappedOverlayCache.get(entry);
+    if (!perEntry) {
+        perEntry = new Map<string, OverlayLineItem[]>();
+        mappedOverlayCache.set(entry, perEntry);
+    }
+    let mapped = perEntry.get(uri);
     if (!mapped) {
-        const lstLines = entry.byUri.get(uri);
+        const lstLines = getOrParseLstByUri(entry).get(uri);
         mapped = lstLines ? mapLstLinesToOverlay(lstLines) : [];
-        entry.mappedByUri.set(uri, mapped);
+        perEntry.set(uri, mapped);
     }
     return mapped;
 }
 
-const lastValidLstCache = new Map<string, ValidLstCacheEntry>();
 const activeOverlayControllers = new Map<string, AbortController>();
 
 export function clearOverlayCaches(): void {
-    lastValidLstCache.clear();
+    clearLstCache();
 }
 
 export function invalidateOverlaySignatures(): void {
-    for (const entry of lastValidLstCache.values()) {
-        entry.signature = '';
-    }
-}
-
-function formatHexAddr(addr: number): string {
-    const width = addr <= 0xFF ? 2 : 4;
-    return '$' + (addr >>> 0).toString(16).toUpperCase().padStart(width, '0');
-}
-
-function normalizeListingBytesText(bytesText: string, byteCount: number): string | undefined {
-    if (!bytesText) return undefined;
-    if (/^xx(?:\s+xx)*$/i.test(bytesText.trim())) {
-        return `res ${byteCount}B`;
-    }
-    return bytesText;
+    invalidateLstSignatures();
 }
 
 function mapLstLinesToOverlay(lstLines: Map<number, LstLineInfo>): OverlayLineItem[] {
     const items: OverlayLineItem[] = [];
     for (const entry of lstLines.values()) {
-        const addrText = formatHexAddr(entry.offset);
         items.push({
             line: entry.line,
-            addressLabel: entry.isRelocatable ? `+${addrText}r` : addrText,
+            addressLabel: formatListingAddressLabel(entry),
             bytesText: normalizeListingBytesText(entry.bytesText, entry.byteCount),
             byteCount: entry.byteCount,
         });
     }
     items.sort((a, b) => a.line - b.line);
     return items;
-}
-
-function getTuSignature(
-    rootUri: string,
-    tuUris: Iterable<string>,
-    documents: TextDocuments<TextDocument>,
-    settings: Ca65Settings | null | undefined
-): string {
-    const docVersions: string[] = [];
-    for (const uri of Array.from(tuUris).sort()) {
-        const openDoc = documents.get(uri);
-        docVersions.push(`${uri}@${openDoc ? openDoc.version : 'disk'}`);
-    }
-    const cpuKey = normalizeCpu(settings?.cpu);
-    const includeDirsKey = Array.isArray(settings?.includeDirs) ? settings.includeDirs.join(',') : '';
-    const binIncludeDirsKey = Array.isArray(settings?.binIncludeDirs) ? settings.binIncludeDirs.join(',') : '';
-    const additionalArgsKey = Array.isArray(settings?.additionalArgs) ? settings.additionalArgs.join(' ') : '';
-    return `${rootUri}|${cpuKey}|${Boolean(settings?.implicitImports)}|${Boolean(settings?.lineContinuations)}|${includeDirsKey}|${binIncludeDirsKey}|${additionalArgsKey}|${docVersions.join(';')}`;
 }
 
 export function initializeOverlayProvider(connection: _Connection, documents: TextDocuments<TextDocument>): void {
@@ -120,17 +124,14 @@ export function initializeOverlayProvider(connection: _Connection, documents: Te
 
         try {
             return await performanceMonitor.timeAsync('getOverlayData', async () => {
-                const settings = await getDocumentSettings(targetUri);
-                if (signal.aborted) return { source: 'none', lines: [] };
-
                 const roots = includesGraph.getIncludingRootsArray(targetUri);
                 const rootUri = roots[0] ?? targetUri;
-                const tuUris = new Set<string>(includesGraph.getTranslationUnitSet(targetUri));
-                tuUris.add(targetUri);
-                tuUris.add(rootUri);
+                const settings = await getDocumentSettings(rootUri);
+                if (signal.aborted) return { source: 'none', lines: [] };
 
-                const signature = getTuSignature(rootUri, tuUris, documents, settings);
-                const cached = lastValidLstCache.get(rootUri);
+                const tuUris = collectRootTuUris(rootUri, includesGraph, rootUri === targetUri ? undefined : targetUri);
+                const signature = computeTuSignature(rootUri, tuUris, documents, settings);
+                const cached = getCachedLstEntry(rootUri);
                 if (cached && cached.signature === signature) {
                     return {
                         source: 'live-lst',
@@ -151,14 +152,14 @@ export function initializeOverlayProvider(connection: _Connection, documents: Te
                 if (signal.aborted) return { source: 'none', lines: [] };
 
                 if (assembled && !assembled.hasErrors && assembled.listingContent) {
-                    const includeDirs = resolveWorkspaceRelativeDirs(rootUri, settings?.includeDirs);
-                    const byUri = parseLstContent(assembled.listingContent, rootUri, includeDirs);
-                    const newEntry: ValidLstCacheEntry = {
-                        signature,
-                        byUri,
-                        mappedByUri: new Map(),
-                    };
-                    lastValidLstCache.set(rootUri, newEntry);
+                    const includeDirs = assembled.resolvedIncludeDirs
+                        ?? resolveWorkspaceRelativeDirs(rootUri, settings?.includeDirs);
+                    const newEntry = storeValidLstEntry(
+                        rootUri,
+                        assembled.tuSignature || signature,
+                        includeDirs,
+                        assembled.listingContent
+                    );
                     return {
                         source: 'live-lst',
                         stale: false,
@@ -166,13 +167,18 @@ export function initializeOverlayProvider(connection: _Connection, documents: Te
                     };
                 }
 
-                // Assembly failed or ca65 was unavailable: keep last valid output marked stale if available.
+                // Assembly failed or ca65 was unavailable: surface error details (and keep last valid lines on server if available).
                 const hasErrors = Boolean(assembled?.hasErrors);
+                if (hasErrors && (assembled?.tuSignature || signature)) {
+                    storeFailedLstAttempt(rootUri, assembled?.tuSignature || signature);
+                }
+                const errors = formatOverlayErrors(assembled);
                 if (cached) {
                     return {
                         source: 'live-lst',
                         stale: true,
                         error: hasErrors,
+                        errors,
                         lines: getMappedOverlayLines(cached, targetUri),
                     };
                 }
@@ -180,6 +186,7 @@ export function initializeOverlayProvider(connection: _Connection, documents: Te
                 return {
                     source: 'none',
                     error: hasErrors,
+                    errors,
                     lines: [],
                 };
             });

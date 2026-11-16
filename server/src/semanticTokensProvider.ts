@@ -18,10 +18,12 @@ import {
     classifyLabelSegment,
     Macro,
     MacroKind,
+    resolveSegmentAddrSize,
     Scope,
     ScopeKind,
     Symbol as Ca65Symbol,
     SymbolKind as Ca65SymbolKind,
+    SymbolTable,
     SymbolTableEntity,
 } from './symbolTable';
 import { resolveReference } from './symbolResolver';
@@ -69,7 +71,8 @@ interface RawSemanticToken {
 
 function classifyEntity(
     entity: SymbolTableEntity,
-    isDeclaration: boolean
+    isDeclaration: boolean,
+    fallbackTable?: SymbolTable
 ): { tokenType: number; tokenModifiers: number } | null {
     const declFlag = isDeclaration ? MOD_DECLARATION : 0;
 
@@ -119,15 +122,23 @@ function classifyEntity(
                 };
             case Ca65SymbolKind.DataLabel:
             case Ca65SymbolKind.StringLabel: {
-                const segCat = classifyLabelSegment(entity.segment);
+                const ownerTable = symbolTables.get(entity.uri) ?? fallbackTable;
+                const segCat = classifyLabelSegment(
+                    entity.segment,
+                    resolveSegmentAddrSize(entity.segment, ownerTable, symbolTables)
+                );
                 const readonlyFlag = segCat === 'data' || segCat === 'bss' ? 0 : MOD_READONLY;
                 return {
                     tokenType: TOKEN_TYPE_INDEX[SemanticTokenTypes.variable],
                     tokenModifiers: declFlag | readonlyFlag,
                 };
             }
-            case Ca65SymbolKind.Label:
-                switch (classifyLabelSegment(entity.segment)) {
+            case Ca65SymbolKind.Label: {
+                const ownerTable = symbolTables.get(entity.uri) ?? fallbackTable;
+                switch (classifyLabelSegment(
+                    entity.segment,
+                    resolveSegmentAddrSize(entity.segment, ownerTable, symbolTables)
+                )) {
                     case 'code':
                         return {
                             tokenType: TOKEN_TYPE_INDEX[SemanticTokenTypes.function],
@@ -147,6 +158,7 @@ function classifyEntity(
                     default:
                         return null;
                 }
+            }
         }
     }
 
@@ -168,7 +180,7 @@ export async function computeSemanticTokens(uri: string): Promise<SemanticTokens
         if (def.start.line !== def.end.line || def.end.character <= def.start.character) {
             continue;
         }
-        const classified = classifyEntity(entity, true);
+        const classified = classifyEntity(entity, true, symbolTable);
         if (!classified) continue;
 
         tokens.push({
@@ -193,7 +205,7 @@ export async function computeSemanticTokens(uri: string): Promise<SemanticTokens
         );
         if (!resolved || resolved instanceof Array) continue;
 
-        const classified = classifyEntity(resolved, false);
+        const classified = classifyEntity(resolved, false, symbolTable);
         if (!classified) continue;
 
         tokens.push({

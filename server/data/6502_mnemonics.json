@@ -1,13 +1,13 @@
 {
   "ADC": {
-    "fullName": "Add with Carry",
+    "fullName": "Add with carry",
     "description": "Adds a value from memory and the *carry flag* to the *accumulator*. This is used for multi-byte addition.",
     "note": "The *carry flag* should be cleared with **`clc`** before adding the first byte in a sequence.",
     "seeAlso": ["SBC", "CLC"],
     "modes": {
       "Immediate": { "opcode": "69", "bytes": 2, "cycles": 2 },
-      "Zero Page": { "opcode": "65", "bytes": 2, "cycles": 3 },
-      "Zero Page, X": { "opcode": "75", "bytes": 2, "cycles": 4 },
+      "Zero page": { "opcode": "65", "bytes": 2, "cycles": 3 },
+      "Zero page, X": { "opcode": "75", "bytes": 2, "cycles": 4 },
       "Absolute": { "opcode": "6D", "bytes": 3, "cycles": 4 },
       "Absolute, X": { "opcode": "7D", "bytes": 3, "cycles": 4, "pagePenalty": true },
       "Absolute, Y": { "opcode": "79", "bytes": 3, "cycles": 4, "pagePenalty": true },
@@ -27,8 +27,8 @@
     "seeAlso": ["ORA", "EOR"],
     "modes": {
       "Immediate": { "opcode": "29", "bytes": 2, "cycles": 2 },
-      "Zero Page": { "opcode": "25", "bytes": 2, "cycles": 3 },
-      "Zero Page, X": { "opcode": "35", "bytes": 2, "cycles": 4 },
+      "Zero page": { "opcode": "25", "bytes": 2, "cycles": 3 },
+      "Zero page, X": { "opcode": "35", "bytes": 2, "cycles": 4 },
       "Absolute": { "opcode": "2D", "bytes": 3, "cycles": 4 },
       "Absolute, X": { "opcode": "3D", "bytes": 3, "cycles": 4, "pagePenalty": true },
       "Absolute, Y": { "opcode": "39", "bytes": 3, "cycles": 4, "pagePenalty": true },
@@ -41,14 +41,14 @@
     }
   },
   "ASL": {
-    "fullName": "Arithmetic Shift Left",
+    "fullName": "Arithmetic shift left",
     "description": "Shifts all bits of the target operand one position to the left. This is equivalent to multiplying by 2.",
     "note": "Performs a dummy write of the original value before the final write. This can cause side effects on hardware registers.",
     "seeAlso": ["LSR", "ROL", "ROR"],
     "modes": {
       "Accumulator": { "opcode": "0A", "bytes": 1, "cycles": 2 },
-      "Zero Page": { "opcode": "06", "bytes": 2, "cycles": 5 },
-      "Zero Page, X": { "opcode": "16", "bytes": 2, "cycles": 6 },
+      "Zero page": { "opcode": "06", "bytes": 2, "cycles": 5 },
+      "Zero page, X": { "opcode": "16", "bytes": 2, "cycles": 6 },
       "Absolute": { "opcode": "0E", "bytes": 3, "cycles": 6 },
       "Absolute, X": { "opcode": "1E", "bytes": 3, "cycles": 7 }
     },
@@ -59,8 +59,8 @@
     }
   },
   "BCC": {
-    "fullName": "Branch if Carry Clear",
-    "description": "Branches if the **C** flag is clear (**C**=0). Also known as Branch if Less Than (BLT).",
+    "fullName": "Branch if carry clear",
+    "description": "Branches if the **C** flag is clear (**C**=0). Also known as branch if less than (BLT).",
     "seeAlso": ["BCS", "JMP"],
     "modes": {
       "Relative": { "opcode": "90", "bytes": 2, "cycles": 2, "branchPenalty": true, "pagePenalty": true }
@@ -68,8 +68,8 @@
     "flagChanges": {}
   },
   "BCS": {
-    "fullName": "Branch if Carry Set",
-    "description": "Branches if the **C** flag is set (**C**=1). Also known as Branch if Greater Than or Equal (BGE).",
+    "fullName": "Branch if carry set",
+    "description": "Branches if the **C** flag is set (**C**=1). Also known as branch if greater than or equal (BGE).",
     "seeAlso": ["BCC", "JMP"],
     "modes": {
       "Relative": { "opcode": "B0", "bytes": 2, "cycles": 2, "branchPenalty": true, "pagePenalty": true }
@@ -77,7 +77,7 @@
     "flagChanges": {}
   },
   "BEQ": {
-    "fullName": "Branch if Equal",
+    "fullName": "Branch if equal",
     "description": "Branches if the **Z** flag is set (**Z**=1).",
     "seeAlso": ["BNE", "JMP"],
     "modes": {
@@ -86,11 +86,11 @@
     "flagChanges": {}
   },
   "BIT": {
-    "fullName": "Bit Test",
+    "fullName": "Bit test",
     "description": "Performs a bitwise AND with the *accumulator* to set flags, but does not store the result. Also copies bits 7 and 6 of the memory value into the **N** and **V** flags.",
     "seeAlso": ["AND"],
     "modes": {
-      "Zero Page": { "opcode": "24", "bytes": 2, "cycles": 3 },
+      "Zero page": { "opcode": "24", "bytes": 2, "cycles": 3 },
       "Absolute": { "opcode": "2C", "bytes": 3, "cycles": 4 }
     },
     "flagChanges": {
@@ -100,7 +100,7 @@
     }
   },
   "BMI": {
-    "fullName": "Branch if Minus",
+    "fullName": "Branch if minus",
     "description": "Branches if the **N** flag is set (**N**=1).",
     "seeAlso": ["BPL", "JMP"],
     "modes": {
@@ -109,7 +109,7 @@
     "flagChanges": {}
   },
   "BNE": {
-    "fullName": "Branch if Not Equal",
+    "fullName": "Branch if not equal",
     "description": "Branches if the **Z** flag is clear (**Z**=0).",
     "seeAlso": ["BEQ", "JMP"],
     "modes": {
@@ -118,7 +118,7 @@
     "flagChanges": {}
   },
   "BPL": {
-    "fullName": "Branch if Plus",
+    "fullName": "Branch if plus",
     "description": "Branches if the **N** flag is clear (**N**=0).",
     "seeAlso": ["BMI", "JMP"],
     "modes": {
@@ -127,7 +127,7 @@
     "flagChanges": {}
   },
   "BRK": {
-    "fullName": "Break (Software Interrupt)",
+    "fullName": "Break (software interrupt)",
     "description": "Forces a software interrupt, pushing the *program counter* and *status register* to the stack before jumping to the IRQ handler address (`$FFFE`).",
     "warning": "A simultaneous NMI (Non-Maskable Interrupt) will override this instruction, causing the intended interrupt handler to be skipped.",
     "seeAlso": ["RTI", "PHP"],
@@ -140,7 +140,7 @@
     }
   },
   "BVC": {
-    "fullName": "Branch if Overflow Clear",
+    "fullName": "Branch if overflow clear",
     "description": "Branches if the **V** flag is clear (**V**=0).",
     "seeAlso": ["BVS", "JMP"],
     "modes": {
@@ -149,7 +149,7 @@
     "flagChanges": {}
   },
   "BVS": {
-    "fullName": "Branch if Overflow Set",
+    "fullName": "Branch if overflow set",
     "description": "Branches if the **V** flag is set (**V**=1).",
     "seeAlso": ["BVC", "JMP"],
     "modes": {
@@ -158,7 +158,7 @@
     "flagChanges": {}
   },
   "CLC": {
-    "fullName": "Clear Carry",
+    "fullName": "Clear carry",
     "description": "Clears the **C** flag.",
     "seeAlso": ["SEC"],
     "modes": {
@@ -169,8 +169,8 @@
     }
   },
   "CLD": {
-    "fullName": "Clear Decimal",
-    "description": "Clears the **D** flag. The NES CPU does not support decimal mode, but the flag itself can still be set and cleared.",
+    "fullName": "Clear decimal",
+    "description": "Clears the **D** flag, disabling Binary Coded Decimal (BCD) mode for arithmetic instructions.",
     "seeAlso": ["SED"],
     "modes": {
       "Implied": { "opcode": "D8", "bytes": 1, "cycles": 2 }
@@ -180,7 +180,7 @@
     }
   },
   "CLI": {
-    "fullName": "Clear Interrupt Disable",
+    "fullName": "Clear interrupt disable",
     "description": "Clears the **I** flag, allowing the CPU to respond to hardware interrupts (IRQs).",
     "note": "The change to the **I** flag is delayed by one instruction.",
     "seeAlso": ["SEI"],
@@ -192,7 +192,7 @@
     }
   },
   "CLV": {
-    "fullName": "Clear Overflow",
+    "fullName": "Clear overflow",
     "description": "Clears the **V** flag.",
     "seeAlso": [],
     "modes": {
@@ -203,13 +203,13 @@
     }
   },
   "CMP": {
-    "fullName": "Compare Accumulator",
+    "fullName": "Compare accumulator",
     "description": "Compares the *accumulator* with a value from memory. This is done by subtraction, but the result is not stored. It only affects flags.",
     "seeAlso": ["CPX", "CPY"],
     "modes": {
       "Immediate": { "opcode": "C9", "bytes": 2, "cycles": 2 },
-      "Zero Page": { "opcode": "C5", "bytes": 2, "cycles": 3 },
-      "Zero Page, X": { "opcode": "D5", "bytes": 2, "cycles": 4 },
+      "Zero page": { "opcode": "C5", "bytes": 2, "cycles": 3 },
+      "Zero page, X": { "opcode": "D5", "bytes": 2, "cycles": 4 },
       "Absolute": { "opcode": "CD", "bytes": 3, "cycles": 4 },
       "Absolute, X": { "opcode": "DD", "bytes": 3, "cycles": 4, "pagePenalty": true },
       "Absolute, Y": { "opcode": "D9", "bytes": 3, "cycles": 4, "pagePenalty": true },
@@ -223,12 +223,12 @@
     }
   },
   "CPX": {
-    "fullName": "Compare X Register",
+    "fullName": "Compare X register",
     "description": "Compares the *X register* with a value from memory. This is done by subtraction, but the result is not stored. It only affects flags.",
     "seeAlso": ["CMP", "CPY"],
     "modes": {
       "Immediate": { "opcode": "E0", "bytes": 2, "cycles": 2 },
-      "Zero Page": { "opcode": "E4", "bytes": 2, "cycles": 3 },
+      "Zero page": { "opcode": "E4", "bytes": 2, "cycles": 3 },
       "Absolute": { "opcode": "EC", "bytes": 3, "cycles": 4 }
     },
     "flagChanges": {
@@ -238,12 +238,12 @@
     }
   },
   "CPY": {
-    "fullName": "Compare Y Register",
+    "fullName": "Compare Y register",
     "description": "Compares the *Y register* with a value from memory. This is done by subtraction, but the result is not stored. It only affects flags.",
     "seeAlso": ["CMP", "CPX"],
     "modes": {
       "Immediate": { "opcode": "C0", "bytes": 2, "cycles": 2 },
-      "Zero Page": { "opcode": "C4", "bytes": 2, "cycles": 3 },
+      "Zero page": { "opcode": "C4", "bytes": 2, "cycles": 3 },
       "Absolute": { "opcode": "CC", "bytes": 3, "cycles": 4 }
     },
     "flagChanges": {
@@ -253,13 +253,13 @@
     }
   },
   "DEC": {
-    "fullName": "Decrement Memory",
+    "fullName": "Decrement memory",
     "description": "Subtracts one from a value in memory.",
     "note": "Performs a dummy write of the original value before the final write. This can cause side effects on hardware registers.",
     "seeAlso": ["INC", "ADC", "SBC"],
     "modes": {
-      "Zero Page": { "opcode": "C6", "bytes": 2, "cycles": 5 },
-      "Zero Page, X": { "opcode": "D6", "bytes": 2, "cycles": 6 },
+      "Zero page": { "opcode": "C6", "bytes": 2, "cycles": 5 },
+      "Zero page, X": { "opcode": "D6", "bytes": 2, "cycles": 6 },
       "Absolute": { "opcode": "CE", "bytes": 3, "cycles": 6 },
       "Absolute, X": { "opcode": "DE", "bytes": 3, "cycles": 7 }
     },
@@ -269,7 +269,7 @@
     }
   },
   "DEX": {
-    "fullName": "Decrement X Register",
+    "fullName": "Decrement X register",
     "description": "Subtracts one from the *X register*.",
     "seeAlso": ["INX"],
     "modes": {
@@ -281,7 +281,7 @@
     }
   },
   "DEY": {
-    "fullName": "Decrement Y Register",
+    "fullName": "Decrement Y register",
     "description": "Subtracts one from the *Y register*.",
     "seeAlso": ["INY"],
     "modes": {
@@ -293,13 +293,13 @@
     }
   },
   "EOR": {
-    "fullName": "Bitwise Exclusive OR",
+    "fullName": "Bitwise exclusive OR",
     "description": "Performs a bitwise XOR on the *accumulator* with a value from memory. This is commonly used to flip specific bits.",
     "seeAlso": ["AND", "ORA"],
     "modes": {
       "Immediate": { "opcode": "49", "bytes": 2, "cycles": 2 },
-      "Zero Page": { "opcode": "45", "bytes": 2, "cycles": 3 },
-      "Zero Page, X": { "opcode": "55", "bytes": 2, "cycles": 4 },
+      "Zero page": { "opcode": "45", "bytes": 2, "cycles": 3 },
+      "Zero page, X": { "opcode": "55", "bytes": 2, "cycles": 4 },
       "Absolute": { "opcode": "4D", "bytes": 3, "cycles": 4 },
       "Absolute, X": { "opcode": "5D", "bytes": 3, "cycles": 4, "pagePenalty": true },
       "Absolute, Y": { "opcode": "59", "bytes": 3, "cycles": 4, "pagePenalty": true },
@@ -312,13 +312,13 @@
     }
   },
   "INC": {
-    "fullName": "Increment Memory",
+    "fullName": "Increment memory",
     "description": "Adds one to a value in memory.",
     "note": "Performs a dummy write of the original value before the final write. This can cause side effects on hardware registers.",
     "seeAlso": ["DEC", "ADC", "SBC"],
     "modes": {
-      "Zero Page": { "opcode": "E6", "bytes": 2, "cycles": 5 },
-      "Zero Page, X": { "opcode": "F6", "bytes": 2, "cycles": 6 },
+      "Zero page": { "opcode": "E6", "bytes": 2, "cycles": 5 },
+      "Zero page, X": { "opcode": "F6", "bytes": 2, "cycles": 6 },
       "Absolute": { "opcode": "EE", "bytes": 3, "cycles": 6 },
       "Absolute, X": { "opcode": "FE", "bytes": 3, "cycles": 7 }
     },
@@ -328,7 +328,7 @@
     }
   },
   "INX": {
-    "fullName": "Increment X Register",
+    "fullName": "Increment X register",
     "description": "Adds one to the *X register*.",
     "seeAlso": ["DEX"],
     "modes": {
@@ -340,7 +340,7 @@
     }
   },
   "INY": {
-    "fullName": "Increment Y Register",
+    "fullName": "Increment Y register",
     "description": "Adds one to the *Y register*.",
     "seeAlso": ["DEY"],
     "modes": {
@@ -363,7 +363,7 @@
     "flagChanges": {}
   },
   "JSR": {
-    "fullName": "Jump to Subroutine",
+    "fullName": "Jump to subroutine",
     "description": "Pushes the return address to the stack, then jumps to a new address.",
     "note": "Pushes the address of the final byte of the instruction. **`rts`** increments this value before returning.",
     "seeAlso": ["RTS", "JMP", "RTI"],
@@ -373,13 +373,13 @@
     "flagChanges": {}
   },
   "LDA": {
-    "fullName": "Load Accumulator",
+    "fullName": "Load accumulator",
     "description": "Loads a byte from memory into the *accumulator*.",
     "seeAlso": ["STA"],
     "modes": {
       "Immediate": { "opcode": "A9", "bytes": 2, "cycles": 2 },
-      "Zero Page": { "opcode": "A5", "bytes": 2, "cycles": 3 },
-      "Zero Page, X": { "opcode": "B5", "bytes": 2, "cycles": 4 },
+      "Zero page": { "opcode": "A5", "bytes": 2, "cycles": 3 },
+      "Zero page, X": { "opcode": "B5", "bytes": 2, "cycles": 4 },
       "Absolute": { "opcode": "AD", "bytes": 3, "cycles": 4 },
       "Absolute, X": { "opcode": "BD", "bytes": 3, "cycles": 4, "pagePenalty": true },
       "Absolute, Y": { "opcode": "B9", "bytes": 3, "cycles": 4, "pagePenalty": true },
@@ -392,13 +392,13 @@
     }
   },
   "LDX": {
-    "fullName": "Load X Register",
+    "fullName": "Load X register",
     "description": "Loads a byte from memory into the *X register*.",
     "seeAlso": ["STX"],
     "modes": {
       "Immediate": { "opcode": "A2", "bytes": 2, "cycles": 2 },
-      "Zero Page": { "opcode": "A6", "bytes": 2, "cycles": 3 },
-      "Zero Page, Y": { "opcode": "B6", "bytes": 2, "cycles": 4 },
+      "Zero page": { "opcode": "A6", "bytes": 2, "cycles": 3 },
+      "Zero page, Y": { "opcode": "B6", "bytes": 2, "cycles": 4 },
       "Absolute": { "opcode": "AE", "bytes": 3, "cycles": 4 },
       "Absolute, Y": { "opcode": "BE", "bytes": 3, "cycles": 4, "pagePenalty": true }
     },
@@ -408,13 +408,13 @@
     }
   },
   "LDY": {
-    "fullName": "Load Y Register",
+    "fullName": "Load Y register",
     "description": "Loads a byte from memory into the *Y register*.",
     "seeAlso": ["STY"],
     "modes": {
       "Immediate": { "opcode": "A0", "bytes": 2, "cycles": 2 },
-      "Zero Page": { "opcode": "A4", "bytes": 2, "cycles": 3 },
-      "Zero Page, X": { "opcode": "B4", "bytes": 2, "cycles": 4 },
+      "Zero page": { "opcode": "A4", "bytes": 2, "cycles": 3 },
+      "Zero page, X": { "opcode": "B4", "bytes": 2, "cycles": 4 },
       "Absolute": { "opcode": "AC", "bytes": 3, "cycles": 4 },
       "Absolute, X": { "opcode": "BC", "bytes": 3, "cycles": 4, "pagePenalty": true }
     },
@@ -424,14 +424,14 @@
     }
   },
   "LSR": {
-    "fullName": "Logical Shift Right",
+    "fullName": "Logical shift right",
     "description": "Shifts all bits of the target operand one position to the right. Bit 7 is loaded with 0. This is equivalent to an *unsigned division* by 2.",
     "note": "Performs a dummy write of the original value before the final write. This can cause side effects on hardware registers.",
     "seeAlso": ["ASL", "ROL", "ROR"],
     "modes": {
       "Accumulator": { "opcode": "4A", "bytes": 1, "cycles": 2 },
-      "Zero Page": { "opcode": "46", "bytes": 2, "cycles": 5 },
-      "Zero Page, X": { "opcode": "56", "bytes": 2, "cycles": 6 },
+      "Zero page": { "opcode": "46", "bytes": 2, "cycles": 5 },
+      "Zero page, X": { "opcode": "56", "bytes": 2, "cycles": 6 },
       "Absolute": { "opcode": "4E", "bytes": 3, "cycles": 6 },
       "Absolute, X": { "opcode": "5E", "bytes": 3, "cycles": 7 }
     },
@@ -442,7 +442,7 @@
     }
   },
   "NOP": {
-    "fullName": "No Operation",
+    "fullName": "No operation",
     "description": "Performs no operation, consuming only cycles and program space.",
     "seeAlso": [],
     "modes": {
@@ -456,8 +456,8 @@
     "seeAlso": ["AND", "EOR"],
     "modes": {
       "Immediate": { "opcode": "09", "bytes": 2, "cycles": 2 },
-      "Zero Page": { "opcode": "05", "bytes": 2, "cycles": 3 },
-      "Zero Page, X": { "opcode": "15", "bytes": 2, "cycles": 4 },
+      "Zero page": { "opcode": "05", "bytes": 2, "cycles": 3 },
+      "Zero page, X": { "opcode": "15", "bytes": 2, "cycles": 4 },
       "Absolute": { "opcode": "0D", "bytes": 3, "cycles": 4 },
       "Absolute, X": { "opcode": "1D", "bytes": 3, "cycles": 4, "pagePenalty": true },
       "Absolute, Y": { "opcode": "19", "bytes": 3, "cycles": 4, "pagePenalty": true },
@@ -470,7 +470,7 @@
     }
   },
   "PHA": {
-    "fullName": "Push Accumulator",
+    "fullName": "Push accumulator",
     "description": "Pushes the current value of the *accumulator* onto the stack.",
     "seeAlso": ["PLA"],
     "modes": {
@@ -479,7 +479,7 @@
     "flagChanges": {}
   },
   "PHP": {
-    "fullName": "Push Processor Status",
+    "fullName": "Push processor status",
     "description": "Pushes the current *processor status* flags onto the stack.",
     "note": "The **B** flag is pushed as 1.",
     "seeAlso": ["PLP"],
@@ -489,7 +489,7 @@
     "flagChanges": {}
   },
   "PLA": {
-    "fullName": "Pull Accumulator",
+    "fullName": "Pull accumulator",
     "description": "Pulls a byte from the stack into the *accumulator*.",
     "seeAlso": ["PHA"],
     "modes": {
@@ -501,7 +501,7 @@
     }
   },
   "PLP": {
-    "fullName": "Pull Processor Status",
+    "fullName": "Pull processor status",
     "description": "Pulls a byte from the stack into the *processor status register*.",
     "note": "The **B** flag from the stack is ignored. The change to the **I** flag is delayed by one instruction.",
     "seeAlso": ["PHP"],
@@ -518,14 +518,14 @@
     }
   },
   "ROL": {
-    "fullName": "Rotate Left",
+    "fullName": "Rotate left",
     "description": "Rotates all bits of the target operand one position to the left. The **C** flag is moved into bit 0, and the original bit 7 is moved into the **C** flag.",
     "note": "Performs a dummy write of the original value before the final write. This can cause side effects on hardware registers.",
     "seeAlso": ["ROR", "ASL", "LSR"],
     "modes": {
       "Accumulator": { "opcode": "2A", "bytes": 1, "cycles": 2 },
-      "Zero Page": { "opcode": "26", "bytes": 2, "cycles": 5 },
-      "Zero Page, X": { "opcode": "36", "bytes": 2, "cycles": 6 },
+      "Zero page": { "opcode": "26", "bytes": 2, "cycles": 5 },
+      "Zero page, X": { "opcode": "36", "bytes": 2, "cycles": 6 },
       "Absolute": { "opcode": "2E", "bytes": 3, "cycles": 6 },
       "Absolute, X": { "opcode": "3E", "bytes": 3, "cycles": 7 }
     },
@@ -536,14 +536,14 @@
     }
   },
   "ROR": {
-    "fullName": "Rotate Right",
+    "fullName": "Rotate right",
     "description": "Rotates all bits of the target operand one position to the right. The **C** flag is moved into bit 7, and the original bit 0 is moved into the **C** flag.",
     "note": "Performs a dummy write of the original value before the final write. This can cause side effects on hardware registers.",
     "seeAlso": ["ROL", "ASL", "LSR"],
     "modes": {
       "Accumulator": { "opcode": "6A", "bytes": 1, "cycles": 2 },
-      "Zero Page": { "opcode": "66", "bytes": 2, "cycles": 5 },
-      "Zero Page, X": { "opcode": "76", "bytes": 2, "cycles": 6 },
+      "Zero page": { "opcode": "66", "bytes": 2, "cycles": 5 },
+      "Zero page, X": { "opcode": "76", "bytes": 2, "cycles": 6 },
       "Absolute": { "opcode": "6E", "bytes": 3, "cycles": 6 },
       "Absolute, X": { "opcode": "7E", "bytes": 3, "cycles": 7 }
     },
@@ -554,7 +554,7 @@
     }
   },
   "RTI": {
-    "fullName": "Return from Interrupt",
+    "fullName": "Return from interrupt",
     "description": "Returns from an interrupt routine. Pulls the *processor status* and the *program counter* from the stack.",
     "note": "Unlike **`plp`**, **`cli`**, or **`sei`**, the effect of restoring the **I** flag is immediate.",
     "seeAlso": ["BRK", "PLP", "RTS"],
@@ -571,7 +571,7 @@
     }
   },
   "RTS": {
-    "fullName": "Return from Subroutine",
+    "fullName": "Return from subroutine",
     "description": "Returns from a subroutine. Pulls a return address from the stack and jumps to it.",
     "note": "Pulls an address from the stack and increments it before setting the *program counter*.",
     "seeAlso": ["JSR", "PLA"],
@@ -581,14 +581,14 @@
     "flagChanges": {}
   },
   "SBC": {
-    "fullName": "Subtract with Carry",
+    "fullName": "Subtract with carry",
     "description": "Subtracts a value from memory and the inverted *carry flag* from the *accumulator*. Used for multi-byte subtraction.",
     "note": "The *carry flag* should be set with **`sec`** before subtracting the first byte in a sequence.",
     "seeAlso": ["ADC", "SEC"],
     "modes": {
       "Immediate": { "opcode": "E9", "bytes": 2, "cycles": 2 },
-      "Zero Page": { "opcode": "E5", "bytes": 2, "cycles": 3 },
-      "Zero Page, X": { "opcode": "F5", "bytes": 2, "cycles": 4 },
+      "Zero page": { "opcode": "E5", "bytes": 2, "cycles": 3 },
+      "Zero page, X": { "opcode": "F5", "bytes": 2, "cycles": 4 },
       "Absolute": { "opcode": "ED", "bytes": 3, "cycles": 4 },
       "Absolute, X": { "opcode": "FD", "bytes": 3, "cycles": 4, "pagePenalty": true },
       "Absolute, Y": { "opcode": "F9", "bytes": 3, "cycles": 4, "pagePenalty": true },
@@ -603,7 +603,7 @@
     }
   },
   "SEC": {
-    "fullName": "Set Carry",
+    "fullName": "Set carry",
     "description": "Sets the **C** flag.",
     "seeAlso": ["CLC"],
     "modes": {
@@ -614,8 +614,8 @@
     }
   },
   "SED": {
-    "fullName": "Set Decimal",
-    "description": "Sets the **D** flag. This instruction is not functional on the NES CPU.",
+    "fullName": "Set decimal",
+    "description": "Sets the **D** flag, enabling Binary Coded Decimal (BCD) mode for arithmetic instructions.",
     "seeAlso": ["CLD"],
     "modes": {
       "Implied": { "opcode": "F8", "bytes": 1, "cycles": 2 }
@@ -625,7 +625,7 @@
     }
   },
   "SEI": {
-    "fullName": "Set Interrupt Disable",
+    "fullName": "Set interrupt disable",
     "description": "Sets the **I** flag, preventing the CPU from responding to hardware interrupts (IRQs).",
     "note": "The change to the **I** flag is delayed by one instruction.",
     "seeAlso": ["CLI"],
@@ -637,12 +637,12 @@
     }
   },
   "STA": {
-    "fullName": "Store Accumulator",
+    "fullName": "Store accumulator",
     "description": "Stores the value of the *accumulator* into memory.",
     "seeAlso": ["LDA"],
     "modes": {
-      "Zero Page": { "opcode": "85", "bytes": 2, "cycles": 3 },
-      "Zero Page, X": { "opcode": "95", "bytes": 2, "cycles": 4 },
+      "Zero page": { "opcode": "85", "bytes": 2, "cycles": 3 },
+      "Zero page, X": { "opcode": "95", "bytes": 2, "cycles": 4 },
       "Absolute": { "opcode": "8D", "bytes": 3, "cycles": 4 },
       "Absolute, X": { "opcode": "9D", "bytes": 3, "cycles": 5 },
       "Absolute, Y": { "opcode": "99", "bytes": 3, "cycles": 5 },
@@ -652,29 +652,29 @@
     "flagChanges": {}
   },
   "STX": {
-    "fullName": "Store X Register",
+    "fullName": "Store X register",
     "description": "Stores the value of the *X register* into memory.",
     "seeAlso": ["LDX"],
     "modes": {
-      "Zero Page": { "opcode": "86", "bytes": 2, "cycles": 3 },
-      "Zero Page, Y": { "opcode": "96", "bytes": 2, "cycles": 4 },
+      "Zero page": { "opcode": "86", "bytes": 2, "cycles": 3 },
+      "Zero page, Y": { "opcode": "96", "bytes": 2, "cycles": 4 },
       "Absolute": { "opcode": "8E", "bytes": 3, "cycles": 4 }
     },
     "flagChanges": {}
   },
   "STY": {
-    "fullName": "Store Y Register",
+    "fullName": "Store Y register",
     "description": "Stores the value of the *Y register* into memory.",
     "seeAlso": ["LDY"],
     "modes": {
-      "Zero Page": { "opcode": "84", "bytes": 2, "cycles": 3 },
-      "Zero Page, X": { "opcode": "94", "bytes": 2, "cycles": 4 },
+      "Zero page": { "opcode": "84", "bytes": 2, "cycles": 3 },
+      "Zero page, X": { "opcode": "94", "bytes": 2, "cycles": 4 },
       "Absolute": { "opcode": "8C", "bytes": 3, "cycles": 4 }
     },
     "flagChanges": {}
   },
   "TAX": {
-    "fullName": "Transfer Accumulator to X",
+    "fullName": "Transfer accumulator to X",
     "description": "Copies the value from the *accumulator* to the *X register*.",
     "seeAlso": ["TXA", "TAY", "TYA"],
     "modes": {
@@ -686,7 +686,7 @@
     }
   },
   "TAY": {
-    "fullName": "Transfer Accumulator to Y",
+    "fullName": "Transfer accumulator to Y",
     "description": "Copies the value from the *accumulator* to the *Y register*.",
     "seeAlso": ["TYA", "TAX", "TXA"],
     "modes": {
@@ -698,7 +698,7 @@
     }
   },
   "TSX": {
-    "fullName": "Transfer Stack Pointer to X",
+    "fullName": "Transfer stack pointer to X",
     "description": "Copies the value from the *stack pointer* to the *X register*.",
     "seeAlso": ["TXS"],
     "modes": {
@@ -710,7 +710,7 @@
     }
   },
   "TXA": {
-    "fullName": "Transfer X to Accumulator",
+    "fullName": "Transfer X to accumulator",
     "description": "Copies the value from the *X register* to the *accumulator*.",
     "seeAlso": ["TAX", "TAY", "TYA"],
     "modes": {
@@ -722,7 +722,7 @@
     }
   },
   "TXS": {
-    "fullName": "Transfer X to Stack Pointer",
+    "fullName": "Transfer X to stack pointer",
     "description": "Copies the value from the *X register* to the *stack pointer*.",
     "seeAlso": ["TSX"],
     "modes": {
@@ -731,7 +731,7 @@
     "flagChanges": {}
   },
   "TYA": {
-    "fullName": "Transfer Y to Accumulator",
+    "fullName": "Transfer Y to accumulator",
     "description": "Copies the value from the *Y register* to the *accumulator*.",
     "seeAlso": ["TAY", "TAX", "TXA"],
     "modes": {

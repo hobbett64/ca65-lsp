@@ -16,15 +16,17 @@ import * as path from 'path';
 import { execFile } from 'child_process';
 import { ensureDocumentRefreshed, exportsMap, getDocumentSettings, includesGraph, performanceMonitor, symbolTables } from './server';
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import * as os from "os";
 import { promisify } from 'util';
-import { Ca65Settings, normalizeCpu } from './settings';
+import { Ca65Settings } from './settings';
 import which from "which";
 import { fsPathToUri, getWorkspaceFolderOfFile, resolveWorkspaceRelativeDirs, uriToFsPath } from './pathUtils';
 import { countReferencesByFile, isEntityUsed, resolveImport } from './symbolResolver';
-import { ImportKind, isZeroPageSegmentName, Scope, ScopeKind, Symbol as Ca65Symbol, SymbolKind as Ca65SymbolKind, SymbolTableEntity } from './symbolTable';
-import { findCommentStart } from './documentScanner';
+import { ImportKind, isZeroPageSegment, Scope, ScopeKind, Symbol as Ca65Symbol, SymbolKind as Ca65SymbolKind, SymbolTableEntity } from './symbolTable';
+import { maskCommentsAtDocumentLine } from './documentScanner';
 import { getCachedTextDocument, isOpenDocumentPotentiallyDirty } from './documentCache';
+import { collectRootTuUris, computeTuSignature, storeFailedLstAttempt, storeValidLstEntry } from './listingCache';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,15 +35,33 @@ const pendingFilesToUpdate: Map<string, Set<string>> = new Map();
 const activeValidationControllers: Set<AbortController> = new Set();
 const cachedExecutablePaths: Map<string, string | null> = new Map();
 const w65c02UnsupportedPaths: Set<string> = new Set();
+const unsupportedFeaturesByPath: Map<string, Set<string>> = new Map();
+const reportedCliErrors: Set<string> = new Set();
+const lastCompilerDiagnosticsByUri: Map<string, Diagnostic[]> = new Map();
+const lastUnusedDiagnosticsByUri: Map<string, Diagnostic[]> = new Map();
+const lastMismatchSignatureByUri: Map<string, string> = new Map();
 const VALIDATION_ROOT_CONCURRENCY = 4;
 const SHADOW_IO_CONCURRENCY = 16;
 let connection: _Connection;
 let documents: TextDocuments<TextDocument>;
 let hasShownCa65NotFoundMessage = false;
 
+export function clearCompilerDiagnosticsForUri(uri: string): void {
+    lastCompilerDiagnosticsByUri.delete(uri);
+    lastUnusedDiagnosticsByUri.delete(uri);
+    lastMismatchSignatureByUri.delete(uri);
+}
+
+function getMismatchSignature(diags: readonly Diagnostic[]): string {
+    if (diags.length === 0) return '';
+    return diags.map(d => `${d.range.start.line}:${d.range.start.character}:${d.code ?? ''}:${d.message}`).join('\n');
+}
+
 export function clearExecutablePathCache(): void {
     cachedExecutablePaths.clear();
     w65c02UnsupportedPaths.clear();
+    unsupportedFeaturesByPath.clear();
+    reportedCliErrors.clear();
 }
 
 export function initializeDiagnostics(conn: _Connection, docs: TextDocuments<TextDocument>) {
@@ -148,9 +168,10 @@ export function findImportMismatchDiagnostics(uri: string): Diagnostic[] {
         const matchingExport = exportsMap?.get(imp.name)?.find(exp => exp.uri === resolved.uri);
         const resolvedSeg = resolved.segment;
         const segmentBased = entityCarriesSegmentAddress(resolved) && Boolean(resolvedSeg);
+        const resolvedIsZp = segmentBased && isZeroPageSegment(resolvedSeg, symbolTables.get(resolved.uri), symbolTables);
 
-        const definitelyZp = Boolean(matchingExport?.isZeroPage) || (segmentBased && isZeroPageSegmentName(resolvedSeg));
-        const definitelyNonZp = !matchingExport?.isZeroPage && segmentBased && !isZeroPageSegmentName(resolvedSeg);
+        const definitelyZp = Boolean(matchingExport?.isZeroPage) || resolvedIsZp;
+        const definitelyNonZp = !matchingExport?.isZeroPage && segmentBased && !resolvedIsZp;
 
         if (!imp.isZeroPage && definitelyZp) {
             const reason = matchingExport?.isZeroPage
@@ -224,28 +245,56 @@ async function getDocumentCached(
     return getCachedTextDocument(uri, documents, docCache);
 }
 
-function sanitizeAdditionalCa65Args(rawArgs: unknown): string[] {
-    if (!Array.isArray(rawArgs)) return [];
-    const safeArgs: string[] = [];
-    for (let i = 0; i < rawArgs.length; i++) {
-        const arg = typeof rawArgs[i] === 'string' ? rawArgs[i].trim() : '';
-        if (!arg) continue;
-        // Skip output/listing flags (and their path value) so temporary LSP outputs stay intact.
-        if (arg === '-o' || arg === '-l' || arg === '--listing') {
-            i++;
-            continue;
+function stripFeatureArg(args: string[], featureName: string): boolean {
+    let removed = false;
+    for (let i = 0; i < args.length - 1; i++) {
+        if (args[i] === '--feature' && args[i + 1] === featureName) {
+            args.splice(i, 2);
+            removed = true;
+            i--;
         }
-        if (arg.startsWith('--listing=') || (arg.startsWith('-o') && !arg.startsWith('--')) || (arg.startsWith('-l') && !arg.startsWith('--'))) {
-            continue;
-        }
-        safeArgs.push(arg);
     }
-    return safeArgs;
+    return removed;
+}
+
+function getUnsupportedFeatures(ca65Path: string): Set<string> {
+    let set = unsupportedFeaturesByPath.get(ca65Path);
+    if (!set) {
+        set = new Set<string>();
+        unsupportedFeaturesByPath.set(ca65Path, set);
+    }
+    return set;
+}
+
+function extractCliErrorLines(stderr: string): string[] {
+    if (!stderr) return [];
+    const errors: string[] = [];
+    for (const rawLine of stderr.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (line.startsWith('ca65:')) {
+            errors.push(line);
+        }
+    }
+    return errors;
+}
+
+function rewriteCpuArg(args: string[], fromCpuUpper: string, toCpu: string): boolean {
+    let rewritten = false;
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '--cpu' && i + 1 < args.length && args[i + 1].toUpperCase() === fromCpuUpper) {
+            args[i + 1] = toCpu;
+            rewritten = true;
+        } else if (args[i].toUpperCase() === `--CPU=${fromCpuUpper}`) {
+            args[i] = `--cpu=${toCpu}`;
+            rewritten = true;
+        }
+    }
+    return rewritten;
 }
 
 export interface Ca65AssembleOptions {
     generateListing?: boolean;
-    /** When true, runs even if `ca65.enableCa65StdErrDiagnostics` is false. */
+    /** When true, runs even if `ca65.enableStderrDiagnostics` is false. */
     ignoreDiagnosticSetting?: boolean;
 }
 
@@ -255,6 +304,9 @@ export interface Ca65AssembleResult {
     effectiveCwd: string;
     workspaceRoot: string;
     shadowDir: string | null;
+    searchIncludeDirs: string[];
+    resolvedIncludeDirs?: string[];
+    tuSignature?: string;
     listingContent?: string;
 }
 
@@ -269,7 +321,7 @@ export async function assembleTranslationUnit(
     return performanceMonitor.timeAsync('assembleTranslationUnit', async () => {
         const settings = await getDocumentSettings(textDocument.uri);
         if (signal.aborted) return null;
-        if (!options.ignoreDiagnosticSetting && !settings.enableCa65StdErrDiagnostics) {
+        if (!options.ignoreDiagnosticSetting && !settings.enableStderrDiagnostics) {
             return null;
         }
 
@@ -288,8 +340,7 @@ export async function assembleTranslationUnit(
         const fileDir = path.dirname(filePath);
         const workspaceRoot = workspaceFolderUri ? uriToFsPath(workspaceFolderUri) : fileDir;
 
-        const tuUris = new Set<string>(includesGraph.getTranslationUnitSet(textDocument.uri));
-        tuUris.add(textDocument.uri);
+        const tuUris = collectRootTuUris(textDocument.uri, includesGraph);
 
         // Build a lightweight shadow directory only when an open TU file has unsaved edits.
         let needsShadow = false;
@@ -304,6 +355,8 @@ export async function assembleTranslationUnit(
         }
         if (signal.aborted) return null;
 
+        const tuSignature = computeTuSignature(textDocument.uri, tuUris, openDocsInTu, settings);
+
         let shadowDir: string | null = null;
         let listingTempDir: string | null = null;
         let effectiveCwd = workspaceRoot;
@@ -311,9 +364,11 @@ export async function assembleTranslationUnit(
         let stderr = '';
         let hasErrors = false;
         let listingContent: string | undefined;
+        let resolvedUserIncludeDirs: string[] = [];
 
         try {
             const userIncludeDirs = resolveWorkspaceRelativeDirs(textDocument.uri, settings.includeDirs);
+            resolvedUserIncludeDirs = userIncludeDirs;
             const userBinIncludeDirs = resolveWorkspaceRelativeDirs(textDocument.uri, settings.binIncludeDirs);
             const extraShadowIncludeDirs: string[] = [];
             const originalSourceDirs = new Set<string>([fileDir, workspaceRoot]);
@@ -383,8 +438,6 @@ export async function assembleTranslationUnit(
                 args.push('-l', listingPath);
             }
 
-            if (settings.implicitImports) args.push('--auto-import');
-
             if (shadowDir) {
                 for (const dir of extraShadowIncludeDirs) {
                     args.push('-I', dir);
@@ -405,19 +458,30 @@ export async function assembleTranslationUnit(
                 args.push('--bin-include-dir', binIncludeDir);
             }
 
-            if (settings.lineContinuations) {
-                args.push('--feature', 'line_continuations');
+            if (settings.implicitImports) {
+                args.push('--auto-import');
             }
-
-            const cpu = normalizeCpu(settings.cpu);
-            if (cpu !== '6502') {
-                const effectiveCpu = (cpu === 'W65C02' && w65c02UnsupportedPaths.has(ca65Path))
+            if (settings.cpu !== '6502') {
+                const cpuArg = (settings.cpu === 'W65C02' && w65c02UnsupportedPaths.has(ca65Path))
                     ? '65C02'
-                    : cpu;
-                args.push('--cpu', effectiveCpu);
+                    : settings.cpu;
+                args.push('--cpu', cpuArg);
             }
 
-            args.push(...sanitizeAdditionalCa65Args(settings.additionalArgs));
+            const unsupportedForPath = unsupportedFeaturesByPath.get(ca65Path);
+            const autoFeatures = new Set<string>();
+            const featureEntries: ReadonlyArray<[string, boolean]> = [
+                ['c_comments', settings.cComments],
+                ['line_continuations', settings.lineContinuations],
+            ];
+            for (const [featureName, enabled] of featureEntries) {
+                if (enabled && !unsupportedForPath?.has(featureName)) {
+                    args.push('--feature', featureName);
+                    autoFeatures.add(featureName);
+                }
+            }
+
+            args.push(...settings.additionalArgs);
 
             try {
                 const result = await execFileAsync(ca65Path, args, { cwd: effectiveCwd, signal });
@@ -425,20 +489,40 @@ export async function assembleTranslationUnit(
             } catch (err: any) {
                 hasErrors = true;
                 if (err && err.stderr) stderr = err.stderr;
-                if (cpu === 'W65C02' && stderr.includes("Invalid CPU: 'W65C02'")) {
-                    w65c02UnsupportedPaths.add(ca65Path);
-                    const cpuFlagIndex = args.indexOf('--cpu');
-                    if (cpuFlagIndex !== -1 && args[cpuFlagIndex + 1] === 'W65C02') {
-                        args[cpuFlagIndex + 1] = '65C02';
-                        hasErrors = false;
-                        stderr = '';
-                        try {
-                            const retryResult = await execFileAsync(ca65Path, args, { cwd: effectiveCwd, signal });
-                            stderr = retryResult.stderr;
-                        } catch (retryErr: any) {
-                            hasErrors = true;
-                            if (retryErr && retryErr.stderr) stderr = retryErr.stderr;
-                        }
+
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    let modified = false;
+                    const featureMatch = stderr.match(/Illegal emulation feature:\s*['‘]([^'’]+)['’]/);
+                    if (featureMatch && autoFeatures.has(featureMatch[1])) {
+                        getUnsupportedFeatures(ca65Path).add(featureMatch[1]);
+                        modified = stripFeatureArg(args, featureMatch[1]);
+                    } else if (settings.cpu === 'W65C02' && stderr.includes("Invalid CPU: 'W65C02'")) {
+                        w65c02UnsupportedPaths.add(ca65Path);
+                        modified = rewriteCpuArg(args, 'W65C02', '65C02');
+                    }
+                    if (!modified) break;
+
+                    hasErrors = false;
+                    stderr = '';
+                    try {
+                        const retryResult = await execFileAsync(ca65Path, args, { cwd: effectiveCwd, signal });
+                        stderr = retryResult.stderr;
+                        break;
+                    } catch (retryErr: any) {
+                        hasErrors = true;
+                        if (retryErr && retryErr.stderr) stderr = retryErr.stderr;
+                    }
+                }
+            }
+
+            if (hasErrors && !signal.aborted && !options.ignoreDiagnosticSetting) {
+                const cliErrors = extractCliErrorLines(stderr);
+                if (cliErrors.length > 0) {
+                    const key = `${ca65Path}|${settings.cpu}|${settings.cComments}|${settings.lineContinuations}|${settings.additionalArgs.join('\0')}|${cliErrors.join('\n')}`;
+                    if (!reportedCliErrors.has(key)) {
+                        reportedCliErrors.add(key);
+                        connection.console.error(`ca65 failed with configured options (${cliErrors.join(' | ')})`);
+                        connection.window.showErrorMessage(`ca65 failed: ${cliErrors.join('; ')}`);
                     }
                 }
             }
@@ -463,6 +547,9 @@ export async function assembleTranslationUnit(
             effectiveCwd,
             workspaceRoot,
             shadowDir,
+            searchIncludeDirs: [fileDir, ...resolvedUserIncludeDirs],
+            resolvedIncludeDirs: resolvedUserIncludeDirs,
+            tuSignature,
             listingContent,
         };
     });
@@ -473,32 +560,69 @@ export async function assembleTranslationUnit(
  * @param textDocument The root document of the translation unit to validate.
  * @param signal AbortSignal for cancelling the operation.
  * @param docCache Per-validation cache of unopened documents.
+ * @param updatedListingRoots Optional set receiving root URIs whose clean `.lst` cache refreshed.
  * @returns A Map of URIs to their collected compiler diagnostics.
  */
 async function getCompilerDiagnosticsForUnit(
     textDocument: TextDocument,
     signal: AbortSignal,
-    docCache: Map<string, TextDocument | null>
+    docCache: Map<string, TextDocument | null>,
+    updatedListingRoots?: Set<string>,
+    failedListingRoots?: Set<string>
 ): Promise<Map<string, Diagnostic[]>> {
     return performanceMonitor.timeAsync("getCompilerDiagnosticsForUnit", async () => {
         const diagnosticsByUri = new Map<string, Diagnostic[]>();
-        const assembled = await assembleTranslationUnit(textDocument, signal);
+        const assembled = await assembleTranslationUnit(textDocument, signal, { generateListing: true });
         if (!assembled || signal.aborted) return diagnosticsByUri;
 
-        const { stderr, effectiveCwd, workspaceRoot, shadowDir } = assembled;
+        const rootSettings = await getDocumentSettings(textDocument.uri);
+        if (signal.aborted) return diagnosticsByUri;
+
+        if (!assembled.hasErrors && assembled.listingContent && assembled.tuSignature) {
+            const includeDirs = assembled.resolvedIncludeDirs
+                ?? resolveWorkspaceRelativeDirs(textDocument.uri, rootSettings.includeDirs);
+            storeValidLstEntry(
+                textDocument.uri,
+                assembled.tuSignature,
+                includeDirs,
+                assembled.listingContent
+            );
+            updatedListingRoots?.add(textDocument.uri);
+        } else if (assembled.hasErrors && assembled.tuSignature) {
+            storeFailedLstAttempt(textDocument.uri, assembled.tuSignature);
+            failedListingRoots?.add(textDocument.uri);
+        }
+
+        const { stderr, effectiveCwd, workspaceRoot, shadowDir, searchIncludeDirs } = assembled;
 
         if (stderr) {
             const lines = stderr.split(/\r?\n/);
             // ca65 emits `file(line): Error: ...` by default and `file:line: Error: ...` in gcc format
             const errorRegex = /^(.*?)(?:\((\d+)\)|:(\d+)):\s(Warning|Error):\s(.*)$/;
             const noteRegex = /^(.*?)(?:\((\d+)\)|:(\d+)):\sNote:\s(.*)$/;
-            const resolveErrorUri = (fileName: string): string => {
-                const resolved = path.resolve(effectiveCwd, fileName);
-                if (shadowDir && (resolved === shadowDir || resolved.startsWith(shadowDir + path.sep))) {
-                    const rel = path.relative(shadowDir, resolved);
-                    return fsPathToUri(path.resolve(workspaceRoot, rel));
+            const mapShadowToWorkspacePath = (fsPath: string): string => {
+                if (shadowDir && (fsPath === shadowDir || fsPath.startsWith(shadowDir + path.sep))) {
+                    return path.resolve(workspaceRoot, path.relative(shadowDir, fsPath));
                 }
-                return fsPathToUri(resolved);
+                return fsPath;
+            };
+            const resolveErrorUri = (fileName: string): string => {
+                if (path.isAbsolute(fileName)) {
+                    return fsPathToUri(mapShadowToWorkspacePath(fileName));
+                }
+                const primaryPath = mapShadowToWorkspacePath(path.resolve(effectiveCwd, fileName));
+                const primaryUri = fsPathToUri(primaryPath);
+                if (fsSync.existsSync(primaryPath) || symbolTables.has(primaryUri)) {
+                    return primaryUri;
+                }
+                for (const dir of searchIncludeDirs) {
+                    const candidatePath = mapShadowToWorkspacePath(path.resolve(dir, fileName));
+                    const candidateUri = fsPathToUri(candidatePath);
+                    if (fsSync.existsSync(candidatePath) || symbolTables.has(candidateUri)) {
+                        return candidateUri;
+                    }
+                }
+                return primaryUri;
             };
             
             for (let i = 0; i < lines.length; i++) {
@@ -525,9 +649,7 @@ async function getCompilerDiagnosticsForUnit(
 
                     const errorDocument = await getDocumentCached(errorFileUri, docCache);
                     if (errorDocument && lineNumber < errorDocument.lineCount) {
-                        const lineText = errorDocument.getText(Range.create(lineNumber, 0, lineNumber + 1, 0));
-                        const commentIdx = findCommentStart(lineText);
-                        const lineWithoutComment = commentIdx >= 0 ? lineText.substring(0, commentIdx) : lineText;
+                        const lineWithoutComment = maskCommentsAtDocumentLine(errorDocument, lineNumber, undefined, rootSettings.cComments);
                         const trimmedLine = lineWithoutComment.trim();
                         const startChar = trimmedLine ? lineWithoutComment.indexOf(trimmedLine) : 0;
                         const endChar = startChar + trimmedLine.length;
@@ -642,25 +764,46 @@ export function triggerValidation(uri: string, debounce: boolean = true, allFile
             const allRoots = (existingRoots.length === 0 && includesGraph.isTranslationUnitRoot(uri))
                 ? [uri]
                 : existingRoots;
+            // While typing in a shared header included by many roots, limit live ca65 spawns to open roots (or first root);
+            // full validation on save/open (`!debounce`) always checks every dependent root.
+            let rootsToAssemble = allRoots;
+            if (debounce && allRoots.length > 2) {
+                const openRoots = allRoots.filter(r => documents.get(r) !== undefined);
+                rootsToAssemble = openRoots.length > 0 ? openRoots : allRoots.slice(0, 1);
+            }
+            const assembledCoverage = new Set<string>();
+            for (const root of rootsToAssemble) {
+                assembledCoverage.add(root);
+                for (const tuUri of includesGraph.getTranslationUnitSet(root)) {
+                    assembledCoverage.add(tuUri);
+                }
+            }
+
             const settings = await getDocumentSettings(uri);
             if (signal.aborted) return;
 
-            // 1. Initialize full diagnostic list for all potentially affected files to ensure old ones are cleared.
+            // 1. Initialize per-file diagnostic lists: clear files covered by this CLI pass and preserve
+            //    prior compiler diagnostics on roots skipped during typing debounce.
             for (const fileUri of filesToUpdate) {
-                fullDiagnosticsByUri.set(fileUri, []);
+                fullDiagnosticsByUri.set(
+                    fileUri,
+                    assembledCoverage.has(fileUri) ? [] : [...(lastCompilerDiagnosticsByUri.get(fileUri) ?? [])]
+                );
             }
 
-            // 2. Gather context-dependent compiler diagnostics from each root with bounded concurrency.
+            // 2. Gather context-dependent compiler diagnostics from selected roots with bounded concurrency.
             const docCache = new Map<string, TextDocument | null>();
-            const rootResults: Array<Map<string, Diagnostic[]> | null> = new Array(allRoots.length).fill(null);
+            const rootResults: Array<Map<string, Diagnostic[]> | null> = new Array(rootsToAssemble.length).fill(null);
+            const updatedListingRoots = new Set<string>();
+            const failedListingRoots = new Set<string>();
             let nextRootIdx = 0;
-            const workerCount = Math.min(VALIDATION_ROOT_CONCURRENCY, allRoots.length);
+            const workerCount = Math.min(VALIDATION_ROOT_CONCURRENCY, rootsToAssemble.length);
             const runRootWorker = async () => {
-                while (nextRootIdx < allRoots.length && !signal.aborted) {
+                while (nextRootIdx < rootsToAssemble.length && !signal.aborted) {
                     const idx = nextRootIdx++;
-                    const doc = await getDocumentCached(allRoots[idx], docCache);
+                    const doc = await getDocumentCached(rootsToAssemble[idx], docCache);
                     if (!doc || signal.aborted) continue;
-                    rootResults[idx] = await getCompilerDiagnosticsForUnit(doc, signal, docCache);
+                    rootResults[idx] = await getCompilerDiagnosticsForUnit(doc, signal, docCache, updatedListingRoots, failedListingRoots);
                 }
             };
             if (workerCount > 0) {
@@ -686,6 +829,11 @@ export function triggerValidation(uri: string, debounce: boolean = true, allFile
                     }
                 }
             }
+            for (const fileUri of filesToUpdate) {
+                if (assembledCoverage.has(fileUri)) {
+                    lastCompilerDiagnosticsByUri.set(fileUri, [...(fullDiagnosticsByUri.get(fileUri) ?? [])]);
+                }
+            }
 
             // 3. Gather context-independent "unused symbol" diagnostics ONCE.
             if (settings.enableUnusedSymbolDiagnostics) {
@@ -708,13 +856,19 @@ export function triggerValidation(uri: string, debounce: boolean = true, allFile
                         precomputedCounts
                     );
                     if (signal.aborted) return;
+                    lastUnusedDiagnosticsByUri.set(fileUri, unusedSymbolDiags);
                     fullDiagnosticsByUri.get(fileUri)?.push(...unusedSymbolDiags);
+                }
+            } else {
+                for (const fileUri of filesToUpdate) {
+                    lastUnusedDiagnosticsByUri.delete(fileUri);
                 }
             }
 
             // 4. Warn on .import/.importzp vs resolved segment/exportzp mismatches.
             for (const fileUri of filesToUpdate) {
                 const mismatchDiags = findImportMismatchDiagnostics(fileUri);
+                lastMismatchSignatureByUri.set(fileUri, getMismatchSignature(mismatchDiags));
                 if (mismatchDiags.length > 0) {
                     fullDiagnosticsByUri.get(fileUri)?.push(...mismatchDiags);
                 }
@@ -723,9 +877,51 @@ export function triggerValidation(uri: string, debounce: boolean = true, allFile
             if (signal.aborted) return;
             pendingFilesToUpdate.delete(uri);
 
-            // 4. Send the final, consolidated diagnostics for every affected file.
+            // 5. Send consolidated diagnostics for affected files in this TU.
             for (const fileUri of filesToUpdate) {
                 connection.sendDiagnostics({ uri: fileUri, diagnostics: fullDiagnosticsByUri.get(fileUri) || [] });
+            }
+
+            if (updatedListingRoots.size > 0 || failedListingRoots.size > 0) {
+                const updatedUris = new Set<string>();
+                for (const rootUri of updatedListingRoots) {
+                    updatedUris.add(rootUri);
+                    for (const tuUri of includesGraph.getTranslationUnitSet(rootUri)) {
+                        updatedUris.add(tuUri);
+                    }
+                }
+                const errorUris = new Set<string>();
+                for (const rootUri of failedListingRoots) {
+                    if (!updatedUris.has(rootUri)) errorUris.add(rootUri);
+                    for (const tuUri of includesGraph.getTranslationUnitSet(rootUri)) {
+                        if (!updatedUris.has(tuUri)) errorUris.add(tuUri);
+                    }
+                }
+                connection.sendNotification('ca65/listingUpdated', {
+                    uris: Array.from(updatedUris),
+                    errorUris: Array.from(errorUris),
+                });
+            }
+
+            // 6. Refresh cross-TU `.import`/`.importzp` mismatch warnings when an exporter's segment or `.exportzp` changed.
+            for (const [otherUri, otherTable] of symbolTables) {
+                if (filesToUpdate.has(otherUri)) continue;
+                if (otherTable.imports.length === 0 && !lastMismatchSignatureByUri.has(otherUri)) continue;
+
+                const nextMismatch = findImportMismatchDiagnostics(otherUri);
+                const nextSig = getMismatchSignature(nextMismatch);
+                const prevSig = lastMismatchSignatureByUri.get(otherUri) ?? '';
+                if (nextSig !== prevSig) {
+                    lastMismatchSignatureByUri.set(otherUri, nextSig);
+                    connection.sendDiagnostics({
+                        uri: otherUri,
+                        diagnostics: [
+                            ...(lastCompilerDiagnosticsByUri.get(otherUri) ?? []),
+                            ...(lastUnusedDiagnosticsByUri.get(otherUri) ?? []),
+                            ...nextMismatch,
+                        ],
+                    });
+                }
             }
         } catch (err) {
             connection.console.error(`Validation failed for ${uri}: ${err}`);

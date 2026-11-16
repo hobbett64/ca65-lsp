@@ -1,4 +1,5 @@
 import {
+    Position,
     Range,
 } from 'vscode-languageserver-types';
 import { TextDocument } from 'vscode-languageserver-textdocument';
@@ -8,6 +9,7 @@ import {
     ImportKind,
     Macro,
     MacroKind,
+    parseSegmentDirectiveArgs,
     ReferenceInfo,
     Scope,
     ScopeKind,
@@ -92,11 +94,109 @@ const DATA_LABEL_DIRECTIVES = new Set([
 ]);
 
 const STRING_LABEL_DIRECTIVES = new Set(['.asciiz', '.literal']);
+const LABEL_KIND_TRANSPARENT_DIRECTIVES = new Set([
+    '.align',
+    '.assert',
+    '.charmap',
+    '.else',
+    '.elseif',
+    '.endif',
+    '.endrepeat',
+    '.error',
+    '.fatal',
+    '.if',
+    '.ifblank',
+    '.ifconst',
+    '.ifdef',
+    '.ifnblank',
+    '.ifndef',
+    '.ifnref',
+    '.ifref',
+    '.out',
+    '.repeat',
+    '.warning',
+]);
+const STRING_BYTE_LIST_RE = /^"(?:[^"\\]|\\.)*"(?:\s*,\s*(?:"(?:[^"\\]|\\.)*"|\$0*(?:0|[AaDd])|0|10|13))*$/;
 
 const CONSTANT_ASSIGNMENT_RE = /^\s*(?<name>[a-zA-Z_@.][a-zA-Z0-9_]*)\s*(?:=|:=)/;
-const VARIABLE_ASSIGNMENT_RE = /^\s*(?<name>[a-zA-Z_@.][a-zA-Z0-9_]*)\s*\.set\s*(?<value>[^;]*?)(?:\s*;.*)?$/;
+const VARIABLE_ASSIGNMENT_RE = /^\s*(?<name>[a-zA-Z_@.][a-zA-Z0-9_]*)\s*\.set\s*/;
 const ANON_REF_RE = /:([-+<>]+)/g;
 const EMPTY_QUALIFIERS: readonly string[] = Object.freeze([]);
+
+interface LogicalLineSegment {
+    line: number;
+    code: string;
+    joinedStart: number;
+    joinedEnd: number;
+}
+
+function mapOffsetToPosition(
+    segments: readonly LogicalLineSegment[],
+    offset: number,
+    isEnd: boolean
+): Position {
+    if (segments.length === 1) {
+        return Position.create(segments[0].line, Math.max(0, offset - segments[0].joinedStart));
+    }
+    for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        if (isEnd ? offset <= seg.joinedEnd : offset < seg.joinedEnd) {
+            return Position.create(seg.line, Math.max(0, offset - seg.joinedStart));
+        }
+        if (i + 1 < segments.length && offset < segments[i + 1].joinedStart) {
+            return isEnd
+                ? Position.create(seg.line, seg.joinedEnd - seg.joinedStart)
+                : Position.create(segments[i + 1].line, 0);
+        }
+    }
+    const last = segments[segments.length - 1];
+    return Position.create(last.line, last.joinedEnd - last.joinedStart);
+}
+
+function mapSpanToRange(
+    segments: readonly LogicalLineSegment[],
+    start: number,
+    end: number
+): Range {
+    if (segments.length === 1) {
+        const line = segments[0].line;
+        const base = segments[0].joinedStart;
+        return Range.create(line, start - base, line, end - base);
+    }
+    const startPos = mapOffsetToPosition(segments, start, false);
+    const endPos = mapOffsetToPosition(segments, end, true);
+    return Range.create(startPos.line, startPos.character, endPos.line, endPos.character);
+}
+
+export function maskQuotedLiterals(text: string): string {
+    if (text.indexOf('"') === -1 && text.indexOf("'") === -1) {
+        return text;
+    }
+    const len = text.length;
+    let out = '';
+    let copyStart = 0;
+    let quote = 0;
+    for (let i = 0; i < len; i++) {
+        const code = text.charCodeAt(i);
+        if (quote !== 0) {
+            if (code === quote) {
+                out += ' '.repeat(i - copyStart + 1);
+                quote = 0;
+                copyStart = i + 1;
+            }
+        } else if (code === 34 /* " */ || code === 39 /* ' */) {
+            if (i > copyStart) out += text.slice(copyStart, i);
+            copyStart = i;
+            quote = code;
+        }
+    }
+    if (quote !== 0) {
+        out += ' '.repeat(len - copyStart);
+    } else if (copyStart < len) {
+        out += text.slice(copyStart);
+    }
+    return out;
+}
 
 function isWhitespaceCode(code: number): boolean {
     if (code === 32 || code === 9) return true;
@@ -182,6 +282,381 @@ function findCommentStartInRange(line: string, start: number, end: number): numb
  */
 export function findCommentStart(line: string): number {
     return findCommentStartInRange(line, 0, line.length);
+}
+
+export interface StrippedLine {
+    /** Line text with closed `/* ... *\/` replaced by spaces (preserving column offsets) and `;` / unclosed `/*` truncated. */
+    code: string;
+    /** Whether a `/*` block comment remains unclosed at the end of this line. */
+    inBlockComment: boolean;
+    /** Whether a `;` comment appeared outside quotes/block comments on this line. */
+    hasSemicolonComment: boolean;
+}
+
+export interface CursorCommentContext {
+    /** True if the cursor lies inside a `;` or `/* ... *\/` comment. */
+    inComment: boolean;
+    /** True if the cursor lies inside a single- or double-quoted string literal (and not a comment). */
+    inString: boolean;
+    /** Raw text on the cursor's line from column 0 up to the cursor. */
+    rawLineToCursor: string;
+    /** Joined logical code across any preceding `\` or multi-line `/* ... *\/` continuations up to the cursor. */
+    logicalCodeToCursor: string;
+}
+
+function scanLineComments(
+    line: string,
+    startInBlockComment: boolean,
+    buildMaskedCode: boolean,
+    cComments: boolean = true
+): StrippedLine {
+    const len = line.length;
+    if (!cComments || (!startInBlockComment && line.indexOf('/*') === -1)) {
+        if (!buildMaskedCode) {
+            return { code: '', inBlockComment: false, hasSemicolonComment: false };
+        }
+        const semiIdx = findCommentStartInRange(line, 0, len);
+        return {
+            code: semiIdx >= 0 ? line.slice(0, semiIdx) : line,
+            inBlockComment: false,
+            hasSemicolonComment: semiIdx >= 0,
+        };
+    }
+
+    let inBlock = startInBlockComment;
+    let quote = 0;
+    let copyStart = 0;
+    let chunks: string[] | undefined;
+
+    for (let i = 0; i < len;) {
+        if (inBlock) {
+            const closeIdx = line.indexOf('*/', i);
+            if (closeIdx === -1) {
+                if (!buildMaskedCode || !chunks) {
+                    return { code: '', inBlockComment: true, hasSemicolonComment: false };
+                }
+                return { code: chunks.join(''), inBlockComment: true, hasSemicolonComment: false };
+            }
+            if (buildMaskedCode) {
+                (chunks ??= []).push(' '.repeat(closeIdx + 2 - copyStart));
+            }
+            inBlock = false;
+            i = closeIdx + 2;
+            copyStart = i;
+            continue;
+        }
+
+        const c = line.charCodeAt(i);
+        if (quote !== 0) {
+            if (c === quote) {
+                quote = 0;
+            }
+            i++;
+            continue;
+        }
+
+        if (c === 34 /* " */ || c === 39 /* ' */) {
+            quote = c;
+            i++;
+            continue;
+        }
+
+        if (c === 59 /* ; */) {
+            if (!buildMaskedCode) {
+                return { code: '', inBlockComment: false, hasSemicolonComment: true };
+            }
+            if (!chunks) {
+                return { code: line.slice(0, i), inBlockComment: false, hasSemicolonComment: true };
+            }
+            if (i > copyStart) {
+                chunks.push(line.slice(copyStart, i));
+            }
+            return { code: chunks.join(''), inBlockComment: false, hasSemicolonComment: true };
+        }
+
+        if (c === 47 /* / */ && i + 1 < len && line.charCodeAt(i + 1) === 42 /* * */) {
+            if (buildMaskedCode) {
+                chunks ??= [];
+                if (i > copyStart) {
+                    chunks.push(line.slice(copyStart, i));
+                }
+            }
+            copyStart = i;
+            inBlock = true;
+            i += 2;
+            continue;
+        }
+
+        i++;
+    }
+
+    if (inBlock) {
+        return {
+            code: buildMaskedCode && chunks ? chunks.join('') : '',
+            inBlockComment: true,
+            hasSemicolonComment: false,
+        };
+    }
+
+    if (!buildMaskedCode) {
+        return { code: '', inBlockComment: false, hasSemicolonComment: false };
+    }
+    if (!chunks) {
+        return { code: line, inBlockComment: false, hasSemicolonComment: false };
+    }
+    if (copyStart < len) {
+        chunks.push(line.slice(copyStart));
+    }
+    return { code: chunks.join(''), inBlockComment: false, hasSemicolonComment: false };
+}
+
+/**
+ * Strips `;` comments and masks closed `/* ... *\/` block comments with spaces so column offsets stay intact.
+ */
+export function stripCommentsInLine(
+    line: string,
+    startInBlockComment: boolean = false,
+    cComments: boolean = true
+): StrippedLine {
+    return scanLineComments(line, startInBlockComment, true, cComments);
+}
+
+/**
+ * Computes whether `targetLine` starts inside an unclosed `/* ... *\/` block comment.
+ */
+export function isInBlockCommentBeforeLine(
+    document: TextDocument,
+    targetLine: number,
+    docText?: string,
+    cComments: boolean = true
+): boolean {
+    if (!cComments || targetLine <= 0) return false;
+    const text = docText ?? document.getText();
+    if (text.indexOf('/*') === -1) return false;
+
+    const len = text.length;
+    let line = 0;
+    let lineStart = 0;
+    let inBlock = false;
+
+    while (line < targetLine && lineStart <= len) {
+        const nlIdx = text.indexOf('\n', lineStart);
+        let lineEnd = nlIdx >= 0 ? nlIdx : len;
+        if (lineEnd > lineStart && text.charCodeAt(lineEnd - 1) === 13 /* \r */) {
+            lineEnd--;
+        }
+
+        const raw = text.slice(lineStart, lineEnd);
+        if (inBlock ? raw.indexOf('*/') !== -1 : raw.indexOf('/*') !== -1) {
+            inBlock = scanLineComments(raw, inBlock, false, true).inBlockComment;
+        }
+
+        if (nlIdx < 0) break;
+        lineStart = nlIdx + 1;
+        line++;
+    }
+
+    return inBlock;
+}
+
+/**
+ * Returns `line` in `document` with `;` and `/* ... *\/` comments stripped/masked (preserving columns).
+ */
+export function maskCommentsAtDocumentLine(
+    document: TextDocument,
+    line: number,
+    docText?: string,
+    cComments: boolean = true
+): string {
+    if (line < 0 || line >= document.lineCount) return '';
+    const text = docText ?? document.getText();
+    const startOffset = line === 0 ? 0 : document.offsetAt({ line, character: 0 });
+    const nlIdx = text.indexOf('\n', startOffset);
+    let endOffset = nlIdx >= 0 ? nlIdx : text.length;
+    if (endOffset > startOffset && text.charCodeAt(endOffset - 1) === 13 /* \r */) {
+        endOffset--;
+    }
+    const rawLine = text.slice(startOffset, endOffset);
+    const inBlock = isInBlockCommentBeforeLine(document, line, text, cComments);
+    return stripCommentsInLine(rawLine, inBlock, cComments).code;
+}
+
+/**
+ * Checks whether a stripped line continues onto the next line via trailing `\` or an unclosed block comment.
+ */
+export function doesStrippedLineContinue(stripped: StrippedLine, lineContinuations: boolean = true): boolean {
+    if (stripped.inBlockComment) return true;
+    if (!lineContinuations || stripped.hasSemicolonComment) return false;
+    const trimmedEnd = trimEndIndex(stripped.code, 0, stripped.code.length);
+    return trimmedEnd > 0 && stripped.code.charCodeAt(trimmedEnd - 1) === 92 /* \ */;
+}
+
+/**
+ * Inspects comment/string state at `position` and returns the comment-stripped logical line up to the cursor.
+ */
+export function getCursorCommentContext(
+    document: TextDocument,
+    position: Position,
+    options?: { cComments?: boolean; lineContinuations?: boolean }
+): CursorCommentContext {
+    const cComments = options?.cComments ?? true;
+    const lineContinuations = options?.lineContinuations ?? true;
+    const text = document.getText();
+    const len = text.length;
+    const hasBlockMarkers = cComments && text.indexOf('/*') !== -1;
+
+    let stmtStartLine = 0;
+    let inBlock = false;
+    let line = 0;
+    let lineStart = 0;
+
+    if (position.line > 0 && (hasBlockMarkers || lineContinuations)) {
+        // Track only stmtStartLine without allocating joined strings for prior finished lines.
+        const maxBackLine = position.line;
+        while (line < maxBackLine && lineStart <= len) {
+            const nlIdx = text.indexOf('\n', lineStart);
+            let lineEnd = nlIdx >= 0 ? nlIdx : len;
+            if (lineEnd > lineStart && text.charCodeAt(lineEnd - 1) === 13 /* \r */) {
+                lineEnd--;
+            }
+
+            let continues = false;
+            const mightContBackslash = lineContinuations && lineEnd > lineStart && text.charCodeAt(trimEndIndex(text, lineStart, lineEnd) - 1) === 92 /* \ */;
+            const needsScan = hasBlockMarkers
+                ? (inBlock || mightContBackslash || text.slice(lineStart, lineEnd).indexOf('/*') !== -1)
+                : mightContBackslash;
+
+            if (needsScan) {
+                const raw = text.slice(lineStart, lineEnd);
+                const stripped = stripCommentsInLine(raw, inBlock, cComments);
+                inBlock = stripped.inBlockComment;
+                continues = doesStrippedLineContinue(stripped, lineContinuations);
+            } else {
+                inBlock = false;
+                continues = false;
+            }
+
+            if (!continues) {
+                stmtStartLine = line + 1;
+            }
+
+            if (nlIdx < 0) break;
+            lineStart = nlIdx + 1;
+            line++;
+        }
+    } else if (position.line > 0) {
+        stmtStartLine = position.line;
+    }
+
+    // Collect and mask lines from stmtStartLine .. position.line - 1
+    const logicalParts: string[] = [];
+    if (stmtStartLine < position.line) {
+        let curBlock = false; // stmtStartLine always begins outside an unclosed block comment
+        let scanLine = stmtStartLine;
+        let scanOffset = stmtStartLine === 0 ? 0 : document.offsetAt({ line: stmtStartLine, character: 0 });
+        while (scanLine < position.line && scanOffset <= len) {
+            const nlIdx = text.indexOf('\n', scanOffset);
+            let scanEnd = nlIdx >= 0 ? nlIdx : len;
+            if (scanEnd > scanOffset && text.charCodeAt(scanEnd - 1) === 13 /* \r */) {
+                scanEnd--;
+            }
+            const raw = text.slice(scanOffset, scanEnd);
+            const stripped = stripCommentsInLine(raw, curBlock, cComments);
+            curBlock = stripped.inBlockComment;
+            const trimmedEnd = trimEndIndex(stripped.code, 0, stripped.code.length);
+            const hasBackslash = lineContinuations && !stripped.hasSemicolonComment && !curBlock && trimmedEnd > 0 && stripped.code.charCodeAt(trimmedEnd - 1) === 92;
+            const piece = hasBackslash ? stripped.code.slice(0, trimmedEnd - 1) : stripped.code.slice(0, trimmedEnd);
+            if (piece.length > 0) {
+                logicalParts.push(piece);
+            }
+            if (nlIdx < 0) break;
+            scanOffset = nlIdx + 1;
+            scanLine++;
+        }
+        inBlock = curBlock;
+    }
+
+    const curLineStart = position.line <= 0 ? 0 : document.offsetAt({ line: position.line, character: 0 });
+    const curNl = text.indexOf('\n', curLineStart);
+    let curLineEnd = curNl >= 0 ? curNl : len;
+    if (curLineEnd > curLineStart && text.charCodeAt(curLineEnd - 1) === 13 /* \r */) {
+        curLineEnd--;
+    }
+    const cursorEnd = Math.min(curLineEnd, curLineStart + Math.max(0, position.character));
+    const rawLineToCursor = text.slice(curLineStart, cursorEnd);
+
+    // Mask and inspect before-cursor slice character-by-character starting from `inBlock`
+    let quote = 0;
+    let copyStart = 0;
+    const chunks: string[] = [];
+    for (let i = 0; i < rawLineToCursor.length;) {
+        if (inBlock) {
+            const closeIdx = rawLineToCursor.indexOf('*/', i);
+            if (closeIdx === -1) {
+                return {
+                    inComment: true,
+                    inString: false,
+                    rawLineToCursor,
+                    logicalCodeToCursor: logicalParts.join(' '),
+                };
+            }
+            chunks.push(' '.repeat(closeIdx + 2 - copyStart));
+            inBlock = false;
+            i = closeIdx + 2;
+            copyStart = i;
+            continue;
+        }
+        const ch = rawLineToCursor.charCodeAt(i);
+        if (quote !== 0) {
+            if (ch === quote) quote = 0;
+            i++;
+            continue;
+        }
+        if (ch === 34 /* " */ || ch === 39 /* ' */) {
+            quote = ch;
+            i++;
+            continue;
+        }
+        if (ch === 59 /* ; */) {
+            if (i > copyStart) chunks.push(rawLineToCursor.slice(copyStart, i));
+            return {
+                inComment: true,
+                inString: false,
+                rawLineToCursor,
+                logicalCodeToCursor: logicalParts.length > 0 ? `${logicalParts.join(' ')} ${chunks.join('')}` : chunks.join(''),
+            };
+        }
+        if (cComments && ch === 47 /* / */ && i + 1 < rawLineToCursor.length && rawLineToCursor.charCodeAt(i + 1) === 42 /* * */) {
+            if (i > copyStart) chunks.push(rawLineToCursor.slice(copyStart, i));
+            copyStart = i;
+            inBlock = true;
+            i += 2;
+            continue;
+        }
+        i++;
+    }
+
+    if (inBlock) {
+        return {
+            inComment: true,
+            inString: false,
+            rawLineToCursor,
+            logicalCodeToCursor: logicalParts.join(' '),
+        };
+    }
+
+    if (copyStart < rawLineToCursor.length) {
+        chunks.push(rawLineToCursor.slice(copyStart));
+    }
+    const maskedCurrent = chunks.join('');
+    logicalParts.push(maskedCurrent);
+
+    return {
+        inComment: false,
+        inString: quote !== 0,
+        rawLineToCursor,
+        logicalCodeToCursor: logicalParts.join(' '),
+    };
 }
 
 function parseLineCore(line: string, codeEnd: number, comment?: LineItem): ParsedLine {
@@ -508,7 +983,19 @@ class DocumentScanner {
         const len = fullText.length;
         let lineNumber = 0;
         let lineStart = 0;
-        let hasLineContinuation = false;
+        let inBlockComment = false;
+        let segments: LogicalLineSegment[] = [];
+        let joinedParts: string[] = [];
+        let joinedLen = 0;
+
+        const flushLogicalLine = () => {
+            if (segments.length === 0) return;
+            const logicalText = segments.length === 1 ? segments[0].code : joinedParts.join('');
+            this.processLogicalLine(logicalText, segments);
+            segments = [];
+            joinedParts = [];
+            joinedLen = 0;
+        };
 
         while (lineStart <= len) {
             const nlIdx = fullText.indexOf('\n', lineStart);
@@ -517,29 +1004,38 @@ class DocumentScanner {
                 lineEnd--;
             }
 
-            const isContinued = hasLineContinuation;
-            hasLineContinuation = false;
+            const rawLine = fullText.slice(lineStart, lineEnd);
+            const stripped = stripCommentsInLine(rawLine, inBlockComment, this.settings.cComments);
+            inBlockComment = stripped.inBlockComment;
 
-            const commentIdx = findCommentStartInRange(fullText, lineStart, lineEnd);
-            const hasComment = commentIdx >= 0;
-            const codeEnd = hasComment ? commentIdx : lineEnd;
-            const trimmedEnd = trimEndIndex(fullText, lineStart, codeEnd);
+            const trimmedEnd = trimEndIndex(stripped.code, 0, stripped.code.length);
+            const isBackslashCont = this.settings.lineContinuations
+                && !stripped.hasSemicolonComment
+                && !inBlockComment
+                && trimmedEnd > 0
+                && stripped.code.charCodeAt(trimmedEnd - 1) === 92 /* \ */;
+            const segEnd = isBackslashCont ? trimmedEnd - 1 : trimmedEnd;
+            const segCode = segEnd > 0 ? stripped.code.slice(0, segEnd) : '';
 
-            if (!hasComment && trimmedEnd > lineStart && fullText.charCodeAt(trimmedEnd - 1) === 92 /* \ */) {
-                hasLineContinuation = true;
+            if (skipWhitespace(segCode, 0, segCode.length) < segCode.length) {
+                if (segments.length > 0) {
+                    joinedParts.push(' ');
+                    joinedLen++;
+                }
+                const joinedStart = joinedLen;
+                joinedParts.push(segCode);
+                joinedLen += segCode.length;
+                segments.push({
+                    line: lineNumber,
+                    code: segCode,
+                    joinedStart,
+                    joinedEnd: joinedLen,
+                });
             }
 
-            if (isContinued) {
-                const trimmedLen = trimmedEnd - lineStart;
-                if (trimmedLen > 0) {
-                    // Handle line continuations by recording all symbol references across the continued line.
-                    this.addReferences(lineNumber, fullText.slice(lineStart, codeEnd), 0, this.currentScope);
-                }
-                if (this.currentLabel) {
-                    this.currentLabel.range.end = { line: lineNumber, character: trimmedLen };
-                }
-            } else if (trimmedEnd > lineStart) {
-                this.processLine(lineNumber, fullText.slice(lineStart, codeEnd), trimmedEnd - lineStart);
+            const continuesToNext = inBlockComment || isBackslashCont;
+            if (!continuesToNext) {
+                flushLogicalLine();
             }
 
             if (nlIdx < 0) break;
@@ -547,29 +1043,30 @@ class DocumentScanner {
             lineNumber++;
         }
 
+        flushLogicalLine();
         this.pruneAnonymousLabelRefs();
         this.closeOpenScopes();
         return this.symbolTable;
     }
 
-    private processLine(lineNumber: number, text: string, trimmedLen: number): void {
-        this.addAnonymousLabelRefs(lineNumber, text);
+    private processLogicalLine(text: string, segments: readonly LogicalLineSegment[]): void {
+        if (this.handleMacroContent(text, segments)) return;
 
-        if (this.handleMacroContent(lineNumber, text)) return;
+        this.addAnonymousLabelRefs(text, segments);
 
         // Parse once for struct/union, enum, and generic directive/instruction lines
         const parsed = parseCodeLine(text);
 
-        if (this.handleStructUnionContent(lineNumber, text, parsed)) return;
-        if (this.handleEnumContent(lineNumber, text, parsed)) return;
+        if (this.handleStructUnionContent(text, segments, parsed)) return;
+        if (this.handleEnumContent(text, segments, parsed)) return;
 
-        if (this.handleAssignment(lineNumber, text)) return;
-        this.handleGenericLine(lineNumber, parsed, trimmedLen);
+        if (this.handleAssignment(text, segments)) return;
+        this.handleGenericLine(parsed, segments, text.length);
     }
 
     private addReferences(
-        line: number,
         text: string,
+        segments: readonly LogicalLineSegment[],
         offset: number = 0,
         scope: Scope,
         callingEntity?: SymbolTableEntity
@@ -582,7 +1079,7 @@ class DocumentScanner {
                     name,
                     EMPTY_QUALIFIERS,
                     context,
-                    Range.create(line, index, line, index + name.length),
+                    mapSpanToRange(segments, index, index + name.length),
                     scope,
                     callingEntity
                 ));
@@ -601,7 +1098,7 @@ class DocumentScanner {
                     name,
                     refQualifiers,
                     i === lastIdx ? context : 'scope',
-                    Range.create(line, index, line, index + name.length),
+                    mapSpanToRange(segments, index, index + name.length),
                     scope,
                     callingEntity
                 ));
@@ -614,7 +1111,7 @@ class DocumentScanner {
 
     private addSingleReference(
         context: ReferenceInfo['context'],
-        line: number,
+        segments: readonly LogicalLineSegment[],
         text: string,
         offset: number,
         scope: Scope
@@ -624,17 +1121,18 @@ class DocumentScanner {
             text,
             EMPTY_QUALIFIERS,
             context,
-            Range.create(line, offset, line, offset + text.length),
+            mapSpanToRange(segments, offset, offset + text.length),
             scope
         ));
     }
 
-    private addAnonymousLabelRefs(line: number, text: string): void {
+    private addAnonymousLabelRefs(text: string, segments: readonly LogicalLineSegment[]): void {
         if (text.indexOf(':') === -1) return;
 
+        const maskedText = maskQuotedLiterals(text);
         let match: RegExpExecArray | null;
         ANON_REF_RE.lastIndex = 0;
-        while ((match = ANON_REF_RE.exec(text)) !== null) {
+        while ((match = ANON_REF_RE.exec(maskedText)) !== null) {
             const offset = getAnonLabelRefOffsetFromPreviousLabel(match[0]);
             const targetIndex = this.nextAnonLabelIndex - 1 + offset;
             if (targetIndex < 0) continue;
@@ -644,22 +1142,22 @@ class DocumentScanner {
                 list = [];
                 this.symbolTable.anonymousLabelReferences.set(targetIndex, list);
             }
-            list.push(Range.create(line, match.index, line, match.index + match[0].length));
+            list.push(mapSpanToRange(segments, match.index, match.index + match[0].length));
         }
     }
 
-    private handleAssignment(line: number, text: string): boolean {
+    private handleAssignment(text: string, segments: readonly LogicalLineSegment[]): boolean {
         if (text.indexOf('=') !== -1) {
             const constMatch = text.match(CONSTANT_ASSIGNMENT_RE);
             if (constMatch?.groups) {
-                return this.recordAssignment(line, text, constMatch.groups.name, SymbolKind.Constant);
+                return this.recordAssignment(text, segments, constMatch.groups.name, SymbolKind.Constant);
             }
         }
 
         if (text.indexOf('.set') !== -1) {
             const varMatch = text.match(VARIABLE_ASSIGNMENT_RE);
             if (varMatch?.groups) {
-                return this.recordAssignment(line, text, varMatch.groups.name, SymbolKind.Variable, this.currentSegment);
+                return this.recordAssignment(text, segments, varMatch.groups.name, SymbolKind.Variable, this.currentSegment);
             }
         }
 
@@ -667,20 +1165,20 @@ class DocumentScanner {
     }
 
     private recordAssignment(
-        line: number,
         text: string,
+        segments: readonly LogicalLineSegment[],
         name: string,
         kind: SymbolKind,
         segment?: string
     ): boolean {
-        const nameIndex = text.indexOf(name);
-        const definition = Range.create(line, nameIndex, line, nameIndex + name.length);
-        this.addReferences(line, text, 0, this.currentScope);
+        const nameIndex = skipWhitespace(text, 0, text.length);
+        const definition = mapSpanToRange(segments, nameIndex, nameIndex + name.length);
+        this.addReferences(text, segments, 0, this.currentScope);
         this.currentScope.addSymbol(name, definition, kind, segment);
         return true;
     }
 
-    private handleMacroContent(line: number, text: string): boolean {
+    private handleMacroContent(text: string, segments: readonly LogicalLineSegment[]): boolean {
         if (!this.currentMacro && !this.inIgnoredMacro) return false;
 
         const word = firstWord(text);
@@ -691,7 +1189,9 @@ class DocumentScanner {
             if (lowerWord === '.endmac' || lowerWord === '.endmacro') {
                 if (this.currentMacro?.range) {
                     const endIdx = text.toLowerCase().indexOf('.end');
-                    this.currentMacro.range.end = { line, character: endIdx >= 0 ? endIdx : 0 };
+                    this.currentMacro.range.end = endIdx >= 0
+                        ? mapOffsetToPosition(segments, endIdx, false)
+                        : Position.create(segments[0].line, 0);
                 }
                 this.currentMacro = null;
                 this.inIgnoredMacro = false;
@@ -700,18 +1200,21 @@ class DocumentScanner {
         return true;
     }
 
-    private openScope(kind: ScopeKind, line: number, command: LineItem, args?: LineItem): void {
+    private openScope(kind: ScopeKind, segments: readonly LogicalLineSegment[], command: LineItem, args?: LineItem): void {
         this.currentLabel = undefined;
         const argsIndex = args?.index ?? (command.index + command.text.length);
+        const defRange = args?.text
+            ? mapSpanToRange(segments, args.index, args.index + args.text.length)
+            : mapSpanToRange(segments, argsIndex, argsIndex);
         let name = args?.text || '';
         if (name) {
-            this.addSingleReference('scope', line, name, argsIndex, this.currentScope);
+            this.addSingleReference('scope', segments, name, argsIndex, this.currentScope);
         } else {
-            name = `<anon line ${line + 1}>`;
+            name = `<anon line ${defRange.start.line + 1}>`;
         }
         this.currentScope = this.currentScope.addChildScope(
             name,
-            Range.create(line, argsIndex, line, argsIndex + name.length),
+            defRange,
             kind,
             kind === ScopeKind.Proc ? this.currentSegment : undefined
         );
@@ -728,7 +1231,11 @@ class DocumentScanner {
         return true;
     }
 
-    private handleStructUnionContent(line: number, text: string, parsed: ParsedLine): boolean {
+    private handleStructUnionContent(
+        text: string,
+        segments: readonly LogicalLineSegment[],
+        parsed: ParsedLine
+    ): boolean {
         if (this.currentScope.kind !== ScopeKind.Struct && this.currentScope.kind !== ScopeKind.Union) {
             return false;
         }
@@ -738,34 +1245,39 @@ class DocumentScanner {
         const cmd = command.text.toLowerCase();
 
         if (CLOSE_SCOPE_KINDS[cmd] === this.currentScope.kind) {
-            this.closeScope(this.currentScope.kind, line, command.index);
+            const closePos = mapOffsetToPosition(segments, command.index, false);
+            this.closeScope(this.currentScope.kind, closePos.line, closePos.character);
             return true;
         }
 
         if (cmd === '.struct' || cmd === '.union') {
-            this.openScope(OPEN_SCOPE_KINDS[cmd], line, command, args);
+            this.openScope(OPEN_SCOPE_KINDS[cmd], segments, command, args);
             return true;
         }
 
-        const definition = Range.create(line, command.index, line, command.index + command.text.length);
+        const definition = mapSpanToRange(segments, command.index, command.index + command.text.length);
 
         if (args && firstWord(args.text).toLowerCase() === '.tag') {
             // Struct member is at the command position
-            this.addSingleReference('symbol', line, command.text, command.index, this.currentScope);
+            this.addSingleReference('symbol', segments, command.text, command.index, this.currentScope);
             const argsWithoutTag = args.text.slice('.tag'.length).trimStart();
             const indexOfStructName = args.text.length - argsWithoutTag.length + args.index;
             const structName = firstWord(argsWithoutTag);
             if (structName) {
-                this.addSingleReference('scope', line, structName, indexOfStructName, this.currentScope);
+                this.addSingleReference('scope', segments, structName, indexOfStructName, this.currentScope);
             }
         } else {
-            this.addReferences(line, text, 0, this.currentScope);
+            this.addReferences(text, segments, 0, this.currentScope);
         }
         this.currentScope.addSymbol(command.text, definition, SymbolKind.StructMember);
         return true;
     }
 
-    private handleEnumContent(line: number, text: string, parsed: ParsedLine): boolean {
+    private handleEnumContent(
+        text: string,
+        segments: readonly LogicalLineSegment[],
+        parsed: ParsedLine
+    ): boolean {
         if (this.currentScope.kind !== ScopeKind.Enum) {
             return false;
         }
@@ -774,20 +1286,25 @@ class DocumentScanner {
         if (!command) return !parsed.label;
 
         if (command.text.toLowerCase() === '.endenum') {
-            this.closeScope(ScopeKind.Enum, line, command.index);
+            const closePos = mapOffsetToPosition(segments, command.index, false);
+            this.closeScope(ScopeKind.Enum, closePos.line, closePos.character);
             return true;
         }
 
-        const definition = Range.create(line, command.index, line, command.index + command.text.length);
-        this.addReferences(line, text, 0, this.currentScope);
+        const definition = mapSpanToRange(segments, command.index, command.index + command.text.length);
+        this.addReferences(text, segments, 0, this.currentScope);
         this.currentScope.addSymbol(command.text, definition, SymbolKind.EnumMember);
         return true;
     }
 
-    private handleGenericLine(line: number, parsed: ParsedLine, trimmedLen: number): void {
+    private handleGenericLine(
+        parsed: ParsedLine,
+        segments: readonly LogicalLineSegment[],
+        trimmedLen: number
+    ): void {
         const { label, command, args } = parsed;
         if (label) {
-            this.handleLabel(line, label);
+            this.handleLabel(segments, label);
         }
 
         if (!command) return;
@@ -795,17 +1312,17 @@ class DocumentScanner {
         const cmd = command.text.toLowerCase();
         const isDirective = cmd.charCodeAt(0) === 46 /* . */;
         if (!isDirective && !getMnemonicInfo(cmd, this.settings.cpu)) {
-            this.addSingleReference('macro', line, command.text, command.index, this.symbolTable.getRootScope());
+            this.addSingleReference('macro', segments, command.text, command.index, this.symbolTable.getRootScope());
         }
 
-        if (isDirective && this.handleDirective(line, command, args)) {
+        if (isDirective && this.handleDirective(segments, command, args)) {
             return;
         }
 
         const argsText = args?.text || '';
         if (this.currentLabel) {
             // Consume any un-labeled commands as part of the current label
-            this.currentLabel.range.end = { line, character: trimmedLen };
+            this.currentLabel.range.end = mapOffsetToPosition(segments, trimmedLen, true);
             this.updateLabelKindFromCommand(cmd, argsText);
         }
 
@@ -814,7 +1331,7 @@ class DocumentScanner {
         if (cmd === '.tag') {
             const structName = firstWord(args.text);
             if (structName) {
-                this.addSingleReference('scope', line, structName, args.index, this.currentScope);
+                this.addSingleReference('scope', segments, structName, args.index, this.currentScope);
             }
             return;
         }
@@ -827,69 +1344,82 @@ class DocumentScanner {
                 callingEntity = this.currentScope;
             }
         }
-        this.addReferences(line, args.text, args.index, this.currentScope, callingEntity);
+        this.addReferences(args.text, segments, args.index, this.currentScope, callingEntity);
     }
 
-    private handleLabel(line: number, label: LineItem): void {
+    private handleLabel(segments: readonly LogicalLineSegment[], label: LineItem): void {
         if (label.text.startsWith('@')) {
             // Cheap local labels are resolved on-demand.
             return;
         }
 
         if (label.text.length === 0) {
-            this.symbolTable.anonymousLabelLines.push(line);
+            const labelPos = mapOffsetToPosition(segments, label.index, false);
+            this.symbolTable.anonymousLabelLines.push(labelPos.line);
             let refs = this.symbolTable.anonymousLabelReferences.get(this.nextAnonLabelIndex);
             if (!refs) {
                 refs = [];
                 this.symbolTable.anonymousLabelReferences.set(this.nextAnonLabelIndex, refs);
             }
-            refs.push(Range.create(line, label.index, line, label.index + 1));
+            refs.push(Range.create(labelPos.line, labelPos.character, labelPos.line, labelPos.character + 1));
             this.nextAnonLabelIndex++;
             return;
         }
 
-        this.addSingleReference('symbol', line, label.text, label.index, this.currentScope);
+        this.addSingleReference('symbol', segments, label.text, label.index, this.currentScope);
         this.currentLabel = this.currentScope.addSymbol(
             label.text,
-            Range.create(line, label.index, line, label.index + label.text.length),
+            mapSpanToRange(segments, label.index, label.index + label.text.length),
             SymbolKind.Label,
             this.currentSegment
         );
         this.pendingLabelKindSet = false;
     }
 
-    private handleDirective(line: number, command: LineItem, args?: LineItem): boolean {
+    private handleDirective(
+        segments: readonly LogicalLineSegment[],
+        command: LineItem,
+        args?: LineItem
+    ): boolean {
         const cmd = command.text.toLowerCase();
         const argsText = args?.text || '';
         const argsIndex = args?.index ?? (command.index + command.text.length);
+        const cmdLine = mapOffsetToPosition(segments, command.index, false).line;
 
         const openKind = OPEN_SCOPE_KINDS[cmd];
         if (openKind) {
-            this.openScope(openKind, line, command, args);
+            this.openScope(openKind, segments, command, args);
             return true;
         }
 
         if (cmd === '.endproc' || cmd === '.endscope') {
             this.currentLabel = undefined;
-            return this.closeScope(CLOSE_SCOPE_KINDS[cmd], line, command.index);
+            const closePos = mapOffsetToPosition(segments, command.index, false);
+            return this.closeScope(CLOSE_SCOPE_KINDS[cmd], closePos.line, closePos.character);
         }
 
         if (cmd === '.macro' || cmd === '.mac') {
-            this.handleMacroDirective(line, argsText, argsIndex, args ? firstWord(args.text) : undefined);
+            this.handleMacroDirective(segments, argsText, argsIndex, args ? firstWord(args.text) : undefined);
             return true;
         }
 
         if (cmd === '.define') {
-            this.handleDefineDirective(line, argsText, argsIndex);
+            this.handleDefineDirective(segments, argsText, argsIndex);
             return true;
         }
 
         if (SEGMENT_DIRECTIVES.has(cmd)) {
             this.currentLabel = undefined;
-            this.currentSegment = cmd === '.segment'
-                ? argsText.replace(/"/g, '')
-                : cmd.slice(1).toUpperCase();
-            this.symbolTable.recordSegmentChange(line, this.currentSegment);
+            if (cmd === '.segment') {
+                const parsedSeg = parseSegmentDirectiveArgs(argsText);
+                this.currentSegment = parsedSeg.segment;
+                if (parsedSeg.segment && parsedSeg.addrSize) {
+                    this.symbolTable.recordSegmentAddrSize(parsedSeg.segment, parsedSeg.addrSize);
+                }
+            } else {
+                this.currentSegment = cmd.slice(1).toUpperCase();
+            }
+            this.symbolTable.recordSegmentChange(cmdLine, this.currentSegment);
             return true;
         }
 
@@ -902,28 +1432,29 @@ class DocumentScanner {
             this.currentLabel = undefined;
             if (this.segmentStack.length > 0) {
                 this.currentSegment = this.segmentStack.pop()!;
-                this.symbolTable.recordSegmentChange(line, this.currentSegment);
+                this.symbolTable.recordSegmentChange(cmdLine, this.currentSegment);
             }
             return true;
         }
 
         if (IMPORT_EXPORT_DIRECTIVES.has(cmd)) {
-            this.handleImportExportDirective(cmd, line, args);
+            this.handleImportExportDirective(cmd, segments, args);
             return true;
         }
 
         if (cmd === '.include') {
-            this.handleIncludeDirective(line, args);
+            this.handleIncludeDirective(segments, cmdLine, args);
             return true;
         }
 
         if (cmd === '.incbin' && args && args.text.startsWith('"')) {
             const closeQuote = args.text.indexOf('"', 1);
             if (closeQuote > 1) {
+                const pathRange = mapSpanToRange(segments, args.index + 1, args.index + closeQuote);
                 this.symbolTable.documentLinkDirectives.push({
-                    line,
-                    startChar: args.index + 1,
-                    endChar: args.index + closeQuote,
+                    line: pathRange.start.line,
+                    startChar: pathRange.start.character,
+                    endChar: pathRange.end.character,
                     filename: args.text.slice(1, closeQuote),
                     isBinary: true,
                 });
@@ -933,7 +1464,12 @@ class DocumentScanner {
         return false;
     }
 
-    private handleMacroDirective(line: number, argsText: string, argsIndex: number, name?: string): void {
+    private handleMacroDirective(
+        segments: readonly LogicalLineSegment[],
+        argsText: string,
+        argsIndex: number,
+        name?: string
+    ): void {
         this.currentLabel = undefined;
         if (!name) return;
 
@@ -942,11 +1478,11 @@ class DocumentScanner {
             ? rawParams.split(',').map(p => p.trim()).filter(Boolean)
             : [];
 
-        this.addSingleReference('macro', line, name, argsIndex, this.currentScope);
+        this.addSingleReference('macro', segments, name, argsIndex, this.currentScope);
         if (!this.symbolTable.getMacro(name)) {
             this.currentMacro = this.symbolTable.addMacro(
                 name,
-                Range.create(line, argsIndex, line, argsIndex + argsText.length),
+                mapSpanToRange(segments, argsIndex, argsIndex + argsText.length),
                 MacroKind.Macro,
                 params
             );
@@ -955,7 +1491,11 @@ class DocumentScanner {
         }
     }
 
-    private handleDefineDirective(line: number, argsText: string, argsIndex: number): void {
+    private handleDefineDirective(
+        segments: readonly LogicalLineSegment[],
+        argsText: string,
+        argsIndex: number
+    ): void {
         this.currentLabel = undefined;
         const defMatch = argsText.match(/([a-zA-Z_@.][a-zA-Z0-9_]*)(?:\(([^)]*)\))?/);
         const name = defMatch?.[1];
@@ -965,19 +1505,24 @@ class DocumentScanner {
         const params = rawParams !== undefined
             ? rawParams.split(',').map(p => p.trim()).filter(Boolean)
             : [];
+        const nameStart = argsIndex + (defMatch?.index ?? 0);
 
-        this.addSingleReference('macro', line, name, argsIndex, this.currentScope);
+        this.addSingleReference('macro', segments, name, nameStart, this.currentScope);
         if (!this.symbolTable.getMacro(name)) {
             this.symbolTable.addMacro(
                 name,
-                Range.create(line, argsIndex, line, argsIndex + name.length),
+                mapSpanToRange(segments, nameStart, nameStart + name.length),
                 MacroKind.Define,
                 params
             );
         }
     }
 
-    private handleImportExportDirective(cmd: string, line: number, args?: LineItem): void {
+    private handleImportExportDirective(
+        cmd: string,
+        segments: readonly LogicalLineSegment[],
+        args?: LineItem
+    ): void {
         if (!args) return;
 
         const isImport = cmd.startsWith('.import');
@@ -988,19 +1533,18 @@ class DocumentScanner {
         for (const { identifier, assignmentOp, value } of parseImportExportArgs(args.text, args.index)) {
             if (!identifier) continue;
 
-            const identifierRange = Range.create(
-                line,
+            const identifierRange = mapSpanToRange(
+                segments,
                 identifier.index,
-                line,
                 identifier.index + identifier.text.length
             );
 
             if (isExport && assignmentOp && value) {
                 // Exports may define a constant on the same line
                 this.currentScope.addSymbol(identifier.text, identifierRange, SymbolKind.Constant);
-                this.addReferences(line, value.text, value.index, this.currentScope);
+                this.addReferences(value.text, segments, value.index, this.currentScope);
             }
-            this.addSingleReference('symbol', line, identifier.text, identifier.index, this.currentScope);
+            this.addSingleReference('symbol', segments, identifier.text, identifier.index, this.currentScope);
 
             if (isImport || isGlobal) {
                 this.symbolTable.imports.push(
@@ -1027,7 +1571,11 @@ class DocumentScanner {
         }
     }
 
-    private handleIncludeDirective(line: number, args?: LineItem): void {
+    private handleIncludeDirective(
+        segments: readonly LogicalLineSegment[],
+        cmdLine: number,
+        args?: LineItem
+    ): void {
         this.currentLabel = undefined;
         if (!args) return;
 
@@ -1044,21 +1592,20 @@ class DocumentScanner {
             this.symbolTable.unresolvedIncludes.push(filename);
         }
         if (quote === '"' && filename.length > 0) {
+            const pathRange = mapSpanToRange(segments, args.index + 1, args.index + 1 + filename.length);
             this.symbolTable.documentLinkDirectives.push({
-                line,
-                startChar: args.index + 1,
-                endChar: args.index + 1 + filename.length,
+                line: pathRange.start.line,
+                startChar: pathRange.start.character,
+                endChar: pathRange.end.character,
                 filename,
                 isBinary: false,
                 resolvedUri: targetUri,
             });
         }
-        this.currentSegment = `segment from ${filename}`;
-        this.symbolTable.recordSegmentChange(line, this.currentSegment);
     }
 
     private updateLabelKindFromCommand(cmd: string, argsText: string): void {
-        if (!this.currentLabel || this.pendingLabelKindSet || cmd === '.align') return;
+        if (!this.currentLabel || this.pendingLabelKindSet || LABEL_KIND_TRANSPARENT_DIRECTIVES.has(cmd)) return;
 
         this.pendingLabelKindSet = true;
         if (cmd.charCodeAt(0) !== 46 /* . */) return;
@@ -1066,7 +1613,7 @@ class DocumentScanner {
         if (cmd === '.res' || cmd === '.tag') {
             this.currentLabel.kind = SymbolKind.ResLabel;
         } else if (cmd === '.byt' || cmd === '.byte') {
-            this.currentLabel.kind = /^"[^"]*"(\s*,\s*"[^"]*")*$/.test(argsText)
+            this.currentLabel.kind = STRING_BYTE_LIST_RE.test(argsText)
                 ? SymbolKind.StringLabel
                 : SymbolKind.DataLabel;
         } else if (DATA_LABEL_DIRECTIVES.has(cmd)) {

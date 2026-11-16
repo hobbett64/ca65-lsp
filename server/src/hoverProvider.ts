@@ -21,6 +21,7 @@ import { findCheapLocalLabelAtPosition, findCheapLocalLabelDefinition, findPrevi
 import { getAnonymousLabelIndex } from './anonymousLabelUtils';
 import { findNumberLiteralAtPosition, NumberLiteralHit } from './codeActionProvider';
 import { getWorkspaceRelativePath } from './pathUtils';
+import { maskCommentsAtDocumentLine } from './documentScanner';
 
 export function initializeHoverProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
     connection.onHover(async ({ textDocument, position }: TextDocumentPositionParams): Promise<Hover | undefined> => {
@@ -75,14 +76,14 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
             start: { line: position.line, character: 0 },
             end: { line: position.line + 1, character: 0 }
         });
+        const maskedLine = maskCommentsAtDocumentLine(document, position.line, undefined, settings.cComments);
 
         // Fast short-circuit before scanning full document for cheap local / anonymous labels
-        if (lineText.includes('@')) {
+        if (maskedLine.includes('@')) {
             const localName = findCheapLocalLabelAtPosition(document, position);
             if (localName) {
                 const defLoc = findCheapLocalLabelDefinition(document, position, localName);
                 if (defLoc) {
-                    const settings = await getDocumentSettings(textDocument.uri);
                     return {
                         contents: {
                             kind: MarkupKind.Markdown,
@@ -100,7 +101,7 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
             }
         }
 
-        if (lineText.includes(':')) {
+        if (maskedLine.includes(':')) {
             const anonIndex = getAnonymousLabelIndex(document, position);
             if (anonIndex !== undefined) {
                 const defLine = symbolTable.anonymousLabelLines[anonIndex];
@@ -123,7 +124,7 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
             }
         }
 
-        const numHit = findNumberLiteralAtPosition(document, position);
+        const numHit = findNumberLiteralAtPosition(document, position, settings.cComments);
         if (numHit) {
             const rawToken = lineText.slice(numHit.startChar, numHit.endChar);
             const hoverRange = Range.create(position.line, numHit.startChar, position.line, numHit.endChar);
@@ -139,7 +140,7 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
         const wordRegex = /[.a-zA-Z_][a-zA-Z0-9_]*/g;
         let match;
 
-        while ((match = wordRegex.exec(lineText)) !== null) {
+        while ((match = wordRegex.exec(maskedLine)) !== null) {
             const start = match.index!;
             const end = start + match[0].length;
 
@@ -170,12 +171,22 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
 
 // --- Markdown Generation Functions ---
 
+/**
+ * Renders an extracted doc comment block verbatim inside a `ca65` code fence
+ * so comment syntax highlighting and monospace alignment (tables, diagrams) are preserved.
+ */
+export function formatDocCommentForHover(docCommentBlock: string): string {
+    if (!docCommentBlock || /^\/\*\s*\*\/$/.test(docCommentBlock.trim())) return '';
+    return '```ca65\n' + docCommentBlock + '\n```';
+}
+
 export function extractLeadingDocInfo(document: TextDocument, definitionLine: number): {
     docCommentBlock: string;
     hasInlineExport: boolean;
 } {
     const rawCommentLines: string[] = [];
     let hasInlineExport = false;
+    let inBlockDoc = false;
 
     for (let i = definitionLine - 1; i >= 0; i--) {
         const lineText = document.getText({
@@ -183,31 +194,73 @@ export function extractLeadingDocInfo(document: TextDocument, definitionLine: nu
             end: { line: i + 1, character: 0 }
         });
 
-        const trimmedLine = lineText.trim();
+        const rawNoEol = lineText.replace(/\r?\n$/, '').trimEnd();
+        const trimmedLine = rawNoEol.trimStart();
+        if (inBlockDoc) {
+            rawCommentLines.unshift(rawNoEol);
+            const openIdx = rawNoEol.indexOf('/*');
+            if (openIdx >= 0) {
+                // Reject trailing block comments attached to an earlier code line
+                const prefix = rawNoEol.slice(0, openIdx);
+                if (prefix.trim().length > 0) {
+                    rawCommentLines.length = 0;
+                } else if (openIdx > 0) {
+                    for (let j = 0; j < rawCommentLines.length; j++) {
+                        let strip = 0;
+                        while (strip < openIdx && strip < rawCommentLines[j].length && (rawCommentLines[j][strip] === ' ' || rawCommentLines[j][strip] === '\t')) {
+                            strip++;
+                        }
+                        if (strip > 0) {
+                            rawCommentLines[j] = rawCommentLines[j].slice(strip);
+                        }
+                    }
+                }
+                break;
+            }
+            continue;
+        }
+
+        if (rawCommentLines.length === 0 && trimmedLine.endsWith('*/')) {
+            const openIdx = rawNoEol.indexOf('/*');
+            if (openIdx >= 0) {
+                if (rawNoEol.slice(0, openIdx).trim().length === 0) {
+                    rawCommentLines.unshift(trimmedLine);
+                }
+                break;
+            }
+            rawCommentLines.unshift(rawNoEol);
+            inBlockDoc = true;
+            continue;
+        }
+
         if (trimmedLine.startsWith(';')) {
             rawCommentLines.unshift(trimmedLine);
             continue;
         }
 
         // Allow an .export / .exportzp between the doc comment and the symbol def
-        const lowercase = trimmedLine.toLowerCase();
-        if (i === definitionLine - 1 && lowercase.startsWith('.export')) {
-            hasInlineExport = true;
-            continue;
-        } else if (hasInlineExport && i === definitionLine - 2 && !trimmedLine) {
-            continue;
+        if (rawCommentLines.length === 0) {
+            const lowercase = trimmedLine.toLowerCase();
+            if (i === definitionLine - 1 && lowercase.startsWith('.export')) {
+                hasInlineExport = true;
+                continue;
+            } else if (hasInlineExport && i === definitionLine - 2 && !trimmedLine) {
+                continue;
+            }
         }
 
         break;
     }
 
     // Trim leading/trailing empty comment markers (e.g. standalone `;` spacer lines)
-    const isEmptyComment = (line: string) => /^;+\s*$/.test(line);
-    while (rawCommentLines.length > 0 && isEmptyComment(rawCommentLines[0])) {
-        rawCommentLines.shift();
-    }
-    while (rawCommentLines.length > 0 && isEmptyComment(rawCommentLines[rawCommentLines.length - 1])) {
-        rawCommentLines.pop();
+    if (!inBlockDoc && !rawCommentLines[0]?.startsWith('/*')) {
+        const isEmptyComment = (line: string) => /^;+\s*$/.test(line);
+        while (rawCommentLines.length > 0 && isEmptyComment(rawCommentLines[0])) {
+            rawCommentLines.shift();
+        }
+        while (rawCommentLines.length > 0 && isEmptyComment(rawCommentLines[rawCommentLines.length - 1])) {
+            rawCommentLines.pop();
+        }
     }
 
     return {
@@ -401,7 +454,10 @@ function assembleEntityHoverMarkdown(
     const sections: string[] = [headerParts.join(' ')];
     const { docCommentBlock } = extractLeadingDocInfo(document, defLine);
     if (docCommentBlock) {
-        sections.push('```ca65\n' + docCommentBlock + '\n```');
+        const renderedDoc = formatDocCommentForHover(docCommentBlock);
+        if (renderedDoc) {
+            sections.push(renderedDoc);
+        }
     }
     sections.push(`Defined in ${formatSourceLink(uri, defLine + 1)}`);
     return sections.join('\n\n');
@@ -449,16 +505,14 @@ export function generateCheapLocalHoverMarkdown(
         implicitImports,
         binIncludeDirs
     );
-    const trailingParts: string[] = [];
-    if (resolvedSize !== null && Number.isFinite(resolvedSize) && resolvedSize >= 1) {
-        trailingParts.push(`[${resolvedSize}]`);
-    }
+    const formattedSignature = resolvedSize !== null && Number.isFinite(resolvedSize) && resolvedSize >= 2
+        ? `${signatureMarkdown}[${resolvedSize}]`
+        : signatureMarkdown;
     return assembleEntityHoverMarkdown(
         {
             segment,
             badges: ['label'],
-            signatureMarkdown,
-            trailingParts,
+            signatureMarkdown: formattedSignature,
         },
         document.uri,
         defLine,
@@ -511,13 +565,18 @@ export function generateSymbolTableEntityMarkdown(
             if (fieldInfo.badge) {
                 badges.push(fieldInfo.badge);
             }
-            resolvedSize = fieldInfo.size;
+            resolvedSize = fieldInfo.count;
         }
     }
 
+    let finalSignature = signatureMarkdown;
     const trailingParts: string[] = [];
     if (resolvedSize !== null && Number.isFinite(resolvedSize) && resolvedSize >= 1) {
-        trailingParts.push(`[${resolvedSize}]`);
+        if (entity instanceof Scope && (entity.kind === ScopeKind.Struct || entity.kind === ScopeKind.Union)) {
+            trailingParts.push(`(${resolvedSize} ${resolvedSize === 1 ? 'byte' : 'bytes'})`);
+        } else if (resolvedSize >= 2) {
+            finalSignature = `${signatureMarkdown}[${resolvedSize}]`;
+        }
     }
 
     if (
@@ -543,7 +602,7 @@ export function generateSymbolTableEntityMarkdown(
     }
 
     return assembleEntityHoverMarkdown(
-        { segment, badges, signatureMarkdown, trailingParts },
+        { segment, badges, signatureMarkdown: finalSignature, trailingParts },
         entity.uri,
         definitionStart,
         document
@@ -580,27 +639,51 @@ function formatModeCycles(info: MnemonicModeInfo): string {
     return notes.length > 0 ? `${info.cycles} (${notes.join(', ')})` : `${info.cycles}`;
 }
 
-export function generateMnemonicHoverMarkdown(mnemonic: string, data: MnemonicInfo, cpu?: Ca65Cpu): string {
+export function generateMnemonicHoverMarkdown(
+    mnemonic: string,
+    data: MnemonicInfo,
+    cpu?: Ca65Cpu,
+    options: { detailed?: boolean } = {}
+): string {
     const cpuTag = cpu && cpu !== '6502' ? ` (${cpu})` : '';
-    let markdown = `\`${mnemonic.toLowerCase()}\` — **${data.fullName}**${cpuTag}\n\n`;
+    const lowerMnemonic = mnemonic.toLowerCase();
+    let markdown = `\`${lowerMnemonic}\` — **${data.fullName}**${cpuTag}\n\n`;
     if (data.description) markdown += `${data.description}\n\n`;
     if (data.warning) markdown += `⚠️ **Warning**: ${data.warning}\n\n`;
     if (data.note) markdown += `*Note: ${data.note}*\n\n`;
-    if (data.flagChanges && Object.keys(data.flagChanges).length > 0) {
-        markdown += `**Flags affected:**\n`;
-        for (const flag of Object.keys(data.flagChanges)) {
-            markdown += `- \`${flag}\`: ${data.flagChanges[flag]}\n`;
+
+    const flagKeys = data.flagChanges ? Object.keys(data.flagChanges) : [];
+    const modeEntries = data.modes ? Object.entries(data.modes) : [];
+
+    if (options.detailed) {
+        if (flagKeys.length > 0) {
+            markdown += `**Flags affected:**\n`;
+            for (const flag of flagKeys) {
+                markdown += `- \`${flag}\`: ${data.flagChanges[flag]}\n`;
+            }
+            markdown += `\n`;
         }
-        markdown += `\n`;
-    }
-    if (data.modes && Object.keys(data.modes).length > 0) {
-        markdown += `| Mode | Opcode | Bytes | Cycles |\n`;
-        markdown += `| :--- | :---: | :---: | :---: |\n`;
-        for (const [modeName, info] of Object.entries(data.modes)) {
-            markdown += `| ${modeName} | \`${info.opcode}\` | ${formatModeBytes(info)} | ${formatModeCycles(info)} |\n`;
+        if (modeEntries.length > 0) {
+            markdown += `| Mode | Opcode | Bytes | Cycles |\n`;
+            markdown += `| :--- | :---: | :---: | :---: |\n`;
+            for (const [modeName, info] of modeEntries) {
+                markdown += `| ${modeName} | \`${info.opcode}\` | ${formatModeBytes(info)} | ${formatModeCycles(info)} |\n`;
+            }
+            markdown += `\n`;
         }
-        markdown += `\n`;
+        return markdown;
     }
+
+    const flagsSummary = flagKeys.length > 0 ? flagKeys.map(f => `\`${f}\``).join(', ') : 'None';
+    const summaryLines: string[] = [`**Affected flags:** ${flagsSummary}`];
+    if (modeEntries.length > 0) {
+        const modeList = modeEntries.map(([modeName]) => `\`${modeName}\``).join(' ');
+        summaryLines.push(`**Addressing modes:** ${modeList}`);
+    }
+    markdown += `${summaryLines.join('  \n')}\n\n`;
+
+    const encodedArg = encodeURIComponent(JSON.stringify([lowerMnemonic]));
+    markdown += `[See details](command:ca65.showReference?${encodedArg})\n`;
     return markdown;
 }
 

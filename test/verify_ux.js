@@ -83,6 +83,11 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         '.segment "DIRECTPAGE"',
         'dp_plain:',
         '',
+        '.segment "AUDIOZP": zeropage',
+        '.export audio_zp_var',
+        'audio_zp_var: .res 1',
+        'audio_zp_plain:',
+        '',
         '.segment "RODATA"',
         'lo_ptrs:',
         '  .lobytes zp_counter, bss_var, \\',
@@ -111,11 +116,16 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         '  .incbin "asset.bin"',
         'bin_slice:',
         '  .incbin "asset.bin", 2, 5',
+        'msg_cstr:',
+        '  .byte "Hi", $00',
+        'hdr_magic:',
+        '  .byte "NES", $1A',
     ].join('\n') + '\n';
 
     const mainText = [
         '.include "inc/defs.inc"',
         '.import zp_counter',
+        '.import audio_zp_var',
         '.importzp bss_var',
         '.macro FILL val',
         '  lda #val',
@@ -187,6 +197,14 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         '  cmp #$41',
         '  rts',
         '.endproc',
+        'code_repeat_lut:',
+        '  .repeat 4',
+        '    .byte 1',
+        '  .endrepeat',
+        'asserted_sub:',
+        '  .assert 1, error, "ok"',
+        '  lda #0',
+        '  rts',
         '.include "inc/',
         'tag_incomplete: .tag ',
         'sizeof_incomplete: .res .sizeof(Ent',
@@ -207,6 +225,19 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
     const pending = new Map();
     const publishedDiagnostics = new Map();
 
+    let ca65ClientConfig = {
+        enableStderrDiagnostics: false,
+        enableUnusedSymbolDiagnostics: false,
+        includeDirs: ['inc'],
+        binIncludeDirs: [],
+        autoIncludeExtensions: ['.inc'],
+        anonymousLabelIndexHints: true,
+        importFromHints: true,
+        fileExtensions: ['.s', '.asm', '.inc'],
+        smartFolding: true,
+        enableStatusBarCycleCount: true,
+    };
+
     proc.stdout.on('data', (chunk) => {
         buffer = Buffer.concat([buffer, chunk]);
         while (true) {
@@ -226,20 +257,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
                     sendMessage({
                         jsonrpc: '2.0',
                         id: msg.id,
-                        result: items.map(i => i.section === 'ca65' ? {
-                            enableCa65StdErrDiagnostics: false,
-                            enableUnusedSymbolDiagnostics: false,
-                            includeDirs: ['inc'],
-                            binIncludeDirs: [],
-                            autoIncludeExtensions: ['.inc'],
-                            anonymousLabelIndexHints: false,
-                            importFromHints: true,
-                            additionalExtensions: [],
-                            smartFolding: true,
-                            implicitImports: false,
-                            lineContinuations: false,
-                            enableStatusBarCycleCount: true,
-                        } : { associations: {} }),
+                        result: items.map(i => i.section === 'ca65' ? ca65ClientConfig : { associations: {} }),
                     });
                 } else {
                     sendMessage({ jsonrpc: '2.0', id: msg.id, result: null });
@@ -300,7 +318,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
 
         // Wait for initial validation & publishDiagnostics debounce (500ms default)
         for (let i = 0; i < 30; i++) {
-            if ((publishedDiagnostics.get(mainUri) || []).length >= 2) break;
+            if ((publishedDiagnostics.get(mainUri) || []).length >= 3) break;
             await new Promise(r => setTimeout(r, 100));
         }
 
@@ -334,13 +352,13 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         });
         assert(varHover && varHover.contents.value.startsWith('var **counter\\_var**'), `Expected var badge header, got:\n${varHover && varHover.contents.value}`);
 
-        // Hover imported ZP label with `.res 1` includes ZEROPAGE, label badge, and `[1]` size suffix
+        // Hover imported ZP label with `.res 1` omits `[1]` while keeping ZEROPAGE and label badge
         const importZpLine = lines.findIndex(l => l.includes('.import zp_counter'));
         const importZpHover = await request('textDocument/hover', {
             textDocument: { uri: mainUri },
             position: { line: importZpLine, character: lines[importZpLine].indexOf('zp_counter') + 2 },
         });
-        assert(importZpHover && importZpHover.contents.value.startsWith('`ZEROPAGE` label **zp\\_counter** [1]\n'), `Expected ZEROPAGE label badge with [1] for size 1, got:\n${importZpHover && importZpHover.contents.value}`);
+        assert(importZpHover && importZpHover.contents.value.startsWith('`ZEROPAGE` label **zp\\_counter**\n'), `Expected ZEROPAGE label badge without [1] for size 1, got:\n${importZpHover && importZpHover.contents.value}`);
 
         // Hover `.res <CONSTANT>` label resolves constant from included file (`ZP_MAX_HP = 16`)
         const zpLocalLine = lines.findIndex(l => l.includes('zp_local: .res ZP_MAX_HP'));
@@ -348,7 +366,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: mainUri },
             position: { line: zpLocalLine, character: lines[zpLocalLine].indexOf('zp_local') + 2 },
         });
-        assert(zpLocalHover && zpLocalHover.contents.value.startsWith('`ZEROPAGE` label **zp\\_local** [16]'), `Expected [16] after symbol from constant ZP_MAX_HP, got:\n${zpLocalHover && zpLocalHover.contents.value}`);
+        assert(zpLocalHover && zpLocalHover.contents.value.startsWith('`ZEROPAGE` label **zp\\_local**[16]'), `Expected [16] after symbol from constant ZP_MAX_HP, got:\n${zpLocalHover && zpLocalHover.contents.value}`);
 
         // Hover RODATA / data array labels shows evaluated byte count `[N]`
         const varsLines = varsText.split('\n');
@@ -357,29 +375,29 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: varsUri },
             position: { line: roIncbinLine, character: 2 },
         });
-        assert(roIncbinHover && roIncbinHover.contents.value.startsWith('`RODATA` label **ro\\_incbin** [4]'), `Expected [4] on .repeat 4 .byte 0 label, got:\n${roIncbinHover && roIncbinHover.contents.value}`);
+        assert(roIncbinHover && roIncbinHover.contents.value.startsWith('`RODATA` label **ro\\_incbin**[4]'), `Expected [4] on .repeat 4 .byte 0 label, got:\n${roIncbinHover && roIncbinHover.contents.value}`);
 
         const bankTableLine = varsLines.findIndex(l => l.startsWith('bank_table:'));
         const bankTableHover = await request('textDocument/hover', {
             textDocument: { uri: varsUri },
             position: { line: bankTableLine, character: 2 },
         });
-        assert(bankTableHover && bankTableHover.contents.value.startsWith('`BANK01` label **bank\\_table** [2]'), `Expected [2] on .byte $01, $02 label, got:\n${bankTableHover && bankTableHover.contents.value}`);
+        assert(bankTableHover && bankTableHover.contents.value.startsWith('`BANK01` label **bank\\_table**[2]'), `Expected [2] on .byte $01, $02 label, got:\n${bankTableHover && bankTableHover.contents.value}`);
 
         const expectedVarsSizes = [
-            ['lo_ptrs:', '`RODATA` label **lo\\_ptrs** [4]'],
-            ['hi_ptrs:', '`RODATA` label **hi\\_ptrs** [3]'],
-            ['bank_ptrs:', '`RODATA` label **bank\\_ptrs** [2]'],
-            ['word_tbl:', '`RODATA` label **word\\_tbl** [4]'],
-            ['addr_tbl:', '`RODATA` label **addr\\_tbl** [4]'],
-            ['dbyt_tbl:', '`RODATA` label **dbyt\\_tbl** [4]'],
-            ['far_tbl:', '`RODATA` label **far\\_tbl** [6]'],
-            ['dw_tbl:', '`RODATA` label **dw\\_tbl** [8]'],
-            ['msg_z:', '`RODATA` label **msg\\_z** [3]'],
-            ['msg_lit:', '`RODATA` label **msg\\_lit** [3]'],
-            ['single_b:', '`RODATA` label **single\\_b** [1]\n'],
-            ['bin_full:', '`RODATA` label **bin\\_full** [12]'],
-            ['bin_slice:', '`RODATA` label **bin\\_slice** [5]'],
+            ['lo_ptrs:', '`RODATA` label **lo\\_ptrs**[4]'],
+            ['hi_ptrs:', '`RODATA` label **hi\\_ptrs**[3]'],
+            ['bank_ptrs:', '`RODATA` label **bank\\_ptrs**[2]'],
+            ['word_tbl:', '`RODATA` label **word\\_tbl**[4]'],
+            ['addr_tbl:', '`RODATA` label **addr\\_tbl**[4]'],
+            ['dbyt_tbl:', '`RODATA` label **dbyt\\_tbl**[4]'],
+            ['far_tbl:', '`RODATA` label **far\\_tbl**[6]'],
+            ['dw_tbl:', '`RODATA` label **dw\\_tbl**[8]'],
+            ['msg_z:', '`RODATA` label **msg\\_z**[3]'],
+            ['msg_lit:', '`RODATA` label **msg\\_lit**[3]'],
+            ['single_b:', '`RODATA` label **single\\_b**\n'],
+            ['bin_full:', '`RODATA` label **bin\\_full**[12]'],
+            ['bin_slice:', '`RODATA` label **bin\\_slice**[5]'],
             ['bank_plain:', '`BANK01` label **bank\\_plain**\n'],
         ];
         for (const [labelPrefix, expectedStart] of expectedVarsSizes) {
@@ -397,13 +415,13 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: mainUri },
             position: { line: entOneLine, character: 2 },
         });
-        assert(entOneHover && entOneHover.contents.value.startsWith('`BSS` label **ent\\_one** [12]'), `Expected [12] for .tag Entity, got:\n${entOneHover && entOneHover.contents.value}`);
+        assert(entOneHover && entOneHover.contents.value.startsWith('`BSS` label **ent\\_one**[12]'), `Expected [12] for .tag Entity, got:\n${entOneHover && entOneHover.contents.value}`);
 
         const entityStructHover = await request('textDocument/hover', {
             textDocument: { uri: mainUri },
             position: { line: entOneLine, character: lines[entOneLine].indexOf('Entity') + 2 },
         });
-        assert(entityStructHover && entityStructHover.contents.value.startsWith('struct **Entity** [12]'), `Expected [12] for struct Entity, got:\n${entityStructHover && entityStructHover.contents.value}`);
+        assert(entityStructHover && entityStructHover.contents.value.startsWith('struct **Entity** (12 bytes)'), `Expected (12 bytes) for struct Entity, got:\n${entityStructHover && entityStructHover.contents.value}`);
 
         const defsLines = defsText.split('\n');
         const variantLine = defsLines.findIndex(l => l.includes('.union Variant'));
@@ -411,29 +429,30 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: defsUri },
             position: { line: variantLine, character: defsLines[variantLine].indexOf('Variant') + 2 },
         });
-        assert(variantHover && variantHover.contents.value.startsWith('union **Variant** [4]'), `Expected [4] for union Variant, got:\n${variantHover && variantHover.contents.value}`);
+        assert(variantHover && variantHover.contents.value.startsWith('union **Variant** (4 bytes)'), `Expected (4 bytes) for union Variant, got:\n${variantHover && variantHover.contents.value}`);
 
         const oneByteLine = defsLines.findIndex(l => l.includes('.struct OneByte'));
         const oneByteHover = await request('textDocument/hover', {
             textDocument: { uri: defsUri },
             position: { line: oneByteLine, character: defsLines[oneByteLine].indexOf('OneByte') + 2 },
         });
-        assert(oneByteHover && oneByteHover.contents.value.startsWith('struct **OneByte** [1]'), `Expected [1] for struct OneByte, got:\n${oneByteHover && oneByteHover.contents.value}`);
+        assert(oneByteHover && oneByteHover.contents.value.startsWith('struct **OneByte** (1 byte)'), `Expected (1 byte) for struct OneByte, got:\n${oneByteHover && oneByteHover.contents.value}`);
 
         const oneUnionLine = defsLines.findIndex(l => l.includes('.union OneUnion'));
         const oneUnionHover = await request('textDocument/hover', {
             textDocument: { uri: defsUri },
             position: { line: oneUnionLine, character: defsLines[oneUnionLine].indexOf('OneUnion') + 2 },
         });
-        assert(oneUnionHover && oneUnionHover.contents.value.startsWith('union **OneUnion** [1]'), `Expected [1] for union OneUnion, got:\n${oneUnionHover && oneUnionHover.contents.value}`);
+        assert(oneUnionHover && oneUnionHover.contents.value.startsWith('union **OneUnion** (1 byte)'), `Expected (1 byte) for union OneUnion, got:\n${oneUnionHover && oneUnionHover.contents.value}`);
 
         const expectedDefFieldSizes = [
-            ['bits .byte', 'bits', 'field byte OneByte::**bits** [1]'],
-            ['flag .res 1', 'flag', 'field OneUnion::**flag** [1]'],
-            ['pos .tag Vec2', 'pos', 'field tag Vec2 Entity::**pos** [2]'],
-            ['hp .word', 'hp', 'field word Entity::**hp** [2]'],
-            ['words .word 2', 'words', 'field word Entity::**words** [4]'],
-            ['buf .res 4', 'buf', 'field Entity::**buf** [4]'],
+            ['bits .byte', 'bits', 'field byte OneByte::**bits**\n'],
+            ['flag .res 1', 'flag', 'field OneUnion::**flag**\n'],
+            ['pos .tag Vec2', 'pos', 'field Vec2 Entity::**pos**\n'],
+            ['hp .word', 'hp', 'field word Entity::**hp**\n'],
+            ['words .word 2', 'words', 'field word Entity::**words**[2]'],
+            ['buf .res 4', 'buf', 'field Entity::**buf**[4]'],
+            ['bytes .byte 4', 'bytes', 'field byte Variant::**bytes**[4]'],
         ];
         for (const [needle, ident, expectedStart] of expectedDefFieldSizes) {
             const ln = defsLines.findIndex(l => l.includes(needle));
@@ -449,14 +468,14 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: mainUri },
             position: { line: flagOneLine, character: 2 },
         });
-        assert(flagOneHover && flagOneHover.contents.value.startsWith('`BSS` label **flag\\_one** [1]'), `Expected [1] for .tag OneByte, got:\n${flagOneHover && flagOneHover.contents.value}`);
+        assert(flagOneHover && flagOneHover.contents.value.startsWith('`BSS` label **flag\\_one**\n'), `Expected .tag OneByte (1 byte) to omit [1], got:\n${flagOneHover && flagOneHover.contents.value}`);
 
         const entArrLine = lines.findIndex(l => l.startsWith('ent_arr:'));
         const entArrHover = await request('textDocument/hover', {
             textDocument: { uri: mainUri },
             position: { line: entArrLine, character: 2 },
         });
-        assert(entArrHover && entArrHover.contents.value.startsWith('`BSS` label **ent\\_arr** [24]'), `Expected [24] for .res .sizeof(Entity) * 2, got:\n${entArrHover && entArrHover.contents.value}`);
+        assert(entArrHover && entArrHover.contents.value.startsWith('`BSS` label **ent\\_arr**[24]'), `Expected [24] for .res .sizeof(Entity) * 2, got:\n${entArrHover && entArrHover.contents.value}`);
 
         // Hover macro invocation shows macro badge to the left + args without dumping macro body
         const macroCallLine = lines.findIndex(l => l.includes('FILL $00'));
@@ -510,14 +529,14 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: varsUri },
             position: { line: zpTopLine, character: 2 },
         });
-        assert(zpTopHover && zpTopHover.contents.value.startsWith('`ZEROPAGE` label **@zp\\_top** [1]\n'), `Expected root cheap local bolding @, got:\n${zpTopHover && zpTopHover.contents.value}`);
+        assert(zpTopHover && zpTopHover.contents.value.startsWith('`ZEROPAGE` label **@zp\\_top**\n'), `Expected root cheap local bolding @ without [1], got:\n${zpTopHover && zpTopHover.contents.value}`);
 
         const expectedCheapLocalHovers = [
             ['bne @mylocallabel', '@mylocallabel', '`CODE` label myscope::mylabel**\u2060@mylocallabel**\n'],
-            ['@zp_byte: .res 1', '@zp_byte', '`ZEROPAGE` label zp\\_parent**\u2060@zp\\_byte** [1]\n'],
-            ['@zp_pair: .res 2', '@zp_pair', '`ZEROPAGE` label zp\\_parent**\u2060@zp\\_pair** [2]\n'],
-            ['@ro_bytes:', '@ro_bytes', '`RODATA` label ro\\_parent**\u2060@ro\\_bytes** [3]\n'],
-            ['@temp_ro: .byte $AA', '@temp_ro', '`RODATA` label pushed\\_ro**\u2060@temp\\_ro** [1]\n'],
+            ['@zp_byte: .res 1', '@zp_byte', '`ZEROPAGE` label zp\\_parent**\u2060@zp\\_byte**\n'],
+            ['@zp_pair: .res 2', '@zp_pair', '`ZEROPAGE` label zp\\_parent**\u2060@zp\\_pair**[2]\n'],
+            ['@ro_bytes:', '@ro_bytes', '`RODATA` label ro\\_parent**\u2060@ro\\_bytes**[3]\n'],
+            ['@temp_ro: .byte $AA', '@temp_ro', '`RODATA` label pushed\\_ro**\u2060@temp\\_ro**\n'],
             ['bne @back_to_code', '@back_to_code', '`CODE` label after\\_popseg**\u2060@back\\_to\\_code**\n'],
         ];
         for (const [needle, ident, expectedStart] of expectedCheapLocalHovers) {
@@ -542,7 +561,8 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             position: { line: beqAnonLine, character: lines[beqAnonLine].indexOf(':+') + 1 },
         });
         assert(anonHover && anonHover.contents.value.startsWith('`CODE` anonymous label **2**\n'), `Expected CODE anonymous label 2 header, got:\n${anonHover && anonHover.contents.value}`);
-        assert(anonHover && anonHover.contents.value.includes('main.s:23'), `Expected resolved anon line in hover, got:\n${anonHover.contents.value}`);
+        const expectedSecondAnonLine = lines.indexOf(':', lines.indexOf(':') + 1) + 1;
+        assert(anonHover && anonHover.contents.value.includes(`main.s:${expectedSecondAnonLine}`), `Expected resolved anon line in hover, got:\n${anonHover.contents.value}`);
 
         // 3. Hover: mnemonic table & directive type badge
         const ldaLine = lines.findIndex(l => l.includes('lda #10'));
@@ -550,7 +570,9 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: mainUri },
             position: { line: ldaLine, character: lines[ldaLine].indexOf('lda') + 1 },
         });
-        assert(ldaHover && ldaHover.contents.value.includes('| Mode | Opcode | Bytes | Cycles |'), 'Expected mnemonic addressing-mode table');
+        assert(ldaHover && ldaHover.contents.value.includes('**Affected flags:** `N`, `Z`'), 'Expected compact Affected flags line on mnemonic hover');
+        assert(ldaHover.contents.value.includes('**Addressing modes:** `Immediate` `Zero page` `Zero page, X`'), 'Expected badge-styled Addressing modes line on mnemonic hover');
+        assert(ldaHover.contents.value.includes('[See details](command:ca65.showReference?%5B%22lda%22%5D)'), 'Expected See details link');
         assert(!ldaHover.contents.value.includes('**See also:**'), 'Should not include seeAlso on mnemonic hover');
 
         // 3b. Number literal hovers (dec, hex with mnemonic-like digits $ADC, bin)
@@ -616,6 +638,13 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         assert.strictEqual(byName.get('zp_plain').detail, '(ZEROPAGE)', 'ZEROPAGE label should have (ZEROPAGE) outline detail');
         assert.strictEqual(byName.get('dp_plain').kind, 13, 'Plain label in DIRECTPAGE should use Variable (13)');
         assert.strictEqual(byName.get('dp_plain').detail, '(DIRECTPAGE)', 'DIRECTPAGE label should have (DIRECTPAGE) outline detail');
+        assert.strictEqual(byName.get('audio_zp_plain').kind, 13, 'Plain label in .segment "AUDIOZP": zeropage should use Variable (13)');
+        assert.strictEqual(byName.get('audio_zp_plain').detail, '(AUDIOZP)', 'Explicit : zeropage should not pollute outline segment detail');
+        assert.strictEqual(byName.get('msg_cstr').kind, 15, 'Null-terminated .byte "Hi", $00 should use String (15)');
+        assert.strictEqual(byName.get('hdr_magic').kind, 18, 'Magic header .byte "NES", $1A should stay Array (18)');
+        const mainByName = new Map(symbols.map(s => [s.name, s]));
+        assert.strictEqual(mainByName.get('code_repeat_lut').kind, 18, '.repeat/.byte table inside CODE should detect as Array (18)');
+        assert.strictEqual(mainByName.get('asserted_sub').kind, 12, 'Subroutine with leading .assert should stay Function (12)');
         assert.strictEqual(byName.get('ro_incbin').kind, 18, 'Plain label in RODATA without direct .byte should fall back to Array (18)');
         assert.strictEqual(byName.get('ro_incbin').detail, '(RODATA)', 'RODATA label should have (RODATA) outline detail');
         assert.strictEqual(byName.get('bank_plain').kind, 15, 'Plain label in custom segment should fall back to String/abc (15)');
@@ -692,9 +721,11 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             position: { line: segCompLine, character: lines[segCompLine].length },
         });
         const segItems = Array.isArray(segComp) ? segComp : segComp.items;
-        for (const expectedSeg of ['CODE', 'ZEROPAGE', 'RODATA', 'BSS', 'DATA', 'BANK01', 'DIRECTPAGE']) {
+        for (const expectedSeg of ['CODE', 'ZEROPAGE', 'RODATA', 'BSS', 'DATA', 'BANK01', 'DIRECTPAGE', 'AUDIOZP']) {
             assert(segItems.some(i => i.label === expectedSeg), `Expected segment completion ${expectedSeg}, got ${segItems.map(i => i.label).join(', ')}`);
         }
+        assert(!segItems.some(i => i.label.includes(': zeropage')), 'Segment completion should strip : zeropage modifier');
+        assert(!segItems.some(i => i.label.startsWith('segment from ')), '.include should not pollute segment completions');
 
         const opLine = lines.findIndex(l => l.includes('lda #ZP_MAX_HP'));
         const symComp = await request('textDocument/completion', {
@@ -751,9 +782,15 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
 
         // 6. .import / .export ZP mismatch diagnostics + Quick Fixes
         const mainDiags = publishedDiagnostics.get(mainUri) || [];
-        const zpExpectedDiag = mainDiags.find(d => d.code === 'import-zp-expected');
+        const audioImportLine = lines.findIndex(l => l.includes('.import audio_zp_var'));
+        const zpExpectedDiag = mainDiags.find(d => d.code === 'import-zp-expected' && d.range.start.line !== audioImportLine);
+        const audioZpExpectedDiag = mainDiags.find(d => d.code === 'import-zp-expected' && d.range.start.line === audioImportLine);
         const absExpectedDiag = mainDiags.find(d => d.code === 'import-abs-expected');
         assert(zpExpectedDiag && zpExpectedDiag.source === 'ca65-lsp' && zpExpectedDiag.severity === 2, 'Expected import-zp-expected warning on .import zp_counter');
+        assert(
+            audioZpExpectedDiag && audioZpExpectedDiag.message.includes("'AUDIOZP'"),
+            `Expected import-zp-expected warning naming AUDIOZP for .segment "AUDIOZP": zeropage, got ${JSON.stringify(audioZpExpectedDiag)}`
+        );
         assert(absExpectedDiag && absExpectedDiag.source === 'ca65-lsp' && absExpectedDiag.severity === 2, 'Expected import-abs-expected warning on .importzp bss_var');
 
         const fixesZp = await request('textDocument/codeAction', {
@@ -764,6 +801,16 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         assert(
             fixesZp.some(a => a.isPreferred && a.title.includes('.importzp') && a.edit.changes[mainUri][0].newText === '.importzp'),
             'Expected preferred Quick Fix changing .import to .importzp'
+        );
+
+        const fixesAudioZp = await request('textDocument/codeAction', {
+            textDocument: { uri: mainUri },
+            range: audioZpExpectedDiag.range,
+            context: { diagnostics: [audioZpExpectedDiag], only: ['quickfix'] },
+        });
+        assert(
+            fixesAudioZp.some(a => a.isPreferred && a.title.includes('.importzp') && a.edit.changes[mainUri][0].newText === '.importzp'),
+            'Expected preferred Quick Fix changing .import to .importzp for .segment "AUDIOZP": zeropage'
         );
 
         const fixesAbs = await request('textDocument/codeAction', {
@@ -809,12 +856,15 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             line: procLine, char: lines[procLine].indexOf('PlayerUpdate'), length: 'PlayerUpdate'.length, type: 'function', mods: ['declaration'],
         });
         assert.strictEqual(findTok(mainDecoded, lines, 'jsr PlayerUpdate', 'PlayerUpdate').type, 'function');
-        assert.strictEqual(findTok(mainDecoded, lines, 'helper_sub:', 'helper_sub').type, 'function');
-        assert(findTok(mainDecoded, lines, 'helper_sub:', 'helper_sub').mods.includes('declaration'));
-        assert.deepStrictEqual(
-            { type: findTok(mainDecoded, lines, 'jsr helper_sub', 'helper_sub').type, mods: findTok(mainDecoded, lines, 'jsr helper_sub', 'helper_sub').mods },
-            { type: 'function', mods: [] }
-        );
+        const helperLine = lines.findIndex(l => l.includes('helper_sub:'));
+        assert.deepStrictEqual(findTok(mainDecoded, lines, 'helper_sub:', 'helper_sub'), {
+            line: helperLine, char: lines[helperLine].indexOf('helper_sub'), length: 'helper_sub'.length, type: 'function', mods: ['declaration'],
+        });
+        assert.strictEqual(findTok(mainDecoded, lines, 'jsr helper_sub', 'helper_sub').type, 'function');
+
+        const tmGrammar = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'syntaxes/ca65.tmLanguage.json'), 'utf8'));
+        const plainLabelRule = tmGrammar.patterns.find(p => p.match === '\\b([a-zA-Z_][a-zA-Z0-9_]*)(?=:)');
+        assert.strictEqual(plainLabelRule && plainLabelRule.captures['1'].name, 'entity.name.function.ca65');
         assert.deepStrictEqual(
             { type: findTok(mainDecoded, lines, 'zp_local: .res ZP_MAX_HP', 'zp_local').type, mods: findTok(mainDecoded, lines, 'zp_local: .res ZP_MAX_HP', 'zp_local').mods },
             { type: 'variable', mods: ['declaration'] }
@@ -855,7 +905,23 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             { type: findTok(varsDecoded, varsLines, 'bank_table:', 'bank_table').type, mods: findTok(varsDecoded, varsLines, 'bank_table:', 'bank_table').mods },
             { type: 'variable', mods: ['declaration', 'readonly'] }
         );
+        assert.deepStrictEqual(
+            { type: findTok(mainDecoded, lines, 'code_repeat_lut:', 'code_repeat_lut').type, mods: findTok(mainDecoded, lines, 'code_repeat_lut:', 'code_repeat_lut').mods },
+            { type: 'variable', mods: ['declaration', 'readonly'] }
+        );
+        assert.deepStrictEqual(
+            { type: findTok(mainDecoded, lines, 'asserted_sub:', 'asserted_sub').type, mods: findTok(mainDecoded, lines, 'asserted_sub:', 'asserted_sub').mods },
+            { type: 'function', mods: ['declaration'] }
+        );
         assert.strictEqual(findTok(varsDecoded, varsLines, 'bank_plain:', 'bank_plain'), undefined);
+        assert.deepStrictEqual(
+            { type: findTok(varsDecoded, varsLines, 'audio_zp_var: .res 1', 'audio_zp_var').type, mods: findTok(varsDecoded, varsLines, 'audio_zp_var: .res 1', 'audio_zp_var').mods },
+            { type: 'variable', mods: ['declaration'] }
+        );
+        assert.deepStrictEqual(
+            { type: findTok(varsDecoded, varsLines, 'audio_zp_plain:', 'audio_zp_plain').type, mods: findTok(varsDecoded, varsLines, 'audio_zp_plain:', 'audio_zp_plain').mods },
+            { type: 'variable', mods: ['declaration'] }
+        );
 
         // 8. prepareRename & cheap local rename normalization
         const prepValid = await request('textDocument/prepareRename', {
@@ -903,12 +969,14 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         const bank01SegIdx = varsLines.findIndex(l => l === '.segment "BANK01"');
 
         const segChecks = [
+            [mainUri, lines.findIndex(l => l.includes('.import zp_counter')), 'CODE', 0, false],
             [mainUri, lines.findIndex(l => l.includes('zp_local: .res ZP_MAX_HP')), 'ZEROPAGE', lines.findIndex(l => l === '.segment "ZEROPAGE"'), true],
             [mainUri, lines.findIndex(l => l.includes('jsr PlayerUpdate')), 'CODE', lines.findIndex(l => l === '.segment "CODE"'), true],
             [mainUri, lines.findIndex(l => l.startsWith('ent_one:')), 'BSS', lines.findIndex(l => l === '.segment "BSS"'), true],
             [mainUri, tempRoLineIdx, 'RODATA', pushRoSegIdx, true],
             [mainUri, afterPopLineIdx, 'CODE', popSegIdx, true],
             [varsUri, bankTableLineIdx, 'BANK01', bank01SegIdx, true],
+            [varsUri, varsLines.findIndex(l => l.startsWith('audio_zp_plain:')), 'AUDIOZP', varsLines.findIndex(l => l === '.segment "AUDIOZP": zeropage'), true],
             [defsUri, 4, 'CODE', 0, false],
         ];
         for (const [uri, targetLine, expectedSeg, expectedDefLine, expectedExplicit] of segChecks) {
@@ -920,6 +988,64 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
                 line: targetLine,
             });
         }
+
+        // 10. Anonymous label inlay hints positioned to the right in `(N)` format
+        const inlayHints = await request('textDocument/inlayHint', {
+            textDocument: { uri: mainUri },
+            range: { start: { line: 0, character: 0 }, end: { line: lines.length, character: 0 } },
+        });
+        const firstAnonDefLine = lines.findIndex(l => l === ':');
+        const secondAnonDefLine = lines.indexOf(':', firstAnonDefLine + 1);
+        const hasHint = (line, ch, label) => inlayHints.some(
+            h => h.label === label && h.position.line === line && h.position.character === ch
+        );
+        assert(hasHint(firstAnonDefLine, lines[firstAnonDefLine].indexOf(':') + 1, '(1)'), 'Expected (1) inlay hint right after first anonymous label def');
+        assert(hasHint(bneAnonLine, lines[bneAnonLine].indexOf(':-') + 2, '(1)'), 'Expected (1) inlay hint right after :- ref');
+        assert(hasHint(beqAnonLine, lines[beqAnonLine].indexOf(':+') + 2, '(2)'), 'Expected (2) inlay hint right after :+ ref');
+        assert(hasHint(secondAnonDefLine, lines[secondAnonDefLine].indexOf(':') + 1, '(2)'), 'Expected (2) inlay hint right after second anonymous label def');
+
+        // Range-filtered inlayHint should exclude hints outside params.range
+        const rangeHints = await request('textDocument/inlayHint', {
+            textDocument: { uri: mainUri },
+            range: { start: { line: bneAnonLine, character: 0 }, end: { line: bneAnonLine, character: 40 } },
+        });
+        assert(
+            rangeHints.some(h => h.label === '(1)' && h.position.line === bneAnonLine)
+            && !rangeHints.some(h => h.position.line !== bneAnonLine),
+            `Expected range-filtered inlay hints only on line ${bneAnonLine}, got ${JSON.stringify(rangeHints)}`
+        );
+
+        // 11. Consolidated ca65/dumpDebugInfo request
+        await request('ca65/dumpDebugInfo');
+
+        // 12. Cross-TU `.import`/`.importzp` revalidation when exporter segment changes without editing main.s
+        const updatedVars = varsText.replace('.segment "AUDIOZP": zeropage', '.segment "AUDIOZP": absolute');
+        notify('textDocument/didChange', {
+            textDocument: { uri: varsUri, version: 2 },
+            contentChanges: [{ text: updatedVars }],
+        });
+        for (let i = 0; i < 30; i++) {
+            const curDiags = publishedDiagnostics.get(mainUri) || [];
+            if (!curDiags.some(d => d.code === 'import-zp-expected' && d.range.start.line === audioImportLine)) break;
+            await new Promise(r => setTimeout(r, 100));
+        }
+        const postVarsDiags = publishedDiagnostics.get(mainUri) || [];
+        assert(
+            !postVarsDiags.some(d => d.code === 'import-zp-expected' && d.range.start.line === audioImportLine),
+            `Changing vars.s AUDIOZP from : zeropage to : absolute should clear main.s import-zp-expected warning automatically`
+        );
+
+        // 13. Dynamic ca65.fileExtensions workspace indexing on configuration change
+        const extraS65Path = path.join(tmpRoot, 'extra.s65');
+        fs.writeFileSync(extraS65Path, '.export EXTRA_S65_SYM = $99\n');
+        ca65ClientConfig = { ...ca65ClientConfig, fileExtensions: ['.s', '.asm', '.inc', '.s65'] };
+        notify('workspace/didChangeConfiguration', { settings: {} });
+        await new Promise(r => setTimeout(r, 250));
+        const wsSyms = await request('workspace/symbol', { query: 'EXTRA_S65_SYM' });
+        assert(
+            Array.isArray(wsSyms) && wsSyms.some(s => s.name === '::EXTRA_S65_SYM'),
+            `Expected newly configured .s65 file to be indexed dynamically, got ${JSON.stringify(wsSyms)}`
+        );
 
         console.log('ALL UX IMPROVEMENT E2E CHECKS PASSED!');
     } finally {

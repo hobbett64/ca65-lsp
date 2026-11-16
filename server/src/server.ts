@@ -11,12 +11,12 @@ import {
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import { glob } from 'glob';
 
 import { getMnemonicsForCpu, loadAllData } from './dataManager';
 import {
     abortValidation,
     addPendingValidationFiles,
+    clearCompilerDiagnosticsForUri,
     clearExecutablePathCache,
     hasPendingValidation,
     initializeDiagnostics,
@@ -41,15 +41,26 @@ import { initializeSignatureHelpProvider } from './signatureHelpProvider';
 import { initializeCodeActionProvider } from './codeActionProvider';
 import { initializeSemanticTokensProvider, SEMANTIC_TOKENS_LEGEND } from './semanticTokensProvider';
 import { analyzeInstructionRange } from './instructionAnalyzer';
+import { getListingStateForUri } from './listingCache';
 import { invalidateOverlaySignatures, initializeOverlayProvider } from './overlayProvider';
 import { deleteCachedResolutions } from './symbolResolver';
 import { ExportsMap } from './exportsMap';
-import { Ca65Cpu, Ca65Settings, documentSettings, normalizeCpu } from './settings';
+import {
+    Ca65Cpu,
+    Ca65Settings,
+    DEFAULT_FILE_EXTENSIONS,
+    documentSettings,
+    normalizeCpu,
+    resolveCa65Settings,
+    resolveConfiguredFileExtensions,
+} from './settings';
 import { Performance as PerformanceMonitor } from './performance';
 import {
     clearResolvedDirsCache,
+    findMatchingFiles,
     fsPathToUri,
     getWorkspaceFolderOfFile,
+    globPatternToRegExp,
     resolveIncludeUri,
     uriToFsPath,
 } from './pathUtils';
@@ -145,7 +156,6 @@ async function mapWithConcurrency<T>(
 }
 
 async function getDiscoveryGlobs(): Promise<string[]> {
-    const defaultGlobs = ['**/*.s', '**/*.asm', '**/*.inc'];
     const configuredGlobs: string[] = [];
 
     try {
@@ -156,6 +166,10 @@ async function getDiscoveryGlobs(): Promise<string[]> {
         const config = Array.isArray(configs) ? configs[0] : undefined;
         const ca65Config = Array.isArray(configs) ? configs[1] : undefined;
 
+        for (const cleanExt of resolveConfiguredFileExtensions(ca65Config)) {
+            configuredGlobs.push(`**/*${cleanExt}`);
+        }
+
         const associations = config?.associations || {};
         for (const [pattern, langId] of Object.entries(associations)) {
             if (langId !== 'ca65') continue;
@@ -165,29 +179,19 @@ async function getDiscoveryGlobs(): Promise<string[]> {
                     : pattern
             );
         }
-
-        const customExtensions = Array.isArray(ca65Config?.additionalExtensions)
-            ? ca65Config.additionalExtensions
-            : [];
-        for (const ext of customExtensions) {
-            if (typeof ext !== 'string' || !ext) continue;
-            const cleanExt = ext.startsWith('.') ? ext : `.${ext}`;
-            configuredGlobs.push(`**/*${cleanExt}`);
-        }
     } catch (e) {
         connection.console.error(`Could not fetch workspace discovery configuration from client: ${e}`);
+        return DEFAULT_FILE_EXTENSIONS.map(ext => `**/*${ext}`);
     }
 
-    return [...new Set([...defaultGlobs, ...configuredGlobs])];
+    return [...new Set(configuredGlobs)];
 }
+
+let lastDiscoveryGlobsKey = '';
 
 async function indexWorkspaceFolder(folderUri: string, globs: string[]): Promise<void> {
     const folderPath = uriToFsPath(folderUri);
-    const files = await glob(globs, {
-        cwd: folderPath,
-        nodir: true,
-        ignore: ['**/.git/**', '**/node_modules/**', '**/build/**', '**/dist/**', '**/out/**']
-    });
+    const files = await findMatchingFiles(folderPath, globs);
 
     const docs: TextDocument[] = [];
     await mapWithConcurrency(files, 32, async (file) => {
@@ -226,6 +230,7 @@ connection.onInitialized(async () => {
         // Initial scan of all symbol tables so includes graph and import/export info are available.
         await performanceMonitor.timeAsync('onInitialized', async () => {
             const allGlobs = await getDiscoveryGlobs();
+            lastDiscoveryGlobsKey = allGlobs.join('\0');
             for (const folderUri of workspaceFolderUris) {
                 await indexWorkspaceFolder(folderUri, allGlobs);
             }
@@ -249,6 +254,7 @@ connection.onInitialized(async () => {
                     for (const uri of Array.from(symbolTables.keys())) {
                         if ((uri === removed.uri || uri.startsWith(prefix)) && !documents.get(uri)) {
                             deleteCachedResolutions(uri);
+                            clearCompilerDiagnosticsForUri(uri);
                             documentSettings.delete(uri);
                             invalidateCachedDocument(uri);
                             clearDocumentDirtyState(uri);
@@ -287,7 +293,7 @@ export function getDocumentSettings(resource: string): Thenable<Ca65Settings> {
             scopeUri: scopeKey,
             section: 'ca65'
         }).then(
-            settings => ({ ...(settings || {}), cpu: normalizeCpu(settings?.cpu) }),
+            settings => resolveCa65Settings(settings),
             err => {
                 documentSettings.delete(scopeKey);
                 throw err;
@@ -453,26 +459,14 @@ async function updateAndValidate(document: TextDocument, debounce: boolean = tru
     });
 }
 
-// Custom request from the client to dump performance stats
-connection.onRequest('ca65/dumpPerformanceStats', () => {
+// Consolidated custom request from the client to dump LSP debug state to Output
+connection.onRequest('ca65/dumpDebugInfo', () => {
     connection.console.info(performanceMonitor.getReport());
-});
-
-// Custom request from the client to dump symbol tables
-connection.onRequest('ca65/dumpSymbolTables', () => {
     for (const table of symbolTables.values()) {
         connection.console.info(table.toString());
     }
-});
-
-// Custom request from the client to dump include graph
-connection.onRequest('ca65/dumpIncludesGraph', () => {
     connection.console.info('Current Includes Graph:');
     connection.console.info(includesGraph.toString());
-});
-
-// Custom request from the client to dump exports map
-connection.onRequest('ca65/dumpExportsMap', () => {
     connection.console.info(exportsMap.toString());
 });
 
@@ -489,15 +483,29 @@ connection.onRequest('ca65/analyzeSelection', async (params: { uri?: string; ran
     }
     const symbolTable = symbolTables.get(params.uri);
     const settings = await getDocumentSettings(params.uri);
-    return analyzeInstructionRange(
+    const listingState = await getListingStateForUri(
+        params.uri,
+        documents,
+        includesGraph,
+        getDocumentSettings,
+        settings
+    );
+    const summary = analyzeInstructionRange(
         document,
         params.range,
         symbolTable,
         symbolTables,
         includesGraph,
         settings.implicitImports,
-        settings.cpu
+        settings.cpu,
+        settings.cComments,
+        settings.lineContinuations,
+        listingState.lines
     );
+    return {
+        ...summary,
+        listingStatus: listingState.status,
+    };
 });
 
 // Custom request from the client to resolve the active segment at a cursor line
@@ -529,8 +537,11 @@ connection.onRequest('ca65/getSegmentAtPosition', async (params: { uri?: string;
 connection.onRequest('ca65/getReferenceData', async (params?: { uri?: string; cpu?: unknown }) => {
     await initializationGate.isInitialized;
     let cpu: Ca65Cpu | undefined = params?.cpu !== undefined ? normalizeCpu(params.cpu) : undefined;
-    if (!cpu && params?.uri) {
-        cpu = normalizeCpu((await getDocumentSettings(params.uri)).cpu);
+    if (!cpu) {
+        const targetUri = params?.uri ?? workspaceFolderUris[0];
+        if (targetUri) {
+            cpu = normalizeCpu((await getDocumentSettings(targetUri)).cpu);
+        }
     }
     const resolvedCpu: Ca65Cpu = cpu ?? '6502';
     return {
@@ -544,10 +555,14 @@ const lastDocumentVersions = new Map<string, number>();
 
 connection.onDidChangeConfiguration(async () => {
     try {
-        const prevCpuByScope = new Map<string, Ca65Cpu>();
+        const prevByScope = new Map<string, { cpu: Ca65Cpu; includeDirs: string }>();
         for (const [scopeKey, entry] of documentSettings.entries()) {
             try {
-                prevCpuByScope.set(scopeKey, normalizeCpu((await entry)?.cpu));
+                const prev = await entry;
+                prevByScope.set(scopeKey, {
+                    cpu: normalizeCpu(prev?.cpu),
+                    includeDirs: (prev?.includeDirs ?? []).join('\0'),
+                });
             } catch {
                 // Ignore prior failed configuration reads
             }
@@ -561,22 +576,51 @@ connection.onDidChangeConfiguration(async () => {
         abortValidation();
 
         const openDocs = documents.all();
+        const nextGlobs = await getDiscoveryGlobs();
+        const nextGlobsKey = nextGlobs.join('\0');
+        const discoveryGlobsChanged = nextGlobsKey !== lastDiscoveryGlobsKey;
+        if (discoveryGlobsChanged) {
+            lastDiscoveryGlobsKey = nextGlobsKey;
+            const matchers = nextGlobs.map(globPatternToRegExp);
+            const openUrisNow = new Set(openDocs.map(d => d.uri));
+            for (const uri of Array.from(symbolTables.keys())) {
+                if (openUrisNow.has(uri)) continue;
+                const folderUri = getWorkspaceFolderOfFile(uri);
+                if (!folderUri) continue;
+                const relSlash = path.relative(uriToFsPath(folderUri), uriToFsPath(uri)).replace(/\\/g, '/');
+                if (!matchers.some(re => re.test(relSlash))) {
+                    deleteCachedResolutions(uri);
+                    clearCompilerDiagnosticsForUri(uri);
+                    invalidateCachedDocument(uri);
+                    clearDocumentDirtyState(uri);
+                    symbolTables.delete(uri);
+                    includesGraph.removeFile(uri);
+                    exportsMap.removeUri(uri);
+                    connection.sendDiagnostics({ uri, diagnostics: [] });
+                }
+            }
+            for (const folderUri of workspaceFolderUris) {
+                await indexWorkspaceFolder(folderUri, nextGlobs);
+            }
+        }
+
         await mapWithConcurrency(openDocs, 16, async (doc) => {
             await refreshDocumentSymbolTable(doc);
         });
 
         const openUris = new Set(openDocs.map(doc => doc.uri));
         const unopenedUris = Array.from(symbolTables.keys()).filter(uri => !openUris.has(uri));
-        if (unopenedUris.length > 0 && prevCpuByScope.size > 0) {
-            let cpuChanged = false;
-            for (const [scopeKey, prevCpu] of prevCpuByScope.entries()) {
+        if (unopenedUris.length > 0 && prevByScope.size > 0) {
+            let scanSettingsChanged = false;
+            for (const [scopeKey, prev] of prevByScope.entries()) {
                 const nextSettings = await getDocumentSettings(scopeKey);
-                if (normalizeCpu(nextSettings?.cpu) !== prevCpu) {
-                    cpuChanged = true;
+                const nextInc = (nextSettings?.includeDirs ?? []).join('\0');
+                if (normalizeCpu(nextSettings?.cpu) !== prev.cpu || nextInc !== prev.includeDirs) {
+                    scanSettingsChanged = true;
                     break;
                 }
             }
-            if (cpuChanged) {
+            if (scanSettingsChanged) {
                 await mapWithConcurrency(unopenedUris, 16, async (uri) => {
                     const doc = await getCachedTextDocument(uri, documents);
                     if (doc) {
@@ -673,6 +717,7 @@ connection.onDidChangeWatchedFiles(async (params: DidChangeWatchedFilesParams) =
                     deleteCachedResolutions(uri);
                 }
                 deleteCachedResolutions(event.uri);
+                clearCompilerDiagnosticsForUri(event.uri);
                 documentSettings.delete(event.uri);
 
                 symbolTables.delete(event.uri);

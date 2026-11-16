@@ -2,13 +2,13 @@ import { Range } from 'vscode-languageserver-types';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { getMnemonicInfo, MnemonicModeInfo } from './dataManager';
 import { getCachedTextDocumentSync } from './documentCache';
-import { findCommentStart, parseLine } from './documentScanner';
-import { getLineText } from './editUtils';
+import { doesStrippedLineContinue, isInBlockCommentBeforeLine, parseLine, stripCommentsInLine } from './documentScanner';
 import { IncludesGraph } from './includesGraph';
+import { LstLineInfo, normalizeListingBytesText } from './lstParser';
 import { resolveIncbinFileSizeSync } from './pathUtils';
 import { Ca65Cpu, normalizeCpu } from './settings';
 import { resolveImport, resolveReference } from './symbolResolver';
-import { Import, isZeroPageSegmentName, Macro, MacroKind, ReferenceInfo, Scope, ScopeKind, Symbol, SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
+import { Import, Macro, MacroKind, ReferenceInfo, resolveSegmentAddrSize, Scope, ScopeKind, Symbol, SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
 
 export interface InstructionAnalysisItem {
     line: number;
@@ -18,6 +18,7 @@ export interface InstructionAnalysisItem {
     maxBytes: number;
     minCycles: number;
     maxCycles: number;
+    bytesText?: string;
     uncertainMode?: boolean;
     hasBranchPenalty?: boolean;
     hasPagePenalty?: boolean;
@@ -25,6 +26,12 @@ export interface InstructionAnalysisItem {
     hasDpOffsetPenalty?: boolean;
     hasEmulationPagePenalty?: boolean;
     hasPerByteCycles?: boolean;
+}
+
+export interface ListingLineRangeItem {
+    line: number;
+    bytesText: string;
+    byteCount: number;
 }
 
 export interface InstructionAnalysisSummary {
@@ -35,12 +42,18 @@ export interface InstructionAnalysisSummary {
     minCycles: number;
     maxCycles: number;
     uncertainCount: number;
+    usedListing?: boolean;
     hasBranchPenalty: boolean;
     hasPagePenalty: boolean;
     hasVariableWidth16: boolean;
     hasDpOffsetPenalty: boolean;
     hasEmulationPagePenalty: boolean;
     hasPerByteCycles: boolean;
+    lineListing?: {
+        bytesText: string;
+        byteCount: number;
+    };
+    listingLines?: ListingLineRangeItem[];
     items: InstructionAnalysisItem[];
 }
 
@@ -548,6 +561,8 @@ function matchOuterDelimited(
 interface LineSource {
     line: number;
     minChar: number;
+    joinedStart?: number;
+    joinedEnd?: number;
 }
 
 interface LogicalLine {
@@ -720,35 +735,77 @@ function collectLogicalLines(
     startLine: number,
     endLine: number,
     firstLineMinChar: number = -1,
-    stopAfterFirst: boolean = false
+    stopAfterFirst: boolean = false,
+    extendPastEndIfContinuing: boolean = false,
+    cComments: boolean = true,
+    lineContinuations: boolean = true
 ): LogicalLine[] {
     const result: LogicalLine[] = [];
+    const docText = document.getText();
+    const docLen = docText.length;
+    const effectiveStart = Math.max(0, startLine);
     const maxLine = Math.min(endLine, document.lineCount - 1);
+    const hardEndLine = document.lineCount - 1;
+    if (effectiveStart > maxLine) {
+        return result;
+    }
+
+    let inBlockComment = isInBlockCommentBeforeLine(document, effectiveStart, docText, cComments);
+    let lineOffset = effectiveStart === 0 ? 0 : document.offsetAt({ line: effectiveStart, character: 0 });
     let currentText = '';
     let currentSources: LineSource[] = [];
 
-    for (let line = Math.max(0, startLine); line <= maxLine; line++) {
-        const rawLine = getLineText(document, line);
-        const commentIdx = findCommentStart(rawLine);
-        const hasComment = commentIdx >= 0;
-        const code = hasComment ? rawLine.slice(0, commentIdx) : rawLine;
-        const trimmed = code.trimEnd();
-        const isContinuation = !hasComment && trimmed.endsWith('\\');
-        const piece = isContinuation ? trimmed.slice(0, -1) : trimmed;
+    for (let line = effectiveStart; line <= hardEndLine && lineOffset <= docLen; line++) {
+        if (line > maxLine && (!extendPastEndIfContinuing || currentSources.length === 0)) {
+            break;
+        }
 
-        currentText = currentSources.length === 0 ? piece : `${currentText} ${piece}`;
-        currentSources.push({
-            line,
-            minChar: line === startLine ? firstLineMinChar : -1,
-        });
+        const nlIdx = docText.indexOf('\n', lineOffset);
+        let lineEnd = nlIdx >= 0 ? nlIdx : docLen;
+        if (lineEnd > lineOffset && docText.charCodeAt(lineEnd - 1) === 13 /* \r */) {
+            lineEnd--;
+        }
 
-        if (!isContinuation) {
-            result.push({ text: currentText, sources: currentSources });
-            if (stopAfterFirst) {
-                return result;
+        const rawLine = docText.slice(lineOffset, lineEnd);
+        lineOffset = nlIdx >= 0 ? nlIdx + 1 : docLen + 1;
+
+        const stripped = stripCommentsInLine(rawLine, inBlockComment, cComments);
+        inBlockComment = stripped.inBlockComment;
+
+        const trimmed = stripped.code.trimEnd();
+        const continues = doesStrippedLineContinue(stripped, lineContinuations);
+        const isBackslashCont = lineContinuations && !stripped.hasSemicolonComment && !inBlockComment && trimmed.endsWith('\\');
+        const piece = isBackslashCont ? trimmed.slice(0, -1) : trimmed;
+
+        if (piece.trim().length > 0) {
+            const joinedStart = currentText.length === 0 ? 0 : currentText.length + 1;
+            currentText = currentText.length === 0 ? piece : `${currentText} ${piece}`;
+            currentSources.push({
+                line,
+                minChar: line === effectiveStart ? firstLineMinChar : -1,
+                joinedStart,
+                joinedEnd: currentText.length,
+            });
+        }
+
+        if (!continues) {
+            if (currentSources.length > 0) {
+                result.push({ text: currentText, sources: currentSources });
+                if (stopAfterFirst) {
+                    return result;
+                }
+                currentText = '';
+                currentSources = [];
+            } else if (stopAfterFirst && line >= effectiveStart) {
+                // Keep scanning only if a pure block comment ended before any code was seen?
+                // Caller expects the logical statement starting at effectiveStart, so return empty if blank.
+                if (line > effectiveStart || rawLine.trim().length === 0) {
+                    return result;
+                }
             }
-            currentText = '';
-            currentSources = [];
+            if (line >= maxLine) {
+                break;
+            }
         }
     }
 
@@ -1111,20 +1168,24 @@ function tryResolveLocalConstantValue(
                 constCache?.set(entity, null);
                 return null;
             }
-            const rawLine = getLineText(targetDoc, defLine);
-            const commentIdx = findCommentStart(rawLine);
-            const code = commentIdx >= 0 ? rawLine.slice(0, commentIdx) : rawLine;
-            const defMatch = code.match(/^\s*\.define\s+[a-zA-Z_][a-zA-Z0-9_]*\s+(.+)$/i);
+            const logical = collectLogicalLines(
+                targetDoc,
+                defLine,
+                targetDoc.lineCount - 1,
+                entity.definition.end.character,
+                true
+            )[0];
+            if (!logical) {
+                constCache?.set(entity, null);
+                return null;
+            }
+            const defMatch = logical.text.match(/^\s*\.define\s+[a-zA-Z_][a-zA-Z0-9_]*\s+(.+)$/i);
             if (!defMatch) {
                 constCache?.set(entity, null);
                 return null;
             }
             const rhs = defMatch[1].trim();
-            const resolvedVal = evaluateNumericExprOnSources(
-                rhs,
-                [{ line: defLine, minChar: entity.definition.end.character }],
-                ctx
-            );
+            const resolvedVal = evaluateNumericExprOnSources(rhs, logical.sources, ctx);
             constCache?.set(entity, resolvedVal);
             return resolvedVal;
         } finally {
@@ -1156,17 +1217,23 @@ function tryResolveLocalConstantValue(
             for (const member of entity.scope.getSymbols()) {
                 const mLine = member.definition.start.line;
                 if (mLine >= 0 && mLine < targetDoc.lineCount) {
-                    const mRaw = getLineText(targetDoc, mLine);
-                    const mComment = findCommentStart(mRaw);
-                    const mCode = mComment >= 0 ? mRaw.slice(0, mComment) : mRaw;
-                    const mAfter = mCode.slice(member.definition.end.character);
-                    const mEq = mAfter.match(/^\s*=\s*(.+)$/);
-                    if (mEq) {
-                        nextVal = evaluateNumericExprOnSources(
-                            mEq[1].trim(),
-                            [{ line: mLine, minChar: member.definition.end.character }],
-                            ctx
-                        );
+                    const mLogical = collectLogicalLines(
+                        targetDoc,
+                        mLine,
+                        targetDoc.lineCount - 1,
+                        member.definition.end.character,
+                        true
+                    )[0];
+                    if (mLogical && mLogical.sources[0]?.line === mLine) {
+                        const mAfter = mLogical.text.slice(member.definition.end.character);
+                        const mEq = mAfter.match(/^\s*=\s*(.+)$/);
+                        if (mEq) {
+                            nextVal = evaluateNumericExprOnSources(
+                                mEq[1].trim(),
+                                mLogical.sources,
+                                ctx
+                            );
+                        }
                     }
                 }
                 if (member === entity) {
@@ -1181,15 +1248,19 @@ function tryResolveLocalConstantValue(
             return null;
         }
 
-        const rawLine = getLineText(targetDoc, defLine);
-        const commentIdx = findCommentStart(rawLine);
-        const code = commentIdx >= 0 ? rawLine.slice(0, commentIdx) : rawLine;
-        const afterDef = code.slice(entity.definition.end.character);
-        const trimmedLine = code.trimStart().toLowerCase();
-        const isImportExportDecl = trimmedLine.startsWith('.export') || trimmedLine.startsWith('.global');
-        const rhsCandidate = isImportExportDecl
-            ? splitCommaArgsOutsideQuotes(afterDef)[0] ?? ''
-            : afterDef;
+        const logical = collectLogicalLines(
+            targetDoc,
+            defLine,
+            targetDoc.lineCount - 1,
+            entity.definition.end.character,
+            true
+        )[0];
+        if (!logical || logical.sources[0]?.line !== defLine) {
+            constCache?.set(entity, null);
+            return null;
+        }
+        const afterDef = logical.text.slice(entity.definition.end.character);
+        const rhsCandidate = splitCommaArgsOutsideQuotes(afterDef)[0] ?? '';
         const eqMatch = rhsCandidate.match(/^\s*(?:=|:=|\.(?:equ|set))\s*(.+)$/i);
         if (!eqMatch) {
             constCache?.set(entity, null);
@@ -1197,11 +1268,7 @@ function tryResolveLocalConstantValue(
         }
 
         const rhs = eqMatch[1].trim();
-        const resolvedVal = evaluateNumericExprOnSources(
-            rhs,
-            [{ line: defLine, minChar: entity.definition.end.character }],
-            ctx
-        );
+        const resolvedVal = evaluateNumericExprOnSources(rhs, logical.sources, ctx);
         constCache?.set(entity, resolvedVal);
         return resolvedVal;
     } finally {
@@ -1530,11 +1597,12 @@ export function evaluateScopeSize(
 
 export interface StructFieldHoverInfo {
     badge: string | null;
-    size: number | null;
+    count: number | null;
 }
 
 /**
- * Extracts a compact type badge and byte size for a `.struct` or `.union` field (e.g. `byte` [1], `word` [2], `[4]`, `tag Vec2` [2]).
+ * Extracts a compact type badge and declared count for a `.struct` or `.union` field
+ * (e.g. `byte`, `word`, `word ...[2]`, `...[4]` for `.res 4`, `Vec2`).
  */
 export function evaluateStructFieldBadge(
     entity: SymbolTableEntity,
@@ -1570,23 +1638,32 @@ export function evaluateStructFieldBadge(
         badge = null;
     } else if (dir === 'tag') {
         const tagTarget = dirArgs ? dirArgs.split(/\s+/)[0] : '';
-        badge = tagTarget ? `tag ${tagTarget}` : 'tag';
+        badge = tagTarget || null;
     } else {
         badge = dir;
     }
 
-    const size = evaluateStructMemberDirectiveBytes(`.${dir}`, dirArgs, logical.sources, {
-        document,
-        symbolTable,
-        allSymbolTables,
-        includesGraph,
-        implicitImports,
-        binIncludeDirs,
-        visitedEntities: new Set(),
-        visitedScopes: new Set(),
-    });
+    let count: number | null = null;
+    if (dir === 'res' || (STRUCT_FIELD_UNIT_BYTES[`.${dir}`] !== undefined && dirArgs)) {
+        const parts = splitCommaArgsOutsideQuotes(dirArgs);
+        if (parts.length > 0) {
+            const val = evaluateNumericExprOnSources(parts[0], logical.sources, {
+                document,
+                symbolTable,
+                allSymbolTables,
+                includesGraph,
+                implicitImports,
+                binIncludeDirs,
+                visitedEntities: new Set(),
+                visitedScopes: new Set(),
+            });
+            if (val !== null && Number.isFinite(val) && val >= 0) {
+                count = val;
+            }
+        }
+    }
 
-    return { badge, size };
+    return { badge, count };
 }
 
 function classifyEntityWidth(
@@ -1611,7 +1688,11 @@ function classifyEntityWidth(
     }
 
     if (entity.segment) {
-        return isZeroPageSegmentName(entity.segment) ? 'zp' : 'abs';
+        const ownerTable = allSymbolTables.get(entity.uri) ?? symbolTable;
+        const addrSize = resolveSegmentAddrSize(entity.segment, ownerTable, allSymbolTables);
+        if (addrSize === 'zp') return 'zp';
+        if (addrSize === 'far') return 'far';
+        return 'abs';
     }
 
     if (entity instanceof Symbol && entity.kind === SymbolKind.Constant) {
@@ -1635,9 +1716,38 @@ function classifyEntityWidth(
     return 'unknown';
 }
 
+function collectRefsOnSources(
+    symbolTable: SymbolTable | undefined,
+    sources: readonly LineSource[]
+): ReferenceInfo[] {
+    if (!symbolTable) return [];
+    const result: ReferenceInfo[] = [];
+    for (const src of sources) {
+        const lineRefs = symbolTable.getReferencesOnLine(src.line);
+        for (let i = 0; i < lineRefs.length; i++) {
+            const r = lineRefs[i];
+            if (r.location.start.character > src.minChar) {
+                result.push(r);
+            }
+        }
+    }
+    return result;
+}
+
+function sliceSourcesFromOffset(sources: readonly LineSource[], offset: number): LineSource[] {
+    const out: LineSource[] = [];
+    for (const src of sources) {
+        const jStart = src.joinedStart ?? 0;
+        const jEnd = src.joinedEnd ?? Number.MAX_SAFE_INTEGER;
+        if (jEnd <= offset) continue;
+        const localMin = offset > jStart ? (offset - jStart) - 1 : src.minChar;
+        out.push({ line: src.line, minChar: localMin });
+    }
+    return out.length > 0 ? out : [{ line: sources[0].line, minChar: -1 }];
+}
+
 function createIdentValueResolver(
-    lineNum: number,
-    operandStartCol: number,
+    operandSources: readonly LineSource[],
     document: TextDocument,
     symbolTable: SymbolTable | undefined,
     allSymbolTables: Map<string, SymbolTable>,
@@ -1646,13 +1756,20 @@ function createIdentValueResolver(
     constCache?: Map<SymbolTableEntity, number | null>
 ): ((identName: string) => number | null) | undefined {
     if (!symbolTable) return undefined;
-    const lineRefs = symbolTable.getReferencesOnLine(lineNum);
+    const lineRefs = collectRefsOnSources(symbolTable, operandSources);
     return (identName: string): number | null => {
-        const ref = lineRefs.find(
-            r => r.name === identName && r.location.start.character >= operandStartCol
-        );
+        const ref = lineRefs.find(r => r.name === identName);
         if (!ref) return null;
-        const resolved = resolveReference(ref, allSymbolTables, includesGraph, implicitImports);
+        let resolved = resolveReference(ref, allSymbolTables, includesGraph, implicitImports);
+        if (!resolved && ref.qualifiers.length === 0 && !identName.includes('::')) {
+            for (const uri of includesGraph.getTranslationUnit(symbolTable.uri)) {
+                const candidate = allSymbolTables.get(uri)?.getMacro(identName);
+                if (candidate && candidate.kind === MacroKind.Define && candidate.params.length === 0) {
+                    resolved = candidate;
+                    break;
+                }
+            }
+        }
         if (!resolved) return null;
         return tryResolveLocalConstantValue(
             resolved,
@@ -1669,8 +1786,7 @@ function createIdentValueResolver(
 
 function classifyOperandWidth(
     baseExpr: string,
-    lineNum: number,
-    operandStartCol: number,
+    operandSources: readonly LineSource[],
     document: TextDocument,
     symbolTable: SymbolTable | undefined,
     allSymbolTables: Map<string, SymbolTable>,
@@ -1687,10 +1803,9 @@ function classifyOperandWidth(
         if (prefix === 'f') return 'far';
     }
 
-    const lineRefs = symbolTable?.getReferencesOnLine(lineNum) ?? [];
+    const lineRefs = collectRefsOnSources(symbolTable, operandSources);
     const resolveIdentValue = createIdentValueResolver(
-        lineNum,
-        operandStartCol,
+        operandSources,
         document,
         symbolTable,
         allSymbolTables,
@@ -1716,7 +1831,7 @@ function classifyOperandWidth(
 
         for (let i = 0; i < lineRefs.length; i++) {
             const ref = lineRefs[i];
-            if (ref.location.start.character < operandStartCol || !baseExpr.includes(ref.name)) {
+            if (!baseExpr.includes(ref.name)) {
                 continue;
             }
             matchedAny = true;
@@ -1756,8 +1871,8 @@ function pickDirectOrZeroPageMode(
     indexReg?: 'X' | 'Y'
 ): string | undefined {
     const candidates = indexReg
-        ? [`Direct Page, ${indexReg}`, `Zero Page, ${indexReg}`]
-        : ['Direct Page', 'Zero Page'];
+        ? [`Direct page, ${indexReg}`, `Zero page, ${indexReg}`]
+        : ['Direct page', 'Zero page'];
     return candidates.find(m => Boolean(modes[m]));
 }
 
@@ -1766,8 +1881,7 @@ function resolveInstructionModes(
     modeCount: number,
     singleModeName: string,
     operand: string,
-    lineNum: number,
-    operandCol: number,
+    operandSources: readonly LineSource[],
     document: TextDocument,
     symbolTable: SymbolTable | undefined,
     allSymbolTables: Map<string, SymbolTable>,
@@ -1800,10 +1914,10 @@ function resolveInstructionModes(
     const bracket = matchOuterDelimited(operand, '[', ']');
     if (bracket) {
         if (bracket.trailing === '') {
-            if (modes['[Direct Page]']) return { modeA: '[Direct Page]', modeB: '' };
-            if (modes['[Indirect Long]']) return { modeA: '[Indirect Long]', modeB: '' };
-        } else if (/^,\s*[yY]$/.test(bracket.trailing) && modes['[Direct Page], Y']) {
-            return { modeA: '[Direct Page], Y', modeB: '' };
+            if (modes['[Direct page]']) return { modeA: '[Direct page]', modeB: '' };
+            if (modes['[Indirect long]']) return { modeA: '[Indirect long]', modeB: '' };
+        } else if (/^,\s*[yY]$/.test(bracket.trailing) && modes['[Direct page], Y']) {
+            return { modeA: '[Direct page], Y', modeB: '' };
         }
         return { modeA: '', modeB: '' };
     }
@@ -1814,20 +1928,20 @@ function resolveInstructionModes(
         if (paren.trailing === '') {
             if (innerSplit.indexReg === 'X') {
                 if (modes['(Indirect, X)']) return { modeA: '(Indirect, X)', modeB: '' };
-                if (modes['(Direct Page, X)']) return { modeA: '(Direct Page, X)', modeB: '' };
+                if (modes['(Direct page, X)']) return { modeA: '(Direct page, X)', modeB: '' };
                 if (modes['(Absolute, X)']) return { modeA: '(Absolute, X)', modeB: '' };
             } else if (!innerSplit.indexReg) {
                 if (modes['Indirect']) return { modeA: 'Indirect', modeB: '' };
-                if (modes['(Zero Page)']) return { modeA: '(Zero Page)', modeB: '' };
-                if (modes['(Direct Page)']) return { modeA: '(Direct Page)', modeB: '' };
+                if (modes['(Zero page)']) return { modeA: '(Zero page)', modeB: '' };
+                if (modes['(Direct page)']) return { modeA: '(Direct page)', modeB: '' };
             }
         } else if (/^,\s*[yY]$/.test(paren.trailing)) {
-            if (innerSplit.indexReg === 'S' && modes['(Stack Relative, S), Y']) {
-                return { modeA: '(Stack Relative, S), Y', modeB: '' };
+            if (innerSplit.indexReg === 'S' && modes['(Stack relative, S), Y']) {
+                return { modeA: '(Stack relative, S), Y', modeB: '' };
             }
             if (!innerSplit.indexReg) {
                 if (modes['(Indirect), Y']) return { modeA: '(Indirect), Y', modeB: '' };
-                if (modes['(Direct Page), Y']) return { modeA: '(Direct Page), Y', modeB: '' };
+                if (modes['(Direct page), Y']) return { modeA: '(Direct page), Y', modeB: '' };
             }
         }
         return { modeA: '', modeB: '' };
@@ -1835,22 +1949,21 @@ function resolveInstructionModes(
 
     const { base, indexReg } = splitIndexSuffix(operand);
     if (indexReg === 'S') {
-        return modes['Stack Relative']
-            ? { modeA: 'Stack Relative', modeB: '' }
+        return modes['Stack relative']
+            ? { modeA: 'Stack relative', modeB: '' }
             : { modeA: '', modeB: '' };
     }
 
     const zpMode = pickDirectOrZeroPageMode(modes, indexReg);
     const absCandidate = indexReg ? `Absolute, ${indexReg}` : 'Absolute';
     const absMode = modes[absCandidate] ? absCandidate : undefined;
-    const farCandidate = indexReg === 'X' ? 'Absolute Long, X' : (!indexReg ? 'Absolute Long' : undefined);
+    const farCandidate = indexReg === 'X' ? 'Absolute long, X' : (!indexReg ? 'Absolute long' : undefined);
     const farMode = farCandidate && modes[farCandidate] ? farCandidate : undefined;
 
     if (zpMode && absMode) {
         const width = classifyOperandWidth(
             base,
-            lineNum,
-            operandCol,
+            operandSources,
             document,
             symbolTable,
             allSymbolTables,
@@ -1867,8 +1980,7 @@ function resolveInstructionModes(
     if (absMode && farMode) {
         const width = classifyOperandWidth(
             base,
-            lineNum,
-            operandCol,
+            operandSources,
             document,
             symbolTable,
             allSymbolTables,
@@ -1898,27 +2010,90 @@ interface ModeMetrics {
     hasPerByteCycles: boolean;
 }
 
+/**
+ * Extracts the leading opcode hex byte from a parsed `.lst` bytes string (excluding `.res` `xx` placeholders).
+ */
+function extractOpcodeHex(bytesText: string): string | null {
+    const trimmed = bytesText.trim();
+    if (trimmed.length < 2) return null;
+    const spaceIdx = trimmed.indexOf(' ');
+    const firstToken = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
+    if (!/^[0-9a-fA-F]{2}$/.test(firstToken)) return null;
+    return firstToken.toUpperCase();
+}
+
+/**
+ * Matches a mnemonic's candidate modes against the assembled opcode byte and byte count from `ca65 -l`.
+ */
+function resolveModeFromLst(
+    modes: Record<string, MnemonicModeInfo>,
+    lstInfo: LstLineInfo
+): string | undefined {
+    const opcodeHex = extractOpcodeHex(lstInfo.bytesText);
+    if (!opcodeHex) return undefined;
+
+    let varWidthMatch: string | undefined;
+    let imm3ByteMatch: string | undefined;
+
+    for (const [modeName, info] of Object.entries(modes)) {
+        if (info.opcode.toUpperCase() !== opcodeHex) continue;
+        if (lstInfo.byteCount === info.bytes) {
+            return modeName;
+        }
+        if (
+            (info.byteVariableM || info.byteVariableX)
+            && lstInfo.byteCount === info.bytes + 1
+            && !varWidthMatch
+        ) {
+            varWidthMatch = modeName;
+        }
+        if (
+            modeName === 'Immediate'
+            && lstInfo.byteCount === info.bytes + 1
+            && !imm3ByteMatch
+        ) {
+            imm3ByteMatch = modeName;
+        }
+    }
+
+    return varWidthMatch ?? imm3ByteMatch;
+}
+
 function computeModeMetrics(
     modeName: string,
     info: MnemonicModeInfo,
     operand: string,
-    lineNum: number,
-    operandCol: number,
+    operandSources: readonly LineSource[],
     document: TextDocument,
     symbolTable: SymbolTable | undefined,
     allSymbolTables: Map<string, SymbolTable>,
     includesGraph: IncludesGraph,
     implicitImports: boolean,
-    constCache: Map<SymbolTableEntity, number | null>
+    constCache: Map<SymbolTableEntity, number | null>,
+    lstInfo?: LstLineInfo
 ): ModeMetrics {
     const varByte = (info.byteVariableM || info.byteVariableX) ? 1 : 0;
     const varCycle = (info.cycleVariableM ?? 0) + (info.cycleVariableX ?? 0);
+    let widthKnown8 = false;
     let narrowed16 = false;
+    let byteCountOverride: number | undefined;
 
-    if (varByte && modeName === 'Immediate' && operand.startsWith('#')) {
+    if (lstInfo && modeName === 'Immediate') {
+        if (varByte) {
+            if (lstInfo.byteCount === info.bytes) {
+                widthKnown8 = true;
+            } else if (lstInfo.byteCount === info.bytes + 1) {
+                narrowed16 = true;
+            }
+        } else if (lstInfo.byteCount === info.bytes + 1) {
+            // Inline `.p816` + `.a16`/`.i16` inside a non-65816 config still emits 3 immediate bytes
+            byteCountOverride = lstInfo.byteCount;
+        }
+    }
+
+    if (!widthKnown8 && !narrowed16 && varByte && modeName === 'Immediate' && operand.startsWith('#')) {
         const resolveIdentValue = createIdentValueResolver(
-            lineNum,
-            operandCol,
+            operandSources,
             document,
             symbolTable,
             allSymbolTables,
@@ -1937,10 +2112,10 @@ function computeModeMetrics(
         + (info.pageOrIndex16Penalty ? 1 : 0)
         + (info.nativeModeCyclePenalty ?? 0);
 
-    const minBytes = info.bytes + (narrowed16 ? 1 : 0);
-    const maxBytes = info.bytes + varByte;
+    const minBytes = byteCountOverride ?? (info.bytes + (narrowed16 ? 1 : 0));
+    const maxBytes = byteCountOverride ?? (widthKnown8 ? info.bytes : info.bytes + varByte);
     const minCycles = info.cycles + (narrowed16 ? varCycle : 0);
-    const maxCycles = info.cycles + extraFixedCycles + varCycle;
+    const maxCycles = info.cycles + extraFixedCycles + (widthKnown8 ? 0 : varCycle);
 
     return {
         minBytes,
@@ -1949,7 +2124,7 @@ function computeModeMetrics(
         maxCycles,
         hasBranchPenalty: Boolean(info.branchPenalty),
         hasPagePenalty: Boolean(info.pagePenalty || info.pageOrIndex16Penalty),
-        hasVariableWidth16: !narrowed16 && (varByte > 0 || varCycle > 0),
+        hasVariableWidth16: !widthKnown8 && !narrowed16 && (varByte > 0 || varCycle > 0),
         hasDpOffsetPenalty: Boolean(info.dpNonZeroPenalty),
         hasEmulationPagePenalty: Boolean(info.emulationOnlyPagePenalty),
         hasPerByteCycles: Boolean(info.perByteCycles),
@@ -1967,7 +2142,10 @@ export function analyzeInstructionRange(
     allSymbolTables: Map<string, SymbolTable>,
     includesGraph: IncludesGraph,
     implicitImports: boolean,
-    cpu?: unknown
+    cpu?: unknown,
+    cComments: boolean = true,
+    lineContinuations: boolean = true,
+    lstLines?: ReadonlyMap<number, LstLineInfo>
 ): InstructionAnalysisSummary {
     const normalizedCpu = normalizeCpu(cpu);
     const startLine = Math.max(0, range.start.line);
@@ -1982,6 +2160,7 @@ export function analyzeInstructionRange(
     let minCycles = 0;
     let maxCycles = 0;
     let uncertainCount = 0;
+    let usedListing = false;
     let hasBranchPenalty = false;
     let hasPagePenalty = false;
     let hasVariableWidth16 = false;
@@ -1989,28 +2168,16 @@ export function analyzeInstructionRange(
     let hasEmulationPagePenalty = false;
     let hasPerByteCycles = false;
 
-    const docText = document.getText();
     const constCache = new Map<SymbolTableEntity, number | null>();
-    let lineStart = startLine === 0 ? 0 : document.offsetAt({ line: startLine, character: 0 });
+    const logicalLines = collectLogicalLines(document, startLine, endLine, -1, false, true, cComments, lineContinuations);
 
-    for (let lineNum = startLine; lineNum <= endLine && lineStart <= docText.length; lineNum++) {
-        const curLineStart = lineStart;
-        const nl = docText.indexOf('\n', curLineStart);
-        const rawEnd = nl === -1 ? docText.length : nl;
-        const lineEnd = (rawEnd > curLineStart && docText.charCodeAt(rawEnd - 1) === 13) ? rawEnd - 1 : rawEnd;
-        lineStart = nl === -1 ? docText.length + 1 : nl + 1;
-
-        // Fast-skip blank or comment-only lines before parsing.
-        let p = curLineStart;
-        while (p < lineEnd && isWsCode(docText.charCodeAt(p))) {
-            p++;
-        }
-        if (p >= lineEnd || docText.charCodeAt(p) === 59) { // blank or ';'
+    for (const logical of logicalLines) {
+        const lineNum = logical.sources[0].line;
+        if (logical.text.trim().length === 0) {
             continue;
         }
 
-        const lineText = docText.slice(curLineStart, lineEnd);
-        const parsed = parseLine(lineText);
+        const parsed = parseLine(logical.text);
         if (!parsed.command || parsed.command.text.startsWith('.')) {
             continue;
         }
@@ -2035,39 +2202,47 @@ export function analyzeInstructionRange(
         if (modeCount === 0) continue;
 
         const operand = parsed.args?.text.trim() ?? '';
-        const operandCol = parsed.args?.index ?? (parsed.command.index + parsed.command.text.length);
+        const operandOffset = parsed.args?.index ?? (parsed.command.index + parsed.command.text.length);
+        const operandSources = sliceSourcesFromOffset(logical.sources, operandOffset);
 
-        const { modeA, modeB } = resolveInstructionModes(
-            modes,
-            modeCount,
-            singleModeName,
-            operand,
-            lineNum,
-            operandCol,
-            document,
-            symbolTable,
-            allSymbolTables,
-            includesGraph,
-            implicitImports,
-            constCache
-        );
+        const lstInfo = lstLines?.get(lineNum);
+        const lstMode = lstInfo ? resolveModeFromLst(modes, lstInfo) : undefined;
+        const { modeA, modeB } = lstMode
+            ? { modeA: lstMode, modeB: '' }
+            : resolveInstructionModes(
+                modes,
+                modeCount,
+                singleModeName,
+                operand,
+                operandSources,
+                document,
+                symbolTable,
+                allSymbolTables,
+                includesGraph,
+                implicitImports,
+                constCache
+            );
 
         if (!modeA) {
             continue;
+        }
+
+        if (lstMode) {
+            usedListing = true;
         }
 
         const metricsA = computeModeMetrics(
             modeA,
             modes[modeA],
             operand,
-            lineNum,
-            operandCol,
+            operandSources,
             document,
             symbolTable,
             allSymbolTables,
             includesGraph,
             implicitImports,
-            constCache
+            constCache,
+            lstMode ? lstInfo : undefined
         );
         let instMinBytes = metricsA.minBytes;
         let instMaxBytes = metricsA.maxBytes;
@@ -2087,8 +2262,7 @@ export function analyzeInstructionRange(
                 modeB,
                 modes[modeB],
                 operand,
-                lineNum,
-                operandCol,
+                operandSources,
                 document,
                 symbolTable,
                 allSymbolTables,
@@ -2131,6 +2305,7 @@ export function analyzeInstructionRange(
             maxBytes: instMaxBytes,
             minCycles: instMinCycles,
             maxCycles: instMaxCycles,
+            bytesText: lstMode && lstInfo ? lstInfo.bytesText : undefined,
             uncertainMode: uncertain || undefined,
             hasBranchPenalty: instBranchPenalty || undefined,
             hasPagePenalty: instPagePenalty || undefined,
@@ -2141,6 +2316,38 @@ export function analyzeInstructionRange(
         });
     }
 
+    let listingLines: ListingLineRangeItem[] | undefined;
+    let lineListing: InstructionAnalysisSummary['lineListing'];
+    if (startLine <= endLine && lstLines) {
+        const instructionLineSet = items.length > 0 ? new Set(items.map(item => item.line)) : undefined;
+        const extraLines: ListingLineRangeItem[] = [];
+        let totalListingBytes = 0;
+
+        for (let l = startLine; l <= endLine; l++) {
+            if (instructionLineSet?.has(l)) continue;
+            const entry = lstLines.get(l);
+            if (!entry || entry.byteCount <= 0) continue;
+            const normalized = normalizeListingBytesText(entry.bytesText, entry.byteCount);
+            if (!normalized) continue;
+            extraLines.push({
+                line: l,
+                bytesText: normalized,
+                byteCount: entry.byteCount,
+            });
+            totalListingBytes += entry.byteCount;
+        }
+
+        if (extraLines.length > 0) {
+            listingLines = extraLines;
+            if (items.length === 0) {
+                lineListing = {
+                    bytesText: extraLines.length === 1 ? extraLines[0].bytesText : '',
+                    byteCount: totalListingBytes,
+                };
+            }
+        }
+    }
+
     return {
         cpu: normalizedCpu,
         instructionCount: items.length,
@@ -2149,12 +2356,15 @@ export function analyzeInstructionRange(
         minCycles,
         maxCycles,
         uncertainCount,
+        usedListing: (usedListing || Boolean(listingLines)) || undefined,
         hasBranchPenalty,
         hasPagePenalty,
         hasVariableWidth16,
         hasDpOffsetPenalty,
         hasEmulationPagePenalty,
         hasPerByteCycles,
+        lineListing,
+        listingLines,
         items,
     };
 }

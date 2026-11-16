@@ -43,17 +43,14 @@ function makeLspClient(workspaceDir) {
                     const results = items.map((item) => {
                         if (item.section === 'ca65') {
                             return {
-                                enableCa65StdErrDiagnostics: false,
+                                enableStderrDiagnostics: false,
                                 enableUnusedSymbolDiagnostics: true,
                                 includeDirs: ['**/include'],
-                                binIncludeDirs: [],
                                 autoIncludeExtensions: ['.inc', '.s'],
                                 anonymousLabelIndexHints: false,
                                 importFromHints: true,
-                                additionalExtensions: [],
+                                fileExtensions: ['.s', '.asm', '.inc'],
                                 smartFolding: true,
-                                implicitImports: false,
-                                lineContinuations: false,
                                 enableStatusBarCycleCount: true,
                             };
                         }
@@ -212,8 +209,8 @@ function makeLspClient(workspaceDir) {
             { line: 8,  mnemonic: 'CLC', mode: 'Implied',       minB: 1, maxB: 1, minC: 2, maxC: 2 },
             { line: 9,  mnemonic: 'ASL', mode: 'Accumulator',   minB: 1, maxB: 1, minC: 2, maxC: 2 },
             { line: 10, mnemonic: 'LDA', mode: 'Immediate',     minB: 2, maxB: 2, minC: 2, maxC: 2 },
-            { line: 11, mnemonic: 'LDA', mode: 'Zero Page',     minB: 2, maxB: 2, minC: 3, maxC: 3 },
-            { line: 12, mnemonic: 'LDA', mode: 'Zero Page',     minB: 2, maxB: 2, minC: 3, maxC: 3 },
+            { line: 11, mnemonic: 'LDA', mode: 'Zero page',     minB: 2, maxB: 2, minC: 3, maxC: 3 },
+            { line: 12, mnemonic: 'LDA', mode: 'Zero page',     minB: 2, maxB: 2, minC: 3, maxC: 3 },
             { line: 13, mnemonic: 'LDA', mode: 'Absolute',      minB: 3, maxB: 3, minC: 4, maxC: 4 },
             { line: 14, mnemonic: 'LDA', mode: 'Absolute',      minB: 3, maxB: 3, minC: 4, maxC: 4 },
             { line: 15, mnemonic: 'LDA', mode: '(Indirect, X)', minB: 2, maxB: 2, minC: 6, maxC: 6 },
@@ -221,8 +218,8 @@ function makeLspClient(workspaceDir) {
             { line: 17, mnemonic: 'LDA', mode: 'Absolute, X',   minB: 3, maxB: 3, minC: 4, maxC: 5 },
             { line: 18, mnemonic: 'BNE', mode: 'Relative',      minB: 2, maxB: 2, minC: 2, maxC: 4 },
             { line: 19, mnemonic: 'JMP', mode: 'Indirect',      minB: 3, maxB: 3, minC: 5, maxC: 5 },
-            { line: 20, mnemonic: 'LDA', mode: 'Zero Page',     minB: 2, maxB: 2, minC: 3, maxC: 3 },
-            { line: 21, mnemonic: 'LDA', mode: 'Zero Page / Absolute', minB: 2, maxB: 3, minC: 3, maxC: 4, uncertain: true },
+            { line: 20, mnemonic: 'LDA', mode: 'Zero page',     minB: 2, maxB: 2, minC: 3, maxC: 3 },
+            { line: 21, mnemonic: 'LDA', mode: 'Zero page / Absolute', minB: 2, maxB: 3, minC: 3, maxC: 4, uncertain: true },
             { line: 23, mnemonic: 'RTS', mode: 'Implied',       minB: 1, maxB: 1, minC: 6, maxC: 6 },
         ];
 

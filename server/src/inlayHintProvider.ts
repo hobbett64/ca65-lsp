@@ -1,3 +1,4 @@
+import * as path from 'path';
 import {
     _Connection,
     TextDocuments,
@@ -8,7 +9,7 @@ import {
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, symbolTables } from './server';
 import { resolveImport } from './symbolResolver';
-import { getWorkspaceRelativePath } from './pathUtils';
+import { getWorkspaceRelativePath, uriToFsPath } from './pathUtils';
 
 export function initializeInlayHintProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
     connection.languages.inlayHint.on(async (params: InlayHintParams): Promise<InlayHint[]> => {
@@ -22,18 +23,21 @@ export function initializeInlayHintProvider(connection: _Connection, documents: 
 
         const settings = await getDocumentSettings(document.uri);
         const inlayHints: InlayHint[] = [];
+        const startLine = params.range.start.line;
+        const endLine = params.range.end.line;
 
         // Anonymous label index hints
-        if (settings.anonymousLabelIndexHints) {
+        if (settings.anonymousLabelIndexHints !== false) {
             const references = symbolTable.anonymousLabelReferences;
             if (references) {
                 for (const labelIndex of references.keys()) {
                     const ranges = references.get(labelIndex);
                     if (!ranges) continue;
                     for (const range of ranges) {
+                        if (range.end.line < startLine || range.end.line > endLine) continue;
                         inlayHints.push({
-                            label: `L${labelIndex + 1}`,
-                            position: { line: range.start.line, character: range.start.character },
+                            label: `(${labelIndex + 1})`,
+                            position: { line: range.end.line, character: range.end.character },
                             kind: InlayHintKind.Parameter,
                         });
                     }
@@ -44,15 +48,17 @@ export function initializeInlayHintProvider(connection: _Connection, documents: 
         // Import statement `from file` hints
         if (settings.importFromHints) {
             for (const importInfo of symbolTable.imports) {
+                const defLine = importInfo.definition.end.line;
+                if (defLine < startLine || defLine > endLine) continue;
                 const resolvedImport = resolveImport(importInfo.name, symbolTables, includesGraph);
                 if (!resolvedImport) continue;
-    
-                const relativeUri = getWorkspaceRelativePath(resolvedImport.uri);
-    
+
+                const relativePath = getWorkspaceRelativePath(resolvedImport.uri) ?? path.basename(uriToFsPath(resolvedImport.uri));
+
                 inlayHints.push({
-                    label: ` from ${relativeUri}`,
+                    label: ` from ${relativePath}`,
                     position: {
-                        line: importInfo.definition.end.line,
+                        line: defLine,
                         character: importInfo.definition.end.character
                     },
                     kind: InlayHintKind.Parameter,

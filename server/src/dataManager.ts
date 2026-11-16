@@ -129,31 +129,31 @@ function build65C02Table(table65SC02: Record<string, MnemonicInfo>): Record<stri
         const bbsOpcode = `${highOpPrefix}F`;
 
         result[`RMB${bit}`] = {
-            fullName: `Reset Memory Bit ${bit}`,
+            fullName: `Reset memory bit ${bit}`,
             description: `Clears bit ${bit} of the specified zero-page memory byte without affecting flags or registers.`,
             seeAlso: [`SMB${bit}`, `BBR${bit}`, 'TRB'],
             modes: {
-                'Zero Page': { opcode: rmbOpcode, bytes: 2, cycles: 5 },
+                'Zero page': { opcode: rmbOpcode, bytes: 2, cycles: 5 },
             },
             flagChanges: {},
         };
 
         result[`SMB${bit}`] = {
-            fullName: `Set Memory Bit ${bit}`,
+            fullName: `Set memory bit ${bit}`,
             description: `Sets bit ${bit} of the specified zero-page memory byte without affecting flags or registers.`,
             seeAlso: [`RMB${bit}`, `BBS${bit}`, 'TSB'],
             modes: {
-                'Zero Page': { opcode: smbOpcode, bytes: 2, cycles: 5 },
+                'Zero page': { opcode: smbOpcode, bytes: 2, cycles: 5 },
             },
             flagChanges: {},
         };
 
         result[`BBR${bit}`] = {
-            fullName: `Branch on Bit ${bit} Reset`,
+            fullName: `Branch on bit ${bit} reset`,
             description: `Tests bit ${bit} of the specified zero-page byte and branches if it is 0. Syntax: \`bbr${bit} zp, target\`.`,
             seeAlso: [`BBS${bit}`, `RMB${bit}`],
             modes: {
-                'Zero Page, Relative': {
+                'Zero page, relative': {
                     opcode: bbrOpcode,
                     bytes: 3,
                     cycles: 5,
@@ -165,11 +165,11 @@ function build65C02Table(table65SC02: Record<string, MnemonicInfo>): Record<stri
         };
 
         result[`BBS${bit}`] = {
-            fullName: `Branch on Bit ${bit} Set`,
+            fullName: `Branch on bit ${bit} set`,
             description: `Tests bit ${bit} of the specified zero-page byte and branches if it is 1. Syntax: \`bbs${bit} zp, target\`.`,
             seeAlso: [`BBR${bit}`, `SMB${bit}`],
             modes: {
-                'Zero Page, Relative': {
+                'Zero page, relative': {
                     opcode: bbsOpcode,
                     bytes: 3,
                     cycles: 5,
@@ -184,27 +184,27 @@ function build65C02Table(table65SC02: Record<string, MnemonicInfo>): Record<stri
 }
 
 const MODE_RENAME_65816: Record<string, string> = {
-    'Zero Page': 'Direct Page',
-    'Zero Page, X': 'Direct Page, X',
-    'Zero Page, Y': 'Direct Page, Y',
-    '(Zero Page)': '(Direct Page)',
-    '(Indirect, X)': '(Direct Page, X)',
-    '(Indirect), Y': '(Direct Page), Y',
+    'Zero page': 'Direct page',
+    'Zero page, X': 'Direct page, X',
+    'Zero page, Y': 'Direct page, Y',
+    '(Zero page)': '(Direct page)',
+    '(Indirect, X)': '(Direct page, X)',
+    '(Indirect), Y': '(Direct page), Y',
 };
 
 const DIRECT_PAGE_MODES_65816 = new Set([
-    'Direct Page',
-    'Direct Page, X',
-    'Direct Page, Y',
-    '(Direct Page)',
-    '(Direct Page, X)',
-    '(Direct Page), Y',
-    '[Direct Page]',
-    '[Direct Page], Y',
+    'Direct page',
+    'Direct page, X',
+    'Direct page, Y',
+    '(Direct page)',
+    '(Direct page, X)',
+    '(Direct page), Y',
+    '[Direct page]',
+    '[Direct page], Y',
 ]);
 
 const ALU_M_OPS_65816 = new Set(['ADC', 'AND', 'CMP', 'CPA', 'EOR', 'LDA', 'ORA', 'SBC']);
-const INDEXED_PAGE_OR_X16_MODES = new Set(['Absolute, X', 'Absolute, Y', '(Direct Page), Y']);
+const INDEXED_PAGE_OR_X16_MODES = new Set(['Absolute, X', 'Absolute, Y', '(Direct page), Y']);
 const RMW_M_OPS_65816 = new Set(['ASL', 'LSR', 'ROL', 'ROR', 'INC', 'DEC', 'TRB', 'TSB']);
 const INDEX_READ_X_OPS_65816 = new Set(['CPX', 'CPY', 'LDX', 'LDY']);
 const INDEX_WRITE_X_OPS_65816 = new Set(['STX', 'STY']);

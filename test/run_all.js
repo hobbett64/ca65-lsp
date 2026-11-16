@@ -7,11 +7,13 @@ const hasCa65 = Boolean(which.sync('ca65', { nothrow: true }));
 
 const testSuites = [
     { file: 'verify_scanner.js', requiresCa65: false },
+    { file: 'verify_comments_multiline.js', requiresCa65: false },
     { file: 'verify_macros.js', requiresCa65: false },
     { file: 'verify_equivalence.js', requiresCa65: false },
     { file: 'verify_edge_cases.js', requiresCa65: false },
     { file: 'verify_ux.js', requiresCa65: false },
     { file: 'verify_cpu.js', requiresCa65: false },
+    { file: 'verify_settings.js', requiresCa65: false },
     { file: 'verify_features.js', requiresCa65: true },
     { file: 'verify_overlay.js', requiresCa65: true },
     { file: 'verify_args.js', requiresCa65: true },

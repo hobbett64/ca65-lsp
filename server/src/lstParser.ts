@@ -10,6 +10,26 @@ export interface LstLineInfo {
     byteCount: number;
 }
 
+/**
+ * Formats a `.lst` line's offset and relocation flag (e.g. `+$000Cr` or `$8000`).
+ */
+export function formatListingAddressLabel(entry: Pick<LstLineInfo, 'offset' | 'isRelocatable'>): string {
+    const width = entry.offset <= 0xFF ? 2 : 4;
+    const addrText = '$' + (entry.offset >>> 0).toString(16).toUpperCase().padStart(width, '0');
+    return entry.isRelocatable ? `+${addrText}r` : addrText;
+}
+
+/**
+ * Formats `.res` (`xx xx`) listing bytes as `res <N>B` while passing concrete bytes through unchanged.
+ */
+export function normalizeListingBytesText(bytesText: string, byteCount: number): string | undefined {
+    if (!bytesText) return undefined;
+    if (/^xx(?:\s+xx)*$/i.test(bytesText.trim())) {
+        return `res ${byteCount}B`;
+    }
+    return bytesText;
+}
+
 interface IncludeStackFrame {
     uri: string | null;
     nextLine: number;

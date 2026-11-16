@@ -10,7 +10,7 @@ import {
     TextEdit,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { findCommentStart } from './documentScanner';
+import { maskCommentsAtDocumentLine } from './documentScanner';
 import { getLineText, isAutoIncludable, makeExportEdit, makeImportEdit, makeIncludeEdit } from './editUtils';
 import { findCanonicalIncludePath, getWorkspaceRelativePath } from './pathUtils';
 import {
@@ -24,7 +24,7 @@ import {
 } from './server';
 import { Ca65Settings } from './settings';
 import { resolveExport, resolveReference } from './symbolResolver';
-import { isZeroPageSegmentName, Macro, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
+import { isZeroPageSegment, Macro, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
 import { getCachedTextDocument } from './documentCache';
 
 function rangesOverlap(a: Range, b: Range): boolean {
@@ -42,7 +42,7 @@ function rangesEqual(a: Range, b: Range): boolean {
 }
 
 function isZeroPageEntity(entity: SymbolTableEntity | undefined, explicitZp: boolean = false): boolean {
-    return explicitZp || isZeroPageSegmentName(entity?.segment);
+    return explicitZp || isZeroPageSegment(entity?.segment, entity ? symbolTables.get(entity.uri) : undefined, symbolTables);
 }
 
 function deleteLinesRange(document: TextDocument, startLine: number, endLine: number): Range {
@@ -193,15 +193,17 @@ async function buildUnresolvedSymbolQuickFixes(
     outActions.push(...importCandidates, ...includeCandidates, ...exportAndImportCandidates);
 }
 
-function buildRemoveUnusedEntityEdit(document: TextDocument, entity: SymbolTableEntity): TextEdit {
+function buildRemoveUnusedEntityEdit(
+    document: TextDocument,
+    entity: SymbolTableEntity,
+    cComments: boolean = true
+): TextEdit {
     if (entity instanceof Scope || entity instanceof Macro) {
         return TextEdit.del(deleteLinesRange(document, entity.range.start.line, entity.range.end.line));
     }
 
     const line = entity.definition.start.line;
-    const lineText = getLineText(document, line);
-    const commentIdx = findCommentStart(lineText);
-    const codePart = commentIdx >= 0 ? lineText.slice(0, commentIdx) : lineText;
+    const codePart = maskCommentsAtDocumentLine(document, line, undefined, cComments);
 
     // If a label shares its line with a following instruction/directive (e.g. `foo: lda #0`),
     // remove only `foo:` and trailing spaces before the instruction instead of deleting the whole line.
@@ -223,7 +225,8 @@ function buildUnusedSymbolQuickFixes(
     document: TextDocument,
     symbolTable: SymbolTable,
     seenTitles: Set<string>,
-    outActions: CodeAction[]
+    outActions: CodeAction[],
+    cComments: boolean = true
 ): void {
     const match = diag.message.match(/^Symbol '(.+?)' is defined but never used\.$/);
     if (!match) return;
@@ -268,7 +271,7 @@ function buildUnusedSymbolQuickFixes(
             diagnostics: [diag],
             edit: {
                 changes: {
-                    [document.uri]: [buildRemoveUnusedEntityEdit(document, entity)],
+                    [document.uri]: [buildRemoveUnusedEntityEdit(document, entity, cComments)],
                 },
             },
         });
@@ -301,7 +304,8 @@ function buildImportMismatchQuickFix(
     diag: Diagnostic,
     document: TextDocument,
     seenTitles: Set<string>,
-    outActions: CodeAction[]
+    outActions: CodeAction[],
+    cComments: boolean = true
 ): void {
     if (diag.code !== 'import-zp-expected' && diag.code !== 'import-abs-expected') {
         return;
@@ -311,8 +315,7 @@ function buildImportMismatchQuickFix(
     if (lineNum < 0 || lineNum >= document.lineCount) return;
 
     const lineText = getLineText(document, lineNum);
-    const commentIdx = findCommentStart(lineText);
-    const codePart = commentIdx >= 0 ? lineText.slice(0, commentIdx) : lineText;
+    const codePart = maskCommentsAtDocumentLine(document, lineNum, undefined, cComments);
 
     const directiveMatch = codePart.match(/^(\s*)(\.(?:importzp|import|globalzp|global))\b(.*)$/i);
     if (!directiveMatch) return;
@@ -382,11 +385,13 @@ export interface NumberLiteralHit {
     endChar: number;
 }
 
-export function findNumberLiteralAtPosition(document: TextDocument, pos: Position): NumberLiteralHit | null {
+export function findNumberLiteralAtPosition(
+    document: TextDocument,
+    pos: Position,
+    cComments: boolean = true
+): NumberLiteralHit | null {
     if (pos.line < 0 || pos.line >= document.lineCount) return null;
-    const lineText = getLineText(document, pos.line);
-    const commentIdx = findCommentStart(lineText);
-    const code = commentIdx >= 0 ? lineText.slice(0, commentIdx) : lineText;
+    const code = maskCommentsAtDocumentLine(document, pos.line, undefined, cComments);
     if (pos.character > code.length) return null;
 
     let i = 0;
@@ -460,10 +465,11 @@ export function findNumberLiteralAtPosition(document: TextDocument, pos: Positio
 function buildNumberConversionActions(
     document: TextDocument,
     paramsRange: Range,
-    outActions: CodeAction[]
+    outActions: CodeAction[],
+    cComments: boolean = true
 ): void {
     if (paramsRange.start.line !== paramsRange.end.line) return;
-    const hit = findNumberLiteralAtPosition(document, paramsRange.start);
+    const hit = findNumberLiteralAtPosition(document, paramsRange.start, cComments);
     if (!hit) return;
 
     const line = paramsRange.start.line;
@@ -527,8 +533,8 @@ export function initializeCodeActionProvider(connection: _Connection, documents:
 
                 for (const diag of params.context.diagnostics) {
                     if (diag.source === 'ca65-lsp') {
-                        buildUnusedSymbolQuickFixes(diag, document, symbolTable, seenTitles, actions);
-                        buildImportMismatchQuickFix(diag, document, seenTitles, actions);
+                        buildUnusedSymbolQuickFixes(diag, document, symbolTable, seenTitles, actions, settings.cComments);
+                        buildImportMismatchQuickFix(diag, document, seenTitles, actions, settings.cComments);
                         continue;
                     }
 
@@ -580,7 +586,7 @@ export function initializeCodeActionProvider(connection: _Connection, documents:
             }
 
             if (wantsRefactor) {
-                buildNumberConversionActions(document, params.range, actions);
+                buildNumberConversionActions(document, params.range, actions, settings.cComments);
             }
 
             return actions;

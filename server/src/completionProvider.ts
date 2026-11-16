@@ -15,7 +15,7 @@ import {
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
-import { getLineText } from './editUtils';
+import { getCursorCommentContext } from './documentScanner';
 import { directiveData, getMnemonicInfo, getMnemonicsForCpu, resolveDirectiveAlias } from './dataManager';
 import { Export, formatSegmentDisplayName, Import, ImportKind, Macro, MacroKind, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
 import { findCheapLocalLabelDefinition, getCheapLocalLabelDefinitions } from './cheapLocalLabelUtils';
@@ -27,6 +27,7 @@ import { isAutoIncludable, makeImportEdit, makeIncludeEdit } from './editUtils';
 import { getCachedTextDocument } from './documentCache';
 import {
     extractLeadingDocInfo,
+    formatDocCommentForHover,
     formatSourceLink,
     generateCheapLocalHoverMarkdown,
     generateDirectiveHoverMarkdown,
@@ -77,56 +78,6 @@ const SEGMENT_PATH_CONTEXT_RE = /^\s*(?:[a-zA-Z_@.][a-zA-Z0-9_@.]*:\s*)?\.segmen
 const TAG_CONTEXT_RE = /(?:^|[\s:])\.tag\s+[a-zA-Z0-9_.:]*$/i;
 const SIZEOF_CONTEXT_RE = /(?:^|[^a-zA-Z0-9_.])\.sizeof\s*\(\s*[a-zA-Z0-9_.:]*$/i;
 const STANDARD_SEGMENT_NAMES = ['CODE', 'ZEROPAGE', 'RODATA', 'BSS', 'DATA'] as const;
-
-function hasUnclosedPriorBlockComment(document: TextDocument, line: number): boolean {
-    const startLine = Math.max(0, line - 200);
-    for (let l = line - 1; l >= startLine; l--) {
-        const text = getLineText(document, l);
-        const closeIdx = text.lastIndexOf('*/');
-        const openIdx = text.lastIndexOf('/*');
-        if (openIdx !== -1 || closeIdx !== -1) {
-            return openIdx > closeIdx;
-        }
-    }
-    return false;
-}
-
-function isInCommentOrString(document: TextDocument, position: Position, lineToCursor: string): boolean {
-    let inBlockComment = hasUnclosedPriorBlockComment(document, position.line);
-    let quote = 0;
-
-    for (let i = 0; i < lineToCursor.length; i++) {
-        const ch = lineToCursor.charCodeAt(i);
-        if (inBlockComment) {
-            if (ch === 42 /* * */ && i + 1 < lineToCursor.length && lineToCursor.charCodeAt(i + 1) === 47 /* / */) {
-                inBlockComment = false;
-                i++;
-            }
-            continue;
-        }
-        if (quote !== 0) {
-            if (ch === 92 /* \ */) {
-                i++;
-            } else if (ch === quote) {
-                quote = 0;
-            }
-            continue;
-        }
-        if (ch === 59 /* ; */) {
-            return true;
-        }
-        if (ch === 47 /* / */ && i + 1 < lineToCursor.length && lineToCursor.charCodeAt(i + 1) === 42 /* * */) {
-            inBlockComment = true;
-            i++;
-            continue;
-        }
-        if (ch === 34 /* " */ || ch === 39 /* ' */) {
-            quote = ch;
-        }
-    }
-
-    return inBlockComment || quote !== 0;
-}
 
 function isInsideDefineHeader(afterDefine: string): boolean {
     const rest = afterDefine.trimStart();
@@ -453,7 +404,15 @@ export function initializeCompletionProvider(connection: _Connection, documents:
             const settings = await getDocumentSettings(document.uri);
             const position = params.position;
 
-            const lineToCursor = document.getText({ start: { line: params.position.line, character: 0 }, end: params.position });
+            const cursorCtx = getCursorCommentContext(document, position, {
+                cComments: settings.cComments,
+                lineContinuations: settings.lineContinuations,
+            });
+            if (cursorCtx.inComment) {
+                return [];
+            }
+
+            const lineToCursor = cursorCtx.logicalCodeToCursor;
 
             // --- INCLUDE / INCBIN FILE PATH CONTEXT ---
             const includePathMatch = lineToCursor.match(/^\s*\.(include|incbin)\s+"([^"]*)$/i);
@@ -465,11 +424,11 @@ export function initializeCompletionProvider(connection: _Connection, documents:
 
             // --- .SEGMENT NAME CONTEXT ---
             const segmentMatch = lineToCursor.match(SEGMENT_PATH_CONTEXT_RE);
-            if (segmentMatch && !hasUnclosedPriorBlockComment(document, position.line)) {
+            if (segmentMatch) {
                 return getSegmentNameCompletions(document.uri, position, segmentMatch[1], symbolTables);
             }
 
-            if (isInCommentOrString(document, position, lineToCursor)) {
+            if (cursorCtx.inString) {
                 return [];
             }
 
@@ -600,7 +559,7 @@ export function initializeCompletionProvider(connection: _Connection, documents:
                 if (info) {
                     item.documentation = {
                         kind: MarkupKind.Markdown,
-                        value: generateMnemonicHoverMarkdown(data.key, info, cpu),
+                        value: generateMnemonicHoverMarkdown(data.key, info, cpu, { detailed: true }),
                     };
                 }
                 return item;
@@ -660,7 +619,10 @@ export function initializeCompletionProvider(connection: _Connection, documents:
                             const { docCommentBlock } = extractLeadingDocInfo(targetDoc, data.targetLine);
                             const parts = [`\`\`\`ca65\n${data.targetName || ''}\n\`\`\``];
                             if (docCommentBlock) {
-                                parts.push(`\`\`\`ca65\n${docCommentBlock}\n\`\`\``);
+                                const renderedDoc = formatDocCommentForHover(docCommentBlock);
+                                if (renderedDoc) {
+                                    parts.push(renderedDoc);
+                                }
                             }
                             parts.push(`Defined in ${formatSourceLink(data.targetUri, data.targetLine + 1)}`);
                             item.documentation = {
@@ -715,6 +677,11 @@ async function getIncludePathCompletions(
     const items: CompletionItem[] = [];
     const seenNames = new Set<string>();
     const includeSourceExts = new Set(['.inc', '.s', '.asm', '.h', '.mac', '.ca65']);
+    if (Array.isArray(settings.fileExtensions)) {
+        for (const ext of settings.fileExtensions) {
+            includeSourceExts.add(ext.toLowerCase());
+        }
+    }
 
     for (const baseDir of dirs) {
         const searchDir = subDirPrefix ? path.resolve(baseDir, subDirPrefix) : baseDir;
@@ -848,7 +815,7 @@ function getScopeQualifiedCompletions(
 
         items.push({
             label: entity.name,
-            kind: overrideKind ?? getCompletionItemKind(getLSPSymbolKind(entity)),
+            kind: overrideKind ?? getCompletionItemKind(getLSPSymbolKind(entity, allSymbolTables)),
             detail: overrideDetail ?? getCompletionItemDetail(entity),
             sortText: VISIBLE_ITEM_PREFIX + entity.name,
             textEdit: TextEdit.replace(replacementRange, entity.name),
@@ -885,7 +852,7 @@ function getScopeQualifiedCompletions(
                 }
                 pushEntity(
                     resolved,
-                    getCompletionItemKind(getLSPSymbolKind(resolved)),
+                    getCompletionItemKind(getLSPSymbolKind(resolved, allSymbolTables)),
                     getCompletionItemDetail(resolved)
                 );
             } else {
@@ -1168,7 +1135,7 @@ async function getCompletionSymbols(
 
                 completionItems.push({
                     label,
-                    kind: entry.kind,
+                    kind: getCompletionItemKind(getLSPSymbolKind(entry.entity, allSymbolTables)),
                     detail: entry.detail,
                     sortText: VISIBLE_ITEM_PREFIX + label,
                     data: makeTargetData(document.uri, entry.entity),
@@ -1187,7 +1154,7 @@ async function getCompletionSymbols(
                 visibleFqns.add(importEntity.getFullyQualifiedName());
 
                 const label = currentScope.findRelativeName(importEntity);
-                let kind = getCompletionItemKind(getLSPSymbolKind(importEntity));
+                let kind = getCompletionItemKind(getLSPSymbolKind(importEntity, allSymbolTables));
                 let detail = getCompletionItemDetail(importEntity);
                 let targetEntity: SymbolTableEntity = importEntity;
 
@@ -1206,7 +1173,7 @@ async function getCompletionSymbols(
                     }
 
                     if (visibleUriSet.has(resolvedImport.uri)) continue;
-                    kind = getCompletionItemKind(getLSPSymbolKind(resolvedImport));
+                    kind = getCompletionItemKind(getLSPSymbolKind(resolvedImport, allSymbolTables));
                     detail = getCompletionItemDetail(resolvedImport);
                     targetEntity = resolvedImport;
                 }
@@ -1251,7 +1218,7 @@ async function getCompletionSymbols(
                 completionItems.push(makeAutoIncludeCompletionItem(
                     document.uri,
                     currentScope.findRelativeName(entry.entity),
-                    entry.kind,
+                    getCompletionItemKind(getLSPSymbolKind(entry.entity, allSymbolTables)),
                     entry.detail,
                     getCanonicalPath(),
                     entry.entity
@@ -1263,7 +1230,7 @@ async function getCompletionSymbols(
                 if (visibleFqns.has(importEntity.getFullyQualifiedName())) continue;
 
                 const label = currentScope.findRelativeName(importEntity);
-                let kind = getCompletionItemKind(getLSPSymbolKind(importEntity));
+                let kind = getCompletionItemKind(getLSPSymbolKind(importEntity, allSymbolTables));
                 let detail = getCompletionItemDetail(importEntity);
                 let targetEntity: SymbolTableEntity = importEntity;
 
@@ -1273,7 +1240,7 @@ async function getCompletionSymbols(
                 const resolvedExport =
                     resolveImport(importEntity.name, allSymbolTables, includesGraph);
                 if (resolvedExport) {
-                    kind = getCompletionItemKind(getLSPSymbolKind(resolvedExport));
+                    kind = getCompletionItemKind(getLSPSymbolKind(resolvedExport, allSymbolTables));
                     detail = getCompletionItemDetail(resolvedExport);
                     targetEntity = resolvedExport;
                 }
@@ -1299,7 +1266,7 @@ async function getCompletionSymbols(
             if (!resolvedExport) continue;
 
             const label = currentScope.findRelativeName(exportEntity);
-            const kind = getCompletionItemKind(getLSPSymbolKind(resolvedExport));
+            const kind = getCompletionItemKind(getLSPSymbolKind(resolvedExport, allSymbolTables));
             const detail = getCompletionItemDetail(resolvedExport);
             let labelDetails;
             const data: Record<string, any> = {

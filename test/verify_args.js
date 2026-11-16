@@ -42,19 +42,18 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
                         jsonrpc: '2.0',
                         id: msg.id,
                         result: items.map(i => i.section === 'ca65' ? {
-                            enableCa65StdErrDiagnostics: true,
+                            enableStderrDiagnostics: true,
                             enableUnusedSymbolDiagnostics: false,
+                            fileExtensions: ['.s', '.asm', '.inc'],
                             includeDirs: ['**/include'],
                             binIncludeDirs: [],
                             autoIncludeExtensions: ['.inc'],
                             anonymousLabelIndexHints: false,
                             importFromHints: true,
-                            additionalExtensions: [],
                             smartFolding: true,
                             implicitImports: false,
-                            lineContinuations: false,
                             enableStatusBarCycleCount: true,
-                            additionalArgs: ['-D', 'TEST_VAL=$2A', '-o', 'should_be_ignored.o', '-l', 'should_be_ignored.lst'],
+                            additionalArgs: ['-D', 'TEST_VAL=$2A', '-o', 'should_be_ignored.o', '-l', 'should_be_ignored.lst', '--create-dep', 'should_be_ignored.d'],
                         } : { associations: {} }),
                     });
                 } else {
@@ -112,6 +111,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         assert.strictEqual(byLine.get(1).bytesText, 'A9 2A', 'Expected lda #TEST_VAL -> A9 2A');
         assert(!fs.existsSync(path.join(tmpRoot, 'should_be_ignored.o')), '-o flag should be ignored');
         assert(!fs.existsSync(path.join(tmpRoot, 'should_be_ignored.lst')), '-l flag should be ignored');
+        assert(!fs.existsSync(path.join(tmpRoot, 'should_be_ignored.d')), '--create-dep flag should be ignored');
 
         console.log('ADDITIONAL ARGS E2E CHECK PASSED!');
     } finally {

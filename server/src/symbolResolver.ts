@@ -3,7 +3,7 @@ import {
     SymbolKind as LSPSymbolKind,
     Location,
 } from 'vscode-languageserver-types';
-import { SymbolTable, Symbol, SymbolTableEntity, Macro, Scope, ScopeKind, MacroKind, SymbolKind, ReferenceInfo, Export, Import, classifyLabelSegment } from './symbolTable';
+import { SymbolTable, Symbol, SymbolTableEntity, Macro, Scope, ScopeKind, MacroKind, SymbolKind, ReferenceInfo, Export, Import, classifyLabelSegment, resolveSegmentAddrSize, SegmentAddrSize } from './symbolTable';
 import { IncludesGraph } from './includesGraph';
 import { exportsMap, performanceMonitor } from './server';
 
@@ -302,8 +302,8 @@ export function getAllReferenceLocationsForEntity(
         .map((ref) => { return { uri: ref.uri, range: ref.location }})
 }
 
-function getLabelSymbolKindBySegment(segment: string | null | undefined): LSPSymbolKind {
-    switch (classifyLabelSegment(segment)) {
+function getLabelSymbolKindBySegment(segment: string | null | undefined, addrSize?: SegmentAddrSize): LSPSymbolKind {
+    switch (classifyLabelSegment(segment, addrSize)) {
         case 'code':
             return LSPSymbolKind.Function;
         case 'rodata':
@@ -316,7 +316,10 @@ function getLabelSymbolKindBySegment(segment: string | null | undefined): LSPSym
     }
 }
 
-export function getLSPSymbolKind(item: SymbolTableEntity): LSPSymbolKind {
+export function getLSPSymbolKind(
+    item: SymbolTableEntity,
+    allSymbolTables?: Map<string, SymbolTable>
+): LSPSymbolKind {
     if (item instanceof Macro) {
         switch (item.kind) {
             case MacroKind.Define: return LSPSymbolKind.Constant;
@@ -333,7 +336,10 @@ export function getLSPSymbolKind(item: SymbolTableEntity): LSPSymbolKind {
             case SymbolKind.Variable: return LSPSymbolKind.Variable;
             case SymbolKind.StructMember: return LSPSymbolKind.Field;
             case SymbolKind.EnumMember: return LSPSymbolKind.EnumMember;
-            default: return getLabelSymbolKindBySegment(item.segment);
+            default: {
+                const addrSize = resolveSegmentAddrSize(item.segment, allSymbolTables?.get(item.uri), allSymbolTables);
+                return getLabelSymbolKindBySegment(item.segment, addrSize);
+            }
         }
     }
 

@@ -35,7 +35,7 @@ export function initializeDocumentSymbolProvider(connection: _Connection) {
             for (const sym of scope.getSymbols()) {
                 symbols.push({
                     name: sym.name,
-                    kind: getLSPSymbolKind(sym),
+                    kind: getLSPSymbolKind(sym, symbolTables),
                     range: sym.range,
                     selectionRange: sym.definition,
                     children: undefined, // symbols don't have children
@@ -48,7 +48,7 @@ export function initializeDocumentSymbolProvider(connection: _Connection) {
                 const children = getDocumentSymbols(childScope, currentSegment);
                 symbols.push({
                     name: childScope.name,
-                    kind: getLSPSymbolKind(childScope),
+                    kind: getLSPSymbolKind(childScope, symbolTables),
                     range: childScope.range,
                     selectionRange: childScope.definition,
                     children: children.length > 0 ? children : undefined,
@@ -66,7 +66,7 @@ export function initializeDocumentSymbolProvider(connection: _Connection) {
         for (const macro of symbolTable.getAllMacros()) {
             rootSymbols.push({
                 name: macro.name,
-                kind: getLSPSymbolKind(macro),
+                kind: getLSPSymbolKind(macro, symbolTables),
                 range: macro.range,
                 selectionRange: macro.definition,
                 children: undefined,

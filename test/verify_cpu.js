@@ -19,6 +19,7 @@ function createLspHarness(getCpu) {
     let nextId = 1;
     const pending = new Map();
     const publishedDiagnostics = new Map();
+    const listingUpdates = [];
     const stderrLogs = [];
 
     proc.stderr.on('data', (d) => stderrLogs.push(d.toString('utf8')));
@@ -44,18 +45,16 @@ function createLspHarness(getCpu) {
                         id: msg.id,
                         result: items.map(i => i.section === 'ca65' ? {
                             cpu: getCpu(),
-                            enableCa65StdErrDiagnostics: hasCa65,
+                            enableStderrDiagnostics: hasCa65,
                             enableUnusedSymbolDiagnostics: false,
-                            diagnosticsDelay: 50,
+                            fileExtensions: ['.s', '.asm', '.inc'],
                             includeDirs: [],
                             binIncludeDirs: [],
                             autoIncludeExtensions: ['.inc'],
                             anonymousLabelIndexHints: false,
                             importFromHints: false,
-                            additionalExtensions: [],
                             smartFolding: true,
                             implicitImports: false,
-                            lineContinuations: false,
                             enableStatusBarCycleCount: true,
                             additionalArgs: [],
                         } : { associations: {} }),
@@ -72,6 +71,8 @@ function createLspHarness(getCpu) {
                 }
             } else if (msg.method === 'textDocument/publishDiagnostics' && msg.params) {
                 publishedDiagnostics.set(msg.params.uri, msg.params.diagnostics || []);
+            } else if (msg.method === 'ca65/listingUpdated' && msg.params) {
+                listingUpdates.push(msg.params.uris || []);
             }
         }
     });
@@ -98,7 +99,7 @@ function createLspHarness(getCpu) {
         if (!proc.killed) proc.kill();
     }
 
-    return { request, notify, publishedDiagnostics, stderrLogs, close };
+    return { request, notify, publishedDiagnostics, listingUpdates, stderrLogs, close };
 }
 
 async function waitForDiagnostics(publishedDiagnostics, uri, predicate, timeoutMs = 4000) {
@@ -123,7 +124,7 @@ function posOf(lines, needle, offset = 1) {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ca65-cpu-'));
     let activeCpu = '6502';
     const harness = createLspHarness(() => activeCpu);
-    const { request, notify, publishedDiagnostics, stderrLogs } = harness;
+    const { request, notify, publishedDiagnostics, listingUpdates, stderrLogs } = harness;
 
     const baseDocPath = path.join(tmpRoot, 'cpu_test.s');
     const unopenedDocPath = path.join(tmpRoot, 'unopened_mod.s');
@@ -266,7 +267,7 @@ function posOf(lines, needle, offset = 1) {
         assert(!comp6502.has('bra') && !comp6502.has('stz') && !comp6502.has('jsl') && !comp6502.has('rmb0') && !comp6502.has('wai'),
             '6502 completions must not include 65C02/65816 opcodes');
         const resolvedLda6502 = await request('completionItem/resolve', comp6502.get('lda'));
-        assert(resolvedLda6502.documentation.value.startsWith('`lda` — **Load Accumulator**\n'),
+        assert(resolvedLda6502.documentation.value.startsWith('`lda` — **Load accumulator**\n'),
             `6502 hover/completion doc should not carry a CPU tag, got: ${resolvedLda6502.documentation.value}`);
 
         const jmp6502 = await analyzeLine('jmp ($1234)');
@@ -279,6 +280,8 @@ function posOf(lines, needle, offset = 1) {
         const ref6502 = await request('ca65/getReferenceData', { cpu: '6502' });
         assert.strictEqual(ref6502.cpu, '6502');
         assert(ref6502.mnemonics.LDA && !ref6502.mnemonics.BRA && !ref6502.mnemonics.JSL);
+        assert(!ref6502.mnemonics.CLD.description.includes('NES') && !ref6502.mnemonics.SED.description.includes('NES'),
+            'CLD and SED descriptions should be platform-neutral without NES-specific wording');
 
         // ------------------------------------------------------------------
         // 2. '65SC02': core CMOS without Rockwell bit ops or WAI/STP
@@ -313,7 +316,7 @@ function posOf(lines, needle, offset = 1) {
         assert.strictEqual(jmpIdxSc02.minCycles, 6);
         assert.strictEqual(jmpIdxSc02.items[0].mode, '(Absolute, X)');
         const ldaZpIndSc02 = await analyzeLine('lda ($10)');
-        assert.strictEqual(ldaZpIndSc02.items[0].mode, '(Zero Page)');
+        assert.strictEqual(ldaZpIndSc02.items[0].mode, '(Zero page)');
         assert.strictEqual(ldaZpIndSc02.minCycles, 5);
         const aslSc02 = await analyzeLine('asl $1234, x');
         assert.strictEqual(aslSc02.minCycles, 6);
@@ -328,9 +331,9 @@ function posOf(lines, needle, offset = 1) {
         await switchCpu('65C02');
 
         const rmbHover = await hoverToken('rmb0');
-        assert(rmbHover && rmbHover.contents.value.includes('(65C02)') && rmbHover.contents.value.includes('`07`'));
+        assert(rmbHover && rmbHover.contents.value.includes('(65C02)') && rmbHover.contents.value.includes('**Addressing modes:** `Zero page`'));
         const bbrHover = await hoverToken('bbr0');
-        assert(bbrHover && bbrHover.contents.value.includes('(65C02)') && bbrHover.contents.value.includes('`0F`'));
+        assert(bbrHover && bbrHover.contents.value.includes('(65C02)') && bbrHover.contents.value.includes('**Addressing modes:** `Zero page, relative`'));
         assert.strictEqual(await hoverToken('wai'), null, '65C02 should not expose WAI');
         assert.strictEqual(await hoverToken('jsl'), null, '65C02 should not expose JSL');
 
@@ -349,9 +352,11 @@ function posOf(lines, needle, offset = 1) {
         await switchCpu('W65C02');
 
         const waiHover = await hoverToken('wai');
-        assert(waiHover && waiHover.contents.value.includes('(W65C02)') && waiHover.contents.value.includes('`CB`'));
+        assert(waiHover && waiHover.contents.value.includes('(W65C02)') && waiHover.contents.value.includes('**Addressing modes:** `Implied`'));
+        assert(waiHover.contents.value.includes('[See details](command:ca65.showReference?%5B%22wai%22%5D)'),
+            'Expected mnemonic hovercard to include clickable See details link to ca65.showReference with mnemonic arg');
         const stpHover = await hoverToken('stp');
-        assert(stpHover && stpHover.contents.value.includes('(W65C02)') && stpHover.contents.value.includes('`DB`'));
+        assert(stpHover && stpHover.contents.value.includes('(W65C02)') && stpHover.contents.value.includes('**Addressing modes:** `Implied`'));
         assert(await hoverToken('rmb0'), 'W65C02 should retain Rockwell bit ops');
         assert.strictEqual(await hoverToken('jsl'), null, 'W65C02 should not include JSL');
 
@@ -371,8 +376,8 @@ function posOf(lines, needle, offset = 1) {
         assert(comp65816.has('jsl') && comp65816.has('mvn') && comp65816.has('xce') && comp65816.has('cpa'));
         assert(!comp65816.has('rmb0') && !comp65816.has('bbs0'));
         const resolvedLda816 = await request('completionItem/resolve', comp65816.get('lda'));
-        assert(resolvedLda816.documentation.value.includes('Direct Page') && resolvedLda816.documentation.value.includes('2–3 (M)'),
-            '65816 LDA resolve doc should show Direct Page and variable M bytes');
+        assert(resolvedLda816.documentation.value.includes('Direct page') && resolvedLda816.documentation.value.includes('2–3 (M)'),
+            '65816 LDA resolve doc should show Direct page and variable M bytes');
 
         const ref65816 = await request('ca65/getReferenceData', { cpu: '65816' });
         assert.strictEqual(ref65816.cpu, '65816');
@@ -382,19 +387,19 @@ function posOf(lines, needle, offset = 1) {
             ['lda #$12', 'Immediate', 2, 3, 2, 3, true],
             ['lda #$1234', 'Immediate', 3, 3, 3, 3, false],
             ['ldx #$1234', 'Immediate', 3, 3, 3, 3, false],
-            ['lda $10', 'Direct Page', 2, 2, 3, 4, true],
+            ['lda $10', 'Direct page', 2, 2, 3, 4, true],
             ['lda $1234, x', 'Absolute, X', 3, 3, 4, 6, true],
-            ['lda [$10], y', '[Direct Page], Y', 2, 2, 6, 7, true],
-            ['lda $01, s', 'Stack Relative', 2, 2, 4, 5, true],
-            ['lda ($01, s), y', '(Stack Relative, S), Y', 2, 2, 7, 8, true],
-            ['lda f:far_target', 'Absolute Long', 4, 4, 4, 5, true],
-            ['lda $018000', 'Absolute Long', 4, 4, 4, 5, true],
-            ['stx $10', 'Direct Page', 2, 2, 3, 4, true],
+            ['lda [$10], y', '[Direct page], Y', 2, 2, 6, 7, true],
+            ['lda $01, s', 'Stack relative', 2, 2, 4, 5, true],
+            ['lda ($01, s), y', '(Stack relative, S), Y', 2, 2, 7, 8, true],
+            ['lda f:far_target', 'Absolute long', 4, 4, 4, 5, true],
+            ['lda $018000', 'Absolute long', 4, 4, 4, 5, true],
+            ['stx $10', 'Direct page', 2, 2, 3, 4, true],
             ['asl $1234, x', 'Absolute, X', 3, 3, 7, 9, true],
             ['ina', 'Accumulator', 1, 1, 2, 2, false],
             ['brk $00', 'Signature', 2, 2, 7, 8, false],
-            ['mvn $00, $01', 'Block Move', 3, 3, 7, 7, false],
-            ['jml [$1234]', '[Indirect Long]', 3, 3, 6, 6, false],
+            ['mvn $00, $01', 'Block move', 3, 3, 7, 7, false],
+            ['jml [$1234]', '[Indirect long]', 3, 3, 6, 6, false],
             ['bra @loop', 'Relative', 2, 2, 3, 3, false],
         ];
         for (const [needle, expMode, expMinB, expMaxB, expMinC, expMaxC, expVar16] of checks816) {
@@ -455,6 +460,7 @@ function posOf(lines, needle, offset = 1) {
                 '  lda #$12',
                 '  rep #$20',
                 '  .a16',
+                '  lda #$12',
                 '  lda #$1234',
                 '  jsl far_sub',
                 '  mvn $00, $01',
@@ -467,6 +473,33 @@ function posOf(lines, needle, offset = 1) {
             notify('textDocument/didOpen', { textDocument: { uri: validUri, languageId: 'ca65', version: 1, text: valid816 } });
             const diags816 = await waitForDiagnostics(publishedDiagnostics, validUri, d => d.length === 0);
             assert.strictEqual(diags816.length, 0, `Expected 0 errors assembling 65816, got: ${JSON.stringify(diags816)}`);
+
+            assert(listingUpdates.some(uris => uris.includes(validUri)), 'Expected ca65/listingUpdated notification for clean assembly');
+
+            // Verify ca65/analyzeSelection uses shared listing cache BEFORE getOverlayData is even called
+            const selImm8 = await request('ca65/analyzeSelection', {
+                uri: validUri,
+                range: { start: { line: 2, character: 0 }, end: { line: 2, character: 12 } },
+            });
+            assert.strictEqual(selImm8.usedListing, true, 'Expected listing-backed analysis for 8-bit immediate');
+            assert.strictEqual(selImm8.items[0].bytesText, 'A9 12');
+            assert.strictEqual(selImm8.minBytes, 2);
+            assert.strictEqual(selImm8.maxBytes, 2);
+            assert.strictEqual(selImm8.minCycles, 2);
+            assert.strictEqual(selImm8.maxCycles, 2);
+            assert.strictEqual(Boolean(selImm8.hasVariableWidth16), false);
+
+            const selImm16 = await request('ca65/analyzeSelection', {
+                uri: validUri,
+                range: { start: { line: 5, character: 0 }, end: { line: 5, character: 12 } },
+            });
+            assert.strictEqual(selImm16.usedListing, true, 'Expected listing-backed analysis for .a16 small immediate');
+            assert.strictEqual(selImm16.items[0].bytesText, 'A9 12 00');
+            assert.strictEqual(selImm16.minBytes, 3);
+            assert.strictEqual(selImm16.maxBytes, 3);
+            assert.strictEqual(selImm16.minCycles, 3);
+            assert.strictEqual(selImm16.maxCycles, 3);
+            assert.strictEqual(Boolean(selImm16.hasVariableWidth16), false);
 
             const overlay816 = await request('ca65/getOverlayData', { uri: validUri });
             assert.strictEqual(overlay816.source, 'live-lst', 'Expected live-lst overlay for 65816 file');

@@ -8,11 +8,12 @@ import {
     TextDocuments,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { findCommentStart, parseLine } from './documentScanner';
-import { ensureDocumentRefreshed, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
+import { getCursorCommentContext, parseLine } from './documentScanner';
+import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
 import { resolveMacroByName } from './symbolResolver';
 import { Macro, MacroKind } from './symbolTable';
 import { getCachedTextDocument } from './documentCache';
+import { extractLeadingDocInfo, formatDocCommentForHover } from './hoverProvider';
 
 function countTopLevelCommas(text: string): number {
     let quote: '"' | "'" | null = null;
@@ -96,19 +97,12 @@ async function getMacroDocComment(
         return undefined;
     }
 
-    const defLine = macro.definition.start.line;
-    const commentLines: string[] = [];
-    for (let i = defLine - 1; i >= 0; i--) {
-        const rawLine = defDoc.getText({
-            start: { line: i, character: 0 },
-            end: { line: i + 1, character: 0 },
-        }).trim();
-        if (!rawLine.startsWith(';')) break;
-        commentLines.unshift(rawLine.replace(/^;+\s?/, ''));
+    const { docCommentBlock } = extractLeadingDocInfo(defDoc, macro.definition.start.line);
+    if (!docCommentBlock) {
+        return undefined;
     }
 
-    const docText = commentLines.join('\n').trim();
-    return docText || undefined;
+    return formatDocCommentForHover(docCommentBlock) || undefined;
 }
 
 function buildMacroSignatureInfo(macro: Macro, documentation?: string): SignatureInformation {
@@ -147,27 +141,29 @@ export function initializeSignatureHelpProvider(
             const document = documents.get(params.textDocument.uri);
             if (!document) return null;
 
-            const lineToCursor = document.getText({
-                start: { line: params.position.line, character: 0 },
-                end: params.position,
+            const settings = await getDocumentSettings(document.uri);
+            const cursorCtx = getCursorCommentContext(document, params.position, {
+                cComments: settings.cComments,
+                lineContinuations: settings.lineContinuations,
             });
-            if (findCommentStart(lineToCursor) >= 0) {
+            if (cursorCtx.inComment) {
                 return null;
             }
 
+            const codeToCursor = cursorCtx.logicalCodeToCursor;
             let targetMacro: Macro | undefined;
             let activeArgIndex = 0;
 
-            const defineCall = findEnclosingDefineCall(lineToCursor, document.uri);
+            const defineCall = findEnclosingDefineCall(codeToCursor, document.uri);
             if (defineCall) {
                 targetMacro = defineCall.macro;
                 activeArgIndex = defineCall.activeArgIndex;
             } else {
-                const parsed = parseLine(lineToCursor);
+                const parsed = parseLine(codeToCursor);
                 if (!parsed.command) return null;
 
                 const cmdEnd = parsed.command.index + parsed.command.text.length;
-                if (lineToCursor.length <= cmdEnd) return null;
+                if (codeToCursor.length <= cmdEnd) return null;
 
                 const candidate = resolveMacroByName(document.uri, parsed.command.text, symbolTables, includesGraph);
                 if (!candidate || candidate.kind !== MacroKind.Macro || candidate.params.length === 0) {
@@ -175,7 +171,7 @@ export function initializeSignatureHelpProvider(
                 }
 
                 targetMacro = candidate;
-                activeArgIndex = countTopLevelCommas(lineToCursor.slice(cmdEnd));
+                activeArgIndex = countTopLevelCommas(codeToCursor.slice(cmdEnd));
             }
 
             const documentation = await getMacroDocComment(targetMacro, documents);

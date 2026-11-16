@@ -26,7 +26,7 @@ export function initializeWorkspaceSymbolProvider(connection: _Connection) {
 
                 lspSymbols.push({
                     name: entity.getFullyQualifiedName(),
-                    kind: getLSPSymbolKind(entity),
+                    kind: getLSPSymbolKind(entity, symbolTables),
                     location: { uri, range: entity.definition },
                 });
             }
