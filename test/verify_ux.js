@@ -79,6 +79,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         '  lda #$00',
         'bank_table:',
         '  .byte $01, $02',
+        'bank_empty:',
         '',
         '.segment "DIRECTPAGE"',
         'dp_plain:',
@@ -209,6 +210,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         'tag_incomplete: .tag ',
         'sizeof_incomplete: .res .sizeof(Ent',
         '.segment "',
+        '  .seg',
     ].join('\n') + '\n';
 
     fs.writeFileSync(defsPath, defsText);
@@ -334,7 +336,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         const chVal = constHover.contents.value;
         assert(chVal.startsWith('const **ZP\\_MAX\\_HP** = `$10` (16)'), `Expected const constant header, got:\n${chVal}`);
         assert(chVal.includes('; Maximum player hit points\n; -------------------------'), 'Doc comment should stay verbatim in ca65 block');
-        assert(chVal.includes(`Defined in [inc/defs.inc:3](${defsUri}#L3)`), `Expected clickable source link in hover, got:\n${chVal}`);
+        assert(!chVal.includes('Defined in'), `Hovercard should not include Defined in footer, got:\n${chVal}`);
 
         // Hover enum member shows enum badge and qualified name with bold leaf
         const enumLine = lines.findIndex(l => l.includes('GameState::STATE_IDLE'));
@@ -352,13 +354,13 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         });
         assert(varHover && varHover.contents.value.startsWith('var **counter\\_var**'), `Expected var badge header, got:\n${varHover && varHover.contents.value}`);
 
-        // Hover imported ZP label with `.res 1` omits `[1]` while keeping ZEROPAGE and label badge
+        // Hover imported ZP label with `.res 1` shows `(1 byte)` while keeping ZEROPAGE badge
         const importZpLine = lines.findIndex(l => l.includes('.import zp_counter'));
         const importZpHover = await request('textDocument/hover', {
             textDocument: { uri: mainUri },
             position: { line: importZpLine, character: lines[importZpLine].indexOf('zp_counter') + 2 },
         });
-        assert(importZpHover && importZpHover.contents.value.startsWith('`ZEROPAGE` label **zp\\_counter**\n'), `Expected ZEROPAGE label badge without [1] for size 1, got:\n${importZpHover && importZpHover.contents.value}`);
+        assert(importZpHover && importZpHover.contents.value === '`ZEROPAGE` **zp\\_counter** (1 byte)', `Expected ZEROPAGE badge with (1 byte), got:\n${importZpHover && importZpHover.contents.value}`);
 
         // Hover `.res <CONSTANT>` label resolves constant from included file (`ZP_MAX_HP = 16`)
         const zpLocalLine = lines.findIndex(l => l.includes('zp_local: .res ZP_MAX_HP'));
@@ -366,41 +368,41 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: mainUri },
             position: { line: zpLocalLine, character: lines[zpLocalLine].indexOf('zp_local') + 2 },
         });
-        assert(zpLocalHover && zpLocalHover.contents.value.startsWith('`ZEROPAGE` label **zp\\_local**[16]'), `Expected [16] after symbol from constant ZP_MAX_HP, got:\n${zpLocalHover && zpLocalHover.contents.value}`);
+        assert(zpLocalHover && zpLocalHover.contents.value.startsWith('`ZEROPAGE` **zp\\_local** (16 bytes)'), `Expected (16 bytes) after symbol from constant ZP_MAX_HP, got:\n${zpLocalHover && zpLocalHover.contents.value}`);
 
-        // Hover RODATA / data array labels shows evaluated byte count `[N]`
+        // Hover RODATA / data array labels shows evaluated byte count `(N bytes)`
         const varsLines = varsText.split('\n');
         const roIncbinLine = varsLines.findIndex(l => l.startsWith('ro_incbin:'));
         const roIncbinHover = await request('textDocument/hover', {
             textDocument: { uri: varsUri },
             position: { line: roIncbinLine, character: 2 },
         });
-        assert(roIncbinHover && roIncbinHover.contents.value.startsWith('`RODATA` label **ro\\_incbin**[4]'), `Expected [4] on .repeat 4 .byte 0 label, got:\n${roIncbinHover && roIncbinHover.contents.value}`);
+        assert(roIncbinHover && roIncbinHover.contents.value.startsWith('`RODATA` **ro\\_incbin** (4 bytes)'), `Expected (4 bytes) on .repeat 4 .byte 0 label, got:\n${roIncbinHover && roIncbinHover.contents.value}`);
 
         const bankTableLine = varsLines.findIndex(l => l.startsWith('bank_table:'));
         const bankTableHover = await request('textDocument/hover', {
             textDocument: { uri: varsUri },
             position: { line: bankTableLine, character: 2 },
         });
-        assert(bankTableHover && bankTableHover.contents.value.startsWith('`BANK01` label **bank\\_table**[2]'), `Expected [2] on .byte $01, $02 label, got:\n${bankTableHover && bankTableHover.contents.value}`);
+        assert(bankTableHover && bankTableHover.contents.value.startsWith('`BANK01` **bank\\_table** (2 bytes)'), `Expected (2 bytes) on .byte $01, $02 label, got:\n${bankTableHover && bankTableHover.contents.value}`);
 
-        const expectedVarsSizes = [
-            ['lo_ptrs:', '`RODATA` label **lo\\_ptrs**[4]'],
-            ['hi_ptrs:', '`RODATA` label **hi\\_ptrs**[3]'],
-            ['bank_ptrs:', '`RODATA` label **bank\\_ptrs**[2]'],
-            ['word_tbl:', '`RODATA` label **word\\_tbl**[4]'],
-            ['addr_tbl:', '`RODATA` label **addr\\_tbl**[4]'],
-            ['dbyt_tbl:', '`RODATA` label **dbyt\\_tbl**[4]'],
-            ['far_tbl:', '`RODATA` label **far\\_tbl**[6]'],
-            ['dw_tbl:', '`RODATA` label **dw\\_tbl**[8]'],
-            ['msg_z:', '`RODATA` label **msg\\_z**[3]'],
-            ['msg_lit:', '`RODATA` label **msg\\_lit**[3]'],
-            ['single_b:', '`RODATA` label **single\\_b**\n'],
-            ['bin_full:', '`RODATA` label **bin\\_full**[12]'],
-            ['bin_slice:', '`RODATA` label **bin\\_slice**[5]'],
-            ['bank_plain:', '`BANK01` label **bank\\_plain**\n'],
+        const expectedVarsHeaders = [
+            ['lo_ptrs:', '`RODATA` **lo\\_ptrs** (4 bytes)'],
+            ['hi_ptrs:', '`RODATA` **hi\\_ptrs** (3 bytes)'],
+            ['bank_ptrs:', '`RODATA` **bank\\_ptrs** (2 bytes)'],
+            ['word_tbl:', '`RODATA` **word\\_tbl** (4 bytes)'],
+            ['addr_tbl:', '`RODATA` **addr\\_tbl** (4 bytes)'],
+            ['dbyt_tbl:', '`RODATA` **dbyt\\_tbl** (4 bytes)'],
+            ['far_tbl:', '`RODATA` **far\\_tbl** (6 bytes)'],
+            ['dw_tbl:', '`RODATA` **dw\\_tbl** (8 bytes)'],
+            ['msg_z:', '`RODATA` **msg\\_z** (3 bytes)'],
+            ['msg_lit:', '`RODATA` **msg\\_lit** (3 bytes)'],
+            ['single_b:', '`RODATA` **single\\_b** (1 byte)'],
+            ['bin_full:', '`RODATA` **bin\\_full** (12 bytes)'],
+            ['bin_slice:', '`RODATA` **bin\\_slice** (5 bytes)'],
+            ['bank_plain:', '`BANK01` **bank\\_plain**'],
         ];
-        for (const [labelPrefix, expectedStart] of expectedVarsSizes) {
+        for (const [labelPrefix, expectedStart] of expectedVarsHeaders) {
             const ln = varsLines.findIndex(l => l.startsWith(labelPrefix));
             const hv = await request('textDocument/hover', {
                 textDocument: { uri: varsUri },
@@ -415,13 +417,13 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: mainUri },
             position: { line: entOneLine, character: 2 },
         });
-        assert(entOneHover && entOneHover.contents.value.startsWith('`BSS` label **ent\\_one**[12]'), `Expected [12] for .tag Entity, got:\n${entOneHover && entOneHover.contents.value}`);
+        assert(entOneHover && entOneHover.contents.value.startsWith('`BSS` **ent\\_one** (12 bytes)'), `Expected (12 bytes) for .tag Entity, got:\n${entOneHover && entOneHover.contents.value}`);
 
         const entityStructHover = await request('textDocument/hover', {
             textDocument: { uri: mainUri },
             position: { line: entOneLine, character: lines[entOneLine].indexOf('Entity') + 2 },
         });
-        assert(entityStructHover && entityStructHover.contents.value.startsWith('struct **Entity** (12 bytes)'), `Expected (12 bytes) for struct Entity, got:\n${entityStructHover && entityStructHover.contents.value}`);
+        assert(entityStructHover && entityStructHover.contents.value === 'struct **Entity**', `Expected struct Entity without byte count, got:\n${entityStructHover && entityStructHover.contents.value}`);
 
         const defsLines = defsText.split('\n');
         const variantLine = defsLines.findIndex(l => l.includes('.union Variant'));
@@ -429,30 +431,30 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: defsUri },
             position: { line: variantLine, character: defsLines[variantLine].indexOf('Variant') + 2 },
         });
-        assert(variantHover && variantHover.contents.value.startsWith('union **Variant** (4 bytes)'), `Expected (4 bytes) for union Variant, got:\n${variantHover && variantHover.contents.value}`);
+        assert(variantHover && variantHover.contents.value === 'union **Variant**', `Expected union Variant without byte count, got:\n${variantHover && variantHover.contents.value}`);
 
         const oneByteLine = defsLines.findIndex(l => l.includes('.struct OneByte'));
         const oneByteHover = await request('textDocument/hover', {
             textDocument: { uri: defsUri },
             position: { line: oneByteLine, character: defsLines[oneByteLine].indexOf('OneByte') + 2 },
         });
-        assert(oneByteHover && oneByteHover.contents.value.startsWith('struct **OneByte** (1 byte)'), `Expected (1 byte) for struct OneByte, got:\n${oneByteHover && oneByteHover.contents.value}`);
+        assert(oneByteHover && oneByteHover.contents.value === 'struct **OneByte**', `Expected struct OneByte without byte count, got:\n${oneByteHover && oneByteHover.contents.value}`);
 
         const oneUnionLine = defsLines.findIndex(l => l.includes('.union OneUnion'));
         const oneUnionHover = await request('textDocument/hover', {
             textDocument: { uri: defsUri },
             position: { line: oneUnionLine, character: defsLines[oneUnionLine].indexOf('OneUnion') + 2 },
         });
-        assert(oneUnionHover && oneUnionHover.contents.value.startsWith('union **OneUnion** (1 byte)'), `Expected (1 byte) for union OneUnion, got:\n${oneUnionHover && oneUnionHover.contents.value}`);
+        assert(oneUnionHover && oneUnionHover.contents.value === 'union **OneUnion**', `Expected union OneUnion without byte count, got:\n${oneUnionHover && oneUnionHover.contents.value}`);
 
         const expectedDefFieldSizes = [
-            ['bits .byte', 'bits', 'field byte OneByte::**bits**\n'],
-            ['flag .res 1', 'flag', 'field OneUnion::**flag**\n'],
-            ['pos .tag Vec2', 'pos', 'field Vec2 Entity::**pos**\n'],
-            ['hp .word', 'hp', 'field word Entity::**hp**\n'],
-            ['words .word 2', 'words', 'field word Entity::**words**[2]'],
-            ['buf .res 4', 'buf', 'field Entity::**buf**[4]'],
-            ['bytes .byte 4', 'bytes', 'field byte Variant::**bytes**[4]'],
+            ['bits .byte', 'bits', 'field OneByte::**bits** (1 byte)'],
+            ['flag .res 1', 'flag', 'field OneUnion::**flag** (1 byte)'],
+            ['pos .tag Vec2', 'pos', 'field Entity::**pos** (2 bytes)'],
+            ['hp .word', 'hp', 'field Entity::**hp** (2 bytes)'],
+            ['words .word 2', 'words', 'field Entity::**words** (4 bytes)'],
+            ['buf .res 4', 'buf', 'field Entity::**buf** (4 bytes)'],
+            ['bytes .byte 4', 'bytes', 'field Variant::**bytes** (4 bytes)'],
         ];
         for (const [needle, ident, expectedStart] of expectedDefFieldSizes) {
             const ln = defsLines.findIndex(l => l.includes(needle));
@@ -468,14 +470,14 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: mainUri },
             position: { line: flagOneLine, character: 2 },
         });
-        assert(flagOneHover && flagOneHover.contents.value.startsWith('`BSS` label **flag\\_one**\n'), `Expected .tag OneByte (1 byte) to omit [1], got:\n${flagOneHover && flagOneHover.contents.value}`);
+        assert(flagOneHover && flagOneHover.contents.value === '`BSS` **flag\\_one** (1 byte)', `Expected .tag OneByte (1 byte), got:\n${flagOneHover && flagOneHover.contents.value}`);
 
         const entArrLine = lines.findIndex(l => l.startsWith('ent_arr:'));
         const entArrHover = await request('textDocument/hover', {
             textDocument: { uri: mainUri },
             position: { line: entArrLine, character: 2 },
         });
-        assert(entArrHover && entArrHover.contents.value.startsWith('`BSS` label **ent\\_arr**[24]'), `Expected [24] for .res .sizeof(Entity) * 2, got:\n${entArrHover && entArrHover.contents.value}`);
+        assert(entArrHover && entArrHover.contents.value.startsWith('`BSS` **ent\\_arr** (24 bytes)'), `Expected (24 bytes) for .res .sizeof(Entity) * 2, got:\n${entArrHover && entArrHover.contents.value}`);
 
         // Hover macro invocation shows macro badge to the left + args without dumping macro body
         const macroCallLine = lines.findIndex(l => l.includes('FILL $00'));
@@ -500,7 +502,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: mainUri },
             position: { line: jsrHelperLine, character: lines[jsrHelperLine].indexOf('helper_sub') + 2 },
         });
-        assert(helperHover && helperHover.contents.value.startsWith('`CODE` label **helper\\_sub**\n'), `Expected \`CODE\` label **helper\\_sub** header, got:\n${helperHover && helperHover.contents.value}`);
+        assert(helperHover && helperHover.contents.value === '`CODE` **helper\\_sub**', `Expected \`CODE\` **helper\\_sub** header, got:\n${helperHover && helperHover.contents.value}`);
 
         // Hover scope and enum references show unstyled scope and enum badges
         const jsrPlayerInitLine = lines.findIndex(l => l.includes('jsr Player::init'));
@@ -516,53 +518,34 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         });
         assert(enumScopeHover && enumScopeHover.contents.value.startsWith('enum **GameState**'), `Expected enum **GameState** header, got:\n${enumScopeHover && enumScopeHover.contents.value}`);
 
-        // 2. Hover: cheap local labels (@loop, scoped myscope::mylabel@mylocallabel, root @zp_top, ZEROPAGE/RODATA/[size], pushseg/popseg) & anonymous label (:+)
+        // 2. Hover: cheap local labels (@loop, @zp_top) & anonymous labels (:-, :+) do not show hovercards
         const bneLocalLine = lines.findIndex(l => l.includes('bne @loop'));
         const localHover = await request('textDocument/hover', {
             textDocument: { uri: mainUri },
             position: { line: bneLocalLine, character: lines[bneLocalLine].indexOf('@loop') + 2 },
         });
-        assert(localHover && localHover.contents.value.includes('`CODE` label PlayerUpdate**\u2060@loop**\n'), `Expected \`CODE\` label PlayerUpdate**\u2060@loop** header, got:\n${localHover && localHover.contents.value}`);
+        assert.strictEqual(localHover, null, `Expected no hovercard for cheap local @loop, got:\n${localHover && localHover.contents.value}`);
 
         const zpTopLine = varsLines.findIndex(l => l.startsWith('@zp_top:'));
         const zpTopHover = await request('textDocument/hover', {
             textDocument: { uri: varsUri },
             position: { line: zpTopLine, character: 2 },
         });
-        assert(zpTopHover && zpTopHover.contents.value.startsWith('`ZEROPAGE` label **@zp\\_top**\n'), `Expected root cheap local bolding @ without [1], got:\n${zpTopHover && zpTopHover.contents.value}`);
-
-        const expectedCheapLocalHovers = [
-            ['bne @mylocallabel', '@mylocallabel', '`CODE` label myscope::mylabel**\u2060@mylocallabel**\n'],
-            ['@zp_byte: .res 1', '@zp_byte', '`ZEROPAGE` label zp\\_parent**\u2060@zp\\_byte**\n'],
-            ['@zp_pair: .res 2', '@zp_pair', '`ZEROPAGE` label zp\\_parent**\u2060@zp\\_pair**[2]\n'],
-            ['@ro_bytes:', '@ro_bytes', '`RODATA` label ro\\_parent**\u2060@ro\\_bytes**[3]\n'],
-            ['@temp_ro: .byte $AA', '@temp_ro', '`RODATA` label pushed\\_ro**\u2060@temp\\_ro**\n'],
-            ['bne @back_to_code', '@back_to_code', '`CODE` label after\\_popseg**\u2060@back\\_to\\_code**\n'],
-        ];
-        for (const [needle, ident, expectedStart] of expectedCheapLocalHovers) {
-            const ln = lines.findIndex(l => l.includes(needle));
-            const hv = await request('textDocument/hover', {
-                textDocument: { uri: mainUri },
-                position: { line: ln, character: lines[ln].indexOf(ident) + 2 },
-            });
-            assert(hv && hv.contents.value.startsWith(expectedStart), `Expected ${JSON.stringify(expectedStart)} for ${ident}, got:\n${hv && hv.contents.value}`);
-        }
+        assert.strictEqual(zpTopHover, null, `Expected no hovercard for cheap local @zp_top, got:\n${zpTopHover && zpTopHover.contents.value}`);
 
         const bneAnonLine = lines.findIndex(l => l.includes('bne :-'));
         const prevAnonHover = await request('textDocument/hover', {
             textDocument: { uri: mainUri },
             position: { line: bneAnonLine, character: lines[bneAnonLine].indexOf(':-') + 1 },
         });
-        assert(prevAnonHover && prevAnonHover.contents.value.startsWith('`CODE` anonymous label **1**\n'), `Expected CODE anonymous label 1 header, got:\n${prevAnonHover && prevAnonHover.contents.value}`);
+        assert.strictEqual(prevAnonHover, null, `Expected no hovercard for anonymous :-, got:\n${prevAnonHover && prevAnonHover.contents.value}`);
 
         const beqAnonLine = lines.findIndex(l => l.includes('beq :+'));
         const anonHover = await request('textDocument/hover', {
             textDocument: { uri: mainUri },
             position: { line: beqAnonLine, character: lines[beqAnonLine].indexOf(':+') + 1 },
         });
-        assert(anonHover && anonHover.contents.value.startsWith('`CODE` anonymous label **2**\n'), `Expected CODE anonymous label 2 header, got:\n${anonHover && anonHover.contents.value}`);
-        const expectedSecondAnonLine = lines.indexOf(':', lines.indexOf(':') + 1) + 1;
-        assert(anonHover && anonHover.contents.value.includes(`main.s:${expectedSecondAnonLine}`), `Expected resolved anon line in hover, got:\n${anonHover.contents.value}`);
+        assert.strictEqual(anonHover, null, `Expected no hovercard for anonymous :+, got:\n${anonHover && anonHover.contents.value}`);
 
         // 3. Hover: mnemonic table & directive type badge
         const ldaLine = lines.findIndex(l => l.includes('lda #10'));
@@ -647,7 +630,8 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         assert.strictEqual(mainByName.get('asserted_sub').kind, 12, 'Subroutine with leading .assert should stay Function (12)');
         assert.strictEqual(byName.get('ro_incbin').kind, 18, 'Plain label in RODATA without direct .byte should fall back to Array (18)');
         assert.strictEqual(byName.get('ro_incbin').detail, '(RODATA)', 'RODATA label should have (RODATA) outline detail');
-        assert.strictEqual(byName.get('bank_plain').kind, 15, 'Plain label in custom segment should fall back to String/abc (15)');
+        assert.strictEqual(byName.get('bank_plain').kind, 12, 'Code label in custom segment followed by instruction should use Function (12)');
+        assert.strictEqual(byName.get('bank_empty').kind, 15, 'Plain empty label in custom segment should fall back to String/abc (15)');
         assert.strictEqual(byName.get('bank_plain').detail, '(BANK01)', 'Custom segment label should have (BANK01) outline detail');
         assert.strictEqual(byName.get('bank_table').kind, 18, 'Data directive in custom segment should still use Array (18)');
 
@@ -682,8 +666,36 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         const segDirItem = cmdItems.find(i => i.label === '.segment');
         assert(procSnippetItem && procSnippetItem.insertTextFormat === 2 && procSnippetItem.sortText.startsWith('2'), `Expected .proc snippet sortText 2..., got ${JSON.stringify(procSnippetItem)}`);
         assert(procSnippetItem.textEdit.newText.includes('.endproc'), 'Expected .proc snippet to include .endproc');
+        const ifSnippetItem = cmdItems.find(i => i.label === '.if' && i.kind === 15);
+        assert.strictEqual(ifSnippetItem?.textEdit?.newText, '.if ${1:condition}\n\t$0\n.endif');
+        const ifdefSnippetItem = cmdItems.find(i => i.label === '.ifdef' && i.kind === 15);
+        assert.strictEqual(ifdefSnippetItem?.textEdit?.newText, '.ifdef ${1:symbol}\n\t$0\n.endif');
         assert(procDirItem && procDirItem.sortText.startsWith('9'), `Expected .proc directive sortText to be demoted (9...), got ${procDirItem && procDirItem.sortText}`);
         assert(segDirItem && segDirItem.sortText.startsWith('3'), `Expected .segment directive sortText 3..., got ${segDirItem && segDirItem.sortText}`);
+        assert.strictEqual(segDirItem.textEdit.newText, '.segment', 'Should not auto-add quotes when trailing code follows cursor');
+
+        const bareSegLine = lines.findIndex(l => l === '  .seg');
+        const quotedCmdComp = await request('textDocument/completion', {
+            textDocument: { uri: mainUri },
+            position: { line: bareSegLine, character: lines[bareSegLine].length },
+        });
+        const quotedCmdItems = Array.isArray(quotedCmdComp) ? quotedCmdComp : quotedCmdComp.items;
+        for (const [dirName, shouldTrigger] of [
+            ['.segment', true],
+            ['.include', true],
+            ['.incbin', true],
+            ['.asciiz', false],
+            ['.literal', false],
+        ]) {
+            const dItem = quotedCmdItems.find(i => i.label === dirName);
+            assert(dItem && dItem.insertTextFormat === 2, `Expected snippet format on ${dirName}, got ${JSON.stringify(dItem)}`);
+            assert.strictEqual(dItem.textEdit.newText, `${dirName} "$0"`, `Expected ${dirName} to auto-add quotes`);
+            assert.strictEqual(
+                Boolean(dItem.command && dItem.command.command === 'editor.action.triggerSuggest'),
+                shouldTrigger,
+                `Unexpected triggerSuggest command on ${dirName}: ${JSON.stringify(dItem.command)}`
+            );
+        }
 
         const incLine = lines.findIndex(l => l === '.include "inc/');
         const incComp = await request('textDocument/completion', {
@@ -734,9 +746,9 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         });
         const symItems = Array.isArray(symComp) ? symComp : symComp.items;
         const zpItem = symItems.find(i => i.label === 'zp_local');
-        assert(zpItem && zpItem.detail === 'res label · zeropage', `Expected segment detail on symbol completion, got ${zpItem && zpItem.detail}`);
+        assert(zpItem && zpItem.detail === 'ZEROPAGE', `Expected actual segment name on label completion, got ${zpItem && zpItem.detail}`);
         const resolvedZpItem = await request('completionItem/resolve', zpItem);
-        assert(resolvedZpItem.documentation && resolvedZpItem.documentation.value.includes('Defined in'), 'Expected lazy doc resolution on symbol completion');
+        assert(resolvedZpItem.documentation && resolvedZpItem.documentation.value.includes('`ZEROPAGE` **zp\\_local** (16 bytes)'), `Expected lazy doc resolution on symbol completion, got:\n${resolvedZpItem.documentation && resolvedZpItem.documentation.value}`);
 
         const myLocalRefLine = lines.findIndex(l => l.includes('bne @mylocallabel'));
         const localComp = await request('textDocument/completion', {
@@ -748,8 +760,8 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         assert(myLocalItem, 'Expected cheap local completion item @mylocallabel');
         const resolvedLocalItem = await request('completionItem/resolve', myLocalItem);
         assert(
-            resolvedLocalItem.documentation && resolvedLocalItem.documentation.value.startsWith('`CODE` label myscope::mylabel**\u2060@mylocallabel**\n'),
-            `Expected cheap local resolve preview with segment, label badge, and qualified name, got:\n${resolvedLocalItem.documentation && resolvedLocalItem.documentation.value}`
+            resolvedLocalItem.documentation && resolvedLocalItem.documentation.value === '`CODE` myscope::mylabel**\u2060@mylocallabel**',
+            `Expected cheap local resolve preview with segment and qualified name, got:\n${resolvedLocalItem.documentation && resolvedLocalItem.documentation.value}`
         );
 
         // Suppressed noisy completion contexts
@@ -864,7 +876,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
 
         const tmGrammar = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'syntaxes/ca65.tmLanguage.json'), 'utf8'));
         const plainLabelRule = tmGrammar.patterns.find(p => p.match === '\\b([a-zA-Z_][a-zA-Z0-9_]*)(?=:)');
-        assert.strictEqual(plainLabelRule && plainLabelRule.captures['1'].name, 'entity.name.function.ca65');
+        assert.strictEqual(plainLabelRule && plainLabelRule.captures['1'].name, 'entity.name.label.ca65');
         assert.deepStrictEqual(
             { type: findTok(mainDecoded, lines, 'zp_local: .res ZP_MAX_HP', 'zp_local').type, mods: findTok(mainDecoded, lines, 'zp_local: .res ZP_MAX_HP', 'zp_local').mods },
             { type: 'variable', mods: ['declaration'] }
@@ -913,7 +925,11 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             { type: findTok(mainDecoded, lines, 'asserted_sub:', 'asserted_sub').type, mods: findTok(mainDecoded, lines, 'asserted_sub:', 'asserted_sub').mods },
             { type: 'function', mods: ['declaration'] }
         );
-        assert.strictEqual(findTok(varsDecoded, varsLines, 'bank_plain:', 'bank_plain'), undefined);
+        assert.deepStrictEqual(
+            { type: findTok(varsDecoded, varsLines, 'bank_plain:', 'bank_plain').type, mods: findTok(varsDecoded, varsLines, 'bank_plain:', 'bank_plain').mods },
+            { type: 'function', mods: ['declaration'] }
+        );
+        assert.strictEqual(findTok(varsDecoded, varsLines, 'bank_empty:', 'bank_empty'), undefined);
         assert.deepStrictEqual(
             { type: findTok(varsDecoded, varsLines, 'audio_zp_var: .res 1', 'audio_zp_var').type, mods: findTok(varsDecoded, varsLines, 'audio_zp_var: .res 1', 'audio_zp_var').mods },
             { type: 'variable', mods: ['declaration'] }
@@ -1046,6 +1062,122 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             Array.isArray(wsSyms) && wsSyms.some(s => s.name === '::EXTRA_S65_SYM'),
             `Expected newly configured .s65 file to be indexed dynamically, got ${JSON.stringify(wsSyms)}`
         );
+
+        // 14. Branch-out-of-range Quick Fix (invert conditional branch + trampoline, bra -> jmp/brl, skip anonymous target)
+        const branchTestPath = path.join(tmpRoot, 'branch_test.s');
+        const branchTestUri = pathToFileURL(branchTestPath).toString();
+        const branchTestText = [
+            '  beq far_lbl ; branch note',
+            '  bra far_lbl',
+            '  beq :+',
+            '  .res 200',
+            'far_lbl:',
+            ':',
+            '  rts',
+            '',
+        ].join('\n');
+        fs.writeFileSync(branchTestPath, branchTestText);
+        ca65ClientConfig = { ...ca65ClientConfig, cpu: '65816' };
+        notify('workspace/didChangeConfiguration', { settings: {} });
+        notify('textDocument/didOpen', { textDocument: { uri: branchTestUri, languageId: 'ca65', version: 1, text: branchTestText } });
+        await new Promise(r => setTimeout(r, 200));
+
+        const beqRangeActions = await request('textDocument/codeAction', {
+            textDocument: { uri: branchTestUri },
+            range: { start: { line: 0, character: 2 }, end: { line: 0, character: 10 } },
+            context: {
+                diagnostics: [{
+                    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 13 } },
+                    severity: 1,
+                    source: 'ca65',
+                    message: 'Range error (200 not in [-128..127])',
+                }],
+            },
+        });
+        const beqFix = beqRangeActions.find(a => a.title.includes("Invert 'beq' to 'bne :+' and 'jmp far_lbl'"));
+        assert(beqFix && beqFix.isPreferred, `Expected preferred branch invert quick fix, got ${JSON.stringify(beqRangeActions)}`);
+        assert.strictEqual(
+            beqFix.edit.changes[branchTestUri][0].newText,
+            '  bne :+ ; branch note\n  jmp far_lbl\n:'
+        );
+
+        const braRangeActions = await request('textDocument/codeAction', {
+            textDocument: { uri: branchTestUri },
+            range: { start: { line: 1, character: 2 }, end: { line: 1, character: 10 } },
+            context: {
+                diagnostics: [{
+                    range: { start: { line: 1, character: 0 }, end: { line: 1, character: 13 } },
+                    severity: 1,
+                    source: 'ca65',
+                    message: 'Range error (200 not in [-128..127])',
+                }],
+            },
+        });
+        assert(braRangeActions.some(a => a.title === "Replace 'bra' with 'jmp far_lbl'" && a.isPreferred), 'Expected bra -> jmp quick fix');
+        assert(braRangeActions.some(a => a.title === "Replace 'bra' with 'brl far_lbl'"), 'Expected bra -> brl quick fix on 65816');
+
+        const anonRangeActions = await request('textDocument/codeAction', {
+            textDocument: { uri: branchTestUri },
+            range: { start: { line: 2, character: 2 }, end: { line: 2, character: 8 } },
+            context: {
+                diagnostics: [{
+                    range: { start: { line: 2, character: 0 }, end: { line: 2, character: 8 } },
+                    severity: 1,
+                    source: 'ca65',
+                    message: 'Range error (200 not in [-128..127])',
+                }],
+            },
+        });
+        assert(!anonRangeActions.some(a => a.title.includes('Invert')), 'Should not insert : trampoline when branch target is an anonymous label');
+
+        // 15. Block-closer & conditional-branch autocomplete dedent
+        const dedentTestPath = path.join(tmpRoot, 'dedent_test.s');
+        const dedentTestUri = pathToFileURL(dedentTestPath).toString();
+        const dedentLines = [
+            '.scope Outer',
+            '    .proc Inner',
+            '        .if 0',
+            '        .endif',
+            '        .if 1',
+            '            .e',
+            '    .endp',
+            '',
+        ];
+        const dedentText = dedentLines.join('\n');
+        fs.writeFileSync(dedentTestPath, dedentText);
+        notify('textDocument/didOpen', { textDocument: { uri: dedentTestUri, languageId: 'ca65', version: 1, text: dedentText } });
+        await new Promise(r => setTimeout(r, 150));
+
+        const dedentComp = await request('textDocument/completion', {
+            textDocument: { uri: dedentTestUri },
+            position: { line: 5, character: dedentLines[5].length },
+        });
+        const dedentItems = Array.isArray(dedentComp) ? dedentComp : dedentComp.items;
+        const findDedentItem = (lbl) => dedentItems.find(i => i.label === lbl);
+
+        for (const [lbl, expectedIndent] of [
+            ['.else', '        '],
+            ['.elseif', '        '],
+            ['.endif', '        '],
+            ['.endproc', '    '],
+            ['.endscope', ''],
+        ]) {
+            const it = findDedentItem(lbl);
+            assert(it && Array.isArray(it.additionalTextEdits) && it.additionalTextEdits.length === 1, `Expected dedent edit on ${lbl}, got ${JSON.stringify(it)}`);
+            assert.deepStrictEqual(it.additionalTextEdits[0], {
+                range: { start: { line: 5, character: 0 }, end: { line: 5, character: 12 } },
+                newText: expectedIndent,
+            }, `Wrong dedent edit for ${lbl}`);
+        }
+        assert(!findDedentItem('.endmacro')?.additionalTextEdits, 'Orphan .endmacro should not dedent without matching .macro');
+        assert(!findDedentItem('.byte')?.additionalTextEdits, 'Non-closer directive should not dedent');
+
+        const alignedComp = await request('textDocument/completion', {
+            textDocument: { uri: dedentTestUri },
+            position: { line: 6, character: dedentLines[6].length },
+        });
+        const alignedItems = Array.isArray(alignedComp) ? alignedComp : alignedComp.items;
+        assert(!alignedItems.find(i => i.label === '.endproc')?.additionalTextEdits, 'Already-aligned .endproc should not emit redundant dedent edit');
 
         console.log('ALL UX IMPROVEMENT E2E CHECKS PASSED!');
     } finally {

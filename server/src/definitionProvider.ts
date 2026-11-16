@@ -10,6 +10,12 @@ import { getAnonymousLabelDefinition } from './anonymousLabelUtils';
 import { findCheapLocalLabelAtPosition, findCheapLocalLabelDefinition } from './cheapLocalLabelUtils';
 import { resolveReferenceAtPosition } from './symbolResolver';
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, symbolTables } from './server';
+import {
+    findBuiltinSegmentDirectiveAtPosition,
+    findSegmentDirectiveAtPosition,
+    loadLinkerConfigForUri,
+    lookupLinkerSegment,
+} from './linkerConfig';
 
 export function initializeDefinitionProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
     /**
@@ -32,6 +38,16 @@ export function initializeDefinitionProvider(connection: _Connection, documents:
 
         if (foundEntity) {
             return Location.create(foundEntity.uri, foundEntity.definition);
+        }
+
+        const segHit = findSegmentDirectiveAtPosition(document, params.position, settings.cComments)
+            ?? findBuiltinSegmentDirectiveAtPosition(document, params.position, settings.cComments);
+        if (segHit) {
+            const linkerConfig = loadLinkerConfigForUri(params.textDocument.uri, settings, documents);
+            const segDef = lookupLinkerSegment(linkerConfig, segHit.segmentName);
+            if (segDef) {
+                return Location.create(segDef.uri, segDef.range);
+            }
         }
 
         // Fallback for special, non-symbol labels

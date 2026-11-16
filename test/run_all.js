@@ -14,6 +14,7 @@ const testSuites = [
     { file: 'verify_ux.js', requiresCa65: false },
     { file: 'verify_cpu.js', requiresCa65: false },
     { file: 'verify_settings.js', requiresCa65: false },
+    { file: 'verify_linker.js', requiresCa65: false },
     { file: 'verify_features.js', requiresCa65: true },
     { file: 'verify_overlay.js', requiresCa65: true },
     { file: 'verify_args.js', requiresCa65: true },

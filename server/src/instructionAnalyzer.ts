@@ -8,7 +8,7 @@ import { LstLineInfo, normalizeListingBytesText } from './lstParser';
 import { resolveIncbinFileSizeSync } from './pathUtils';
 import { Ca65Cpu, normalizeCpu } from './settings';
 import { resolveImport, resolveReference } from './symbolResolver';
-import { Import, Macro, MacroKind, ReferenceInfo, resolveSegmentAddrSize, Scope, ScopeKind, Symbol, SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
+import { Import, isLabelSymbolKind, Macro, MacroKind, ReferenceInfo, resolveSegmentAddrSize, Scope, ScopeKind, Symbol, SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
 
 export interface InstructionAnalysisItem {
     line: number;
@@ -963,15 +963,7 @@ function evaluateNumericExprOnSources(
             if (target instanceof Scope) {
                 return evaluateStructOrUnionSize(target, ctx);
             }
-            if (
-                target instanceof Symbol
-                && (
-                    target.kind === SymbolKind.ResLabel
-                    || target.kind === SymbolKind.DataLabel
-                    || target.kind === SymbolKind.StringLabel
-                    || target.kind === SymbolKind.Label
-                )
-            ) {
+            if (target instanceof Symbol && isLabelSymbolKind(target.kind)) {
                 const targetDoc = getCachedTextDocumentSync(target.uri, ctx.document);
                 const targetSymTable = ctx.allSymbolTables.get(target.uri);
                 if (!targetDoc || !targetSymTable) return null;
@@ -1598,10 +1590,11 @@ export function evaluateScopeSize(
 export interface StructFieldHoverInfo {
     badge: string | null;
     count: number | null;
+    totalBytes: number | null;
 }
 
 /**
- * Extracts a compact type badge and declared count for a `.struct` or `.union` field
+ * Extracts a compact type badge, declared count, and total byte size for a `.struct` or `.union` field
  * (e.g. `byte`, `word`, `word ...[2]`, `...[4]` for `.res 4`, `Vec2`).
  */
 export function evaluateStructFieldBadge(
@@ -1643,27 +1636,20 @@ export function evaluateStructFieldBadge(
         badge = dir;
     }
 
+    const ctx = createSizeEvalContext(document, symbolTable, allSymbolTables, includesGraph, implicitImports, binIncludeDirs);
     let count: number | null = null;
     if (dir === 'res' || (STRUCT_FIELD_UNIT_BYTES[`.${dir}`] !== undefined && dirArgs)) {
         const parts = splitCommaArgsOutsideQuotes(dirArgs);
         if (parts.length > 0) {
-            const val = evaluateNumericExprOnSources(parts[0], logical.sources, {
-                document,
-                symbolTable,
-                allSymbolTables,
-                includesGraph,
-                implicitImports,
-                binIncludeDirs,
-                visitedEntities: new Set(),
-                visitedScopes: new Set(),
-            });
+            const val = evaluateNumericExprOnSources(parts[0], logical.sources, ctx);
             if (val !== null && Number.isFinite(val) && val >= 0) {
                 count = val;
             }
         }
     }
 
-    return { badge, count };
+    const totalBytes = evaluateStructMemberDirectiveBytes(`.${dir}`, dirArgs, logical.sources, ctx);
+    return { badge, count, totalBytes };
 }
 
 function classifyEntityWidth(

@@ -22,7 +22,7 @@ import {
     performanceMonitor,
     symbolTables,
 } from './server';
-import { Ca65Settings } from './settings';
+import { Ca65Cpu, Ca65Settings } from './settings';
 import { resolveExport, resolveReference } from './symbolResolver';
 import { isZeroPageSegment, Macro, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
 import { getCachedTextDocument } from './documentCache';
@@ -378,6 +378,142 @@ function buildImportMismatchQuickFix(
     });
 }
 
+const INVERTED_BRANCH_MAP: Record<string, string> = {
+    bcc: 'bcs',
+    bcs: 'bcc',
+    beq: 'bne',
+    bne: 'beq',
+    bmi: 'bpl',
+    bpl: 'bmi',
+    bvc: 'bvs',
+    bvs: 'bvc',
+};
+
+function matchCasedMnemonic(sample: string, lowerTarget: string): string {
+    return sample === sample.toUpperCase() ? lowerTarget.toUpperCase() : lowerTarget;
+}
+
+function buildBranchRangeQuickFix(
+    diag: Diagnostic,
+    document: TextDocument,
+    cpu: Ca65Cpu,
+    seenTitles: Set<string>,
+    outActions: CodeAction[],
+    cComments: boolean = true
+): void {
+    if (!/^Range error\b/i.test(diag.message)) {
+        return;
+    }
+
+    const lineNum = diag.range.start.line;
+    if (lineNum < 0 || lineNum >= document.lineCount) {
+        return;
+    }
+
+    const rawLine = getLineText(document, lineNum);
+    const maskedLine = maskCommentsAtDocumentLine(document, lineNum, undefined, cComments);
+    const trailingMatch = rawLine.slice(maskedLine.trimEnd().length);
+    const codePart = maskedLine.trimEnd();
+
+    const branchMatch = codePart.match(
+        /^([ \t]*(?:[a-zA-Z_@.][a-zA-Z0-9_@.]*:\s*)?)([a-zA-Z0-9_]+)[ \t]+(.+)$/
+    );
+    if (!branchMatch) {
+        return;
+    }
+
+    const prefix = branchMatch[1];
+    const rawMnemonic = branchMatch[2];
+    const operandPart = branchMatch[3].trim();
+    const lowerMnemonic = rawMnemonic.toLowerCase();
+    const lineRange = Range.create(lineNum, 0, lineNum, rawLine.length);
+    const leadingIndent = prefix.match(/^[ \t]*/)?.[0] ?? '';
+    const instrIndent = prefix.trim().length > 0 ? `${leadingIndent}  ` : (leadingIndent || '  ');
+
+    if (lowerMnemonic === 'bra') {
+        if (/^:[-+<>]+$/.test(operandPart)) {
+            return;
+        }
+        const jmpMnemonic = matchCasedMnemonic(rawMnemonic, 'jmp');
+        const jmpTitle = `Replace '${rawMnemonic}' with '${jmpMnemonic} ${operandPart}'`;
+        if (!seenTitles.has(jmpTitle)) {
+            seenTitles.add(jmpTitle);
+            outActions.push({
+                title: jmpTitle,
+                kind: CodeActionKind.QuickFix,
+                isPreferred: true,
+                diagnostics: [diag],
+                edit: {
+                    changes: {
+                        [document.uri]: [TextEdit.replace(lineRange, `${prefix}${jmpMnemonic} ${operandPart}${trailingMatch}`)],
+                    },
+                },
+            });
+        }
+        if (cpu === '65816') {
+            const brlMnemonic = matchCasedMnemonic(rawMnemonic, 'brl');
+            const brlTitle = `Replace '${rawMnemonic}' with '${brlMnemonic} ${operandPart}'`;
+            if (!seenTitles.has(brlTitle)) {
+                seenTitles.add(brlTitle);
+                outActions.push({
+                    title: brlTitle,
+                    kind: CodeActionKind.QuickFix,
+                    diagnostics: [diag],
+                    edit: {
+                        changes: {
+                            [document.uri]: [TextEdit.replace(lineRange, `${prefix}${brlMnemonic} ${operandPart}${trailingMatch}`)],
+                        },
+                    },
+                });
+            }
+        }
+        return;
+    }
+
+    let invertedLower = INVERTED_BRANCH_MAP[lowerMnemonic];
+    let guardPrefix = '';
+    let target = operandPart;
+
+    if (!invertedLower) {
+        const bitBranchMatch = lowerMnemonic.match(/^(bb[rs])([0-7])$/);
+        if (!bitBranchMatch) {
+            return;
+        }
+        const commaIdx = operandPart.lastIndexOf(',');
+        if (commaIdx < 0) {
+            return;
+        }
+        invertedLower = `${bitBranchMatch[1] === 'bbr' ? 'bbs' : 'bbr'}${bitBranchMatch[2]}`;
+        guardPrefix = `${operandPart.slice(0, commaIdx).trim()}, `;
+        target = operandPart.slice(commaIdx + 1).trim();
+    }
+
+    if (!target || /^:[-+<>]+$/.test(target)) {
+        return;
+    }
+
+    const invMnemonic = matchCasedMnemonic(rawMnemonic, invertedLower);
+    const jmpMnemonic = matchCasedMnemonic(rawMnemonic, 'jmp');
+    const title = `Invert '${rawMnemonic}' to '${invMnemonic} ${guardPrefix}:+' and '${jmpMnemonic} ${target}'`;
+    if (seenTitles.has(title)) {
+        return;
+    }
+    seenTitles.add(title);
+
+    const replacement = `${prefix}${invMnemonic} ${guardPrefix}:+${trailingMatch}\n${instrIndent}${jmpMnemonic} ${target}\n:`;
+    outActions.push({
+        title,
+        kind: CodeActionKind.QuickFix,
+        isPreferred: true,
+        diagnostics: [diag],
+        edit: {
+            changes: {
+                [document.uri]: [TextEdit.replace(lineRange, replacement)],
+            },
+        },
+    });
+}
+
 export interface NumberLiteralHit {
     base: 'hex' | 'bin' | 'dec';
     value: number;
@@ -539,6 +675,7 @@ export function initializeCodeActionProvider(connection: _Connection, documents:
                     }
 
                     if (diag.source === 'ca65') {
+                        buildBranchRangeQuickFix(diag, document, settings.cpu, seenTitles, actions, settings.cComments);
                         const symMatch = diag.message.match(/Symbol\s+[‘']([^’']+)[’']/);
                         let symName = symMatch?.[1];
                         if (!symName) {

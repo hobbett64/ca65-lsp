@@ -296,6 +296,48 @@ function createLspHarness(getCa65Config) {
         const impLoc = Array.isArray(impDef) ? impDef[0] : impDef;
         assert(impLoc && impLoc.uri === extUri, 'implicitImports: true should resolve implicit_ext across files');
 
+        const ldaHoverLine = snesLines.findIndex(l => l.includes('lda #BUILD_VAL'));
+        const dirHoverLine = snesLines.findIndex(l => l.trim().startsWith('.include'));
+        const ldaChar = snesLines[ldaHoverLine].indexOf('lda') + 1;
+        const dirChar = snesLines[dirHoverLine].indexOf('.include') + 2;
+
+        const defaultInstrHover = await client.request('textDocument/hover', {
+            textDocument: { uri: snesUri },
+            position: { line: ldaHoverLine, character: ldaChar },
+        });
+        assert(defaultInstrHover && defaultInstrHover.contents.value.includes('Load accumulator'), 'Instruction hover should be enabled by default');
+
+        const defaultDirHover = await client.request('textDocument/hover', {
+            textDocument: { uri: snesUri },
+            position: { line: dirHoverLine, character: dirChar },
+        });
+        assert(defaultDirHover && defaultDirHover.contents.value.includes('`.include`'), 'Directive hover should be enabled by default');
+
+        currentConfig = {
+            ...currentConfig,
+            enableInstructionHover: false,
+            enableDirectiveHover: false,
+        };
+        client.notify('workspace/didChangeConfiguration', { settings: {} });
+        await new Promise(r => setTimeout(r, 150));
+
+        assert.strictEqual(
+            await client.request('textDocument/hover', {
+                textDocument: { uri: snesUri },
+                position: { line: ldaHoverLine, character: ldaChar },
+            }),
+            null,
+            'enableInstructionHover: false should suppress instruction hovercards'
+        );
+        assert.strictEqual(
+            await client.request('textDocument/hover', {
+                textDocument: { uri: snesUri },
+                position: { line: dirHoverLine, character: dirChar },
+            }),
+            null,
+            'enableDirectiveHover: false should suppress directive hovercards'
+        );
+
         if (hasCa65) {
             const snesDiags = client.publishedDiagnostics.get(snesUri) || [];
             assert.strictEqual(snesDiags.length, 0, `65816 + custom paths + -D should assemble cleanly, got: ${JSON.stringify(snesDiags)}`);

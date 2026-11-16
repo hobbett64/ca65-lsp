@@ -43,7 +43,7 @@
             "[ca65]": {
                 "editor.stickyScroll.defaultModel": "foldingProviderModel",
                 "editor.wordBasedSuggestions": "off",
-                "editor.suggest.snippetsPreventQuickSuggestions": true
+                "editor.suggest.snippetsPreventQuickSuggestions": false
             }
         },
         "configuration": {
@@ -186,6 +186,24 @@
                         ".inc"
                     ],
                     "order": 17
+                },
+                "ca65.enableInstructionHover": {
+                    "type": "boolean",
+                    "description": "Enables hovercards for CPU instruction mnemonics.",
+                    "default": true,
+                    "order": 18
+                },
+                "ca65.enableDirectiveHover": {
+                    "type": "boolean",
+                    "description": "Enables hovercards for ca65 assembler directives.",
+                    "default": true,
+                    "order": 19
+                },
+                "ca65.linkerConfig": {
+                    "type": "string",
+                    "description": "Path to an ld65 linker configuration (.cfg) file (absolute or workspace-relative) used for `.segment` completions, hover details, go-to-definition, segment type resolution, and unknown-segment warnings.",
+                    "default": "",
+                    "order": 20
                 },
                 "ca65.enableCa65StdErrDiagnostics": {
                     "type": "boolean",

@@ -573,7 +573,7 @@ function makeLspClient() {
             textDocument: { uri: mainUri },
             position: { line: structWidthLine, character: lines[structWidthLine].indexOf('width') + 2 },
         });
-        assert(structWidthHover && structWidthHover.contents.value.includes('[2]'), `Expected multi-line Box::width[2] hover, got ${JSON.stringify(structWidthHover)}`);
+        assert(structWidthHover && structWidthHover.contents.value.includes('(2 bytes)'), `Expected multi-line Box::width (2 bytes) hover, got ${JSON.stringify(structWidthHover)}`);
 
         // --------------------------------------------------------------
         // D. Instruction Selection Analysis (/* ... */ + multi-line)
@@ -670,6 +670,26 @@ function makeLspClient() {
         const compAfterMidLabels = new Set((Array.isArray(compAfterMid) ? compAfterMid : compAfterMid.items).map(i => i.label));
         assert(compAfterMidLabels.has('CONST_A'), 'Operand completions should be active after inline /* mid_complete */');
         assert(!compAfterMidLabels.has('nop'), 'Mnemonics should not be suggested in operand position after /* mid_complete */');
+
+        const docTagLine = findLine(' * @param A tile index');
+        const compDocTag = await client.request('textDocument/completion', {
+            textDocument: { uri: mainUri },
+            position: { line: docTagLine, character: lines[docTagLine].indexOf('@param') + 1 },
+        });
+        const compDocTagItems = Array.isArray(compDocTag) ? compDocTag : compDocTag.items;
+        const compDocTagLabels = new Set(compDocTagItems.map(i => i.label));
+        assert(
+            compDocTagLabels.has('@input') && compDocTagLabels.has('@output') && compDocTagLabels.has('@param') && compDocTagLabels.has('@return') && compDocTagLabels.has('@clobber') && compDocTagLabels.has('@preserve'),
+            `Expected Javadoc annotation dropdown on @ inside /** ... */, got ${JSON.stringify([...compDocTagLabels])}`
+        );
+
+        const docProseLine = findLine(' * **Important:** call inside NMI.');
+        const compDocProse = await client.request('textDocument/completion', {
+            textDocument: { uri: mainUri },
+            position: { line: docProseLine, character: lines[docProseLine].indexOf('Important') },
+        });
+        const compDocProseItems = Array.isArray(compDocProse) ? compDocProse : compDocProse.items;
+        assert.strictEqual(compDocProseItems.length, 0, 'Completion inside /** ... */ prose without @ must remain empty');
 
         // --------------------------------------------------------------
         // F. Signature Help: multi-line calls (\ and /* ... */) + /* doc */
@@ -838,6 +858,7 @@ function makeLspClient() {
     // ------------------------------------------------------------------
     const { formatDocCommentForHover } = loadHoverHelpers();
     assert.strictEqual(formatDocCommentForHover('/**/'), '');
+    assert.strictEqual(formatDocCommentForHover('/*   */'), '');
     assert.strictEqual(
         formatDocCommentForHover('/**\n * | col1 | col2 |\n */'),
         '```ca65\n/**\n * | col1 | col2 |\n */\n```'

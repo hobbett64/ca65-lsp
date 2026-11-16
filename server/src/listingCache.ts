@@ -58,11 +58,6 @@ export function computeTuSignature(
     return `${rootUri}|${cpuKey}|${exeKey}|${Boolean(settings?.implicitImports)}|${Boolean(settings?.cComments ?? true)}|${Boolean(settings?.lineContinuations ?? true)}|${includeDirsKey}|${binIncludeDirsKey}|${additionalArgsKey}|${docVersions.join(';')}`;
 }
 
-export function clearLstCache(): void {
-    lastValidLstCache.clear();
-    lastFailedBuildByRoot.clear();
-}
-
 export function invalidateLstSignatures(): void {
     for (const entry of lastValidLstCache.values()) {
         entry.signature = '';
@@ -159,17 +154,4 @@ export async function getListingStateForUri(
     }
 
     return { status: sawError ? 'error' : 'pending' };
-}
-
-/**
- * Returns exact per-line `.lst` data for `targetUri` only when a cached listing matches current live buffer versions and settings.
- */
-export async function getMatchingLstLinesForUri(
-    targetUri: string,
-    documents: DocumentLookup,
-    includesGraph: IncludesGraph,
-    getSettings: (uri: string) => PromiseLike<Ca65Settings>,
-    knownTargetSettings?: Ca65Settings
-): Promise<ReadonlyMap<number, LstLineInfo> | undefined> {
-    return (await getListingStateForUri(targetUri, documents, includesGraph, getSettings, knownTargetSettings)).lines;
 }

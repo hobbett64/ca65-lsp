@@ -3,9 +3,32 @@
     "name": "ca65 Assembly",
     "patterns": [
         {
+            "name": "comment.block.documentation.ca65",
+            "begin": "/\\*\\*(?!/)",
+            "end": "\\*/",
+            "beginCaptures": {
+                "0": { "name": "punctuation.definition.comment.ca65" }
+            },
+            "endCaptures": {
+                "0": { "name": "punctuation.definition.comment.ca65" }
+            },
+            "patterns": [
+                { "include": "#jsdoc-tags" }
+            ]
+        },
+        {
             "name": "comment.block.c.ca65",
             "begin": "/\\*",
-            "end": "\\*/"
+            "end": "\\*/",
+            "beginCaptures": {
+                "0": { "name": "punctuation.definition.comment.ca65" }
+            },
+            "endCaptures": {
+                "0": { "name": "punctuation.definition.comment.ca65" }
+            },
+            "patterns": [
+                { "include": "#jsdoc-tags" }
+            ]
         },
         {
             "name": "comment.line.semicolon.ca65",
@@ -52,9 +75,23 @@
             "match": ":[-+<>]+"
         },
         {
+            "match": "((?:[a-zA-Z_][a-zA-Z0-9_]*::)*)([a-zA-Z_][a-zA-Z0-9_]*)(?=:\\s*(?:\\.res\\b|;\\s*(?:ZEROPAGE|ZP|DIRECTPAGE|DP|BSS|DATA)\\b))",
+            "captures": {
+                "1": { "patterns": [{ "include": "#namespace-prefix" }] },
+                "2": { "name": "variable.other.readwrite.ca65" }
+            }
+        },
+        {
+            "match": "((?:[a-zA-Z_][a-zA-Z0-9_]*::)*)([a-zA-Z_][a-zA-Z0-9_]*)(?=:\\s*(?:\\.(?:byte|byt|word|dword|addr|faraddr|asciiz|literal|incbin)\\b|;\\s*RODATA\\b))",
+            "captures": {
+                "1": { "patterns": [{ "include": "#namespace-prefix" }] },
+                "2": { "name": "variable.other.constant.ca65" }
+            }
+        },
+        {
             "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)(?=:)",
             "captures": {
-                "1": { "name": "entity.name.function.ca65" }
+                "1": { "name": "entity.name.label.ca65" }
             }
         },
         {
@@ -64,42 +101,54 @@
             }
         },
         {
-            "match": "(?i)^\\s*(\\.(?:proc|macro))\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+            "match": "(?i)^\\s*(\\.(?:proc|macro))\\s+((?:[a-zA-Z_][a-zA-Z0-9_]*::)*)([a-zA-Z_][a-zA-Z0-9_]*)",
             "captures": {
                 "1": { "name": "keyword.control.directive.ca65" },
-                "2": { "name": "entity.name.function.ca65" }
+                "2": { "patterns": [{ "include": "#namespace-prefix" }] },
+                "3": { "name": "entity.name.function.ca65" }
             }
         },
         {
-            "match": "(?i)^\\s*(\\.define)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+            "match": "(?i)^\\s*(\\.define)\\s+((?:[a-zA-Z_][a-zA-Z0-9_]*::)*)([a-zA-Z_][a-zA-Z0-9_]*)",
             "captures": {
                 "1": { "name": "keyword.control.directive.ca65" },
-                "2": { "name": "variable.other.constant.ca65" }
+                "2": { "patterns": [{ "include": "#namespace-prefix" }] },
+                "3": { "name": "variable.other.constant.ca65" }
             }
         },
         {
-            "match": "(?i)^\\s*(\\.(?:struct|union))\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+            "match": "(?i)^\\s*(\\.(?:struct|union))\\s+((?:[a-zA-Z_][a-zA-Z0-9_]*::)*)([a-zA-Z_][a-zA-Z0-9_]*)",
             "captures": {
                 "1": { "name": "keyword.control.directive.ca65" },
-                "2": { "name": "entity.name.type.struct.ca65" }
+                "2": { "patterns": [{ "include": "#namespace-prefix" }] },
+                "3": { "name": "entity.name.type.struct.ca65" }
             }
         },
         {
-            "match": "(?i)^\\s*(\\.enum)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+            "match": "(?i)^\\s*(\\.enum)\\s+((?:[a-zA-Z_][a-zA-Z0-9_]*::)*)([a-zA-Z_][a-zA-Z0-9_]*)",
             "captures": {
                 "1": { "name": "keyword.control.directive.ca65" },
-                "2": { "name": "entity.name.type.enum.ca65" }
+                "2": { "patterns": [{ "include": "#namespace-prefix" }] },
+                "3": { "name": "entity.name.type.enum.ca65" }
             }
         },
         {
-            "match": "(?i)^\\s*(\\.scope)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+            "match": "(?i)^\\s*(\\.scope)\\s+((?:[a-zA-Z_][a-zA-Z0-9_]*::)*)([a-zA-Z_][a-zA-Z0-9_]*)",
             "captures": {
                 "1": { "name": "keyword.control.directive.ca65" },
-                "2": { "name": "entity.name.namespace.ca65" }
+                "2": { "patterns": [{ "include": "#namespace-prefix" }] },
+                "3": { "name": "entity.name.namespace.ca65" }
             }
         },
         {
-            "match": "^\\s*([a-zA-Z_][a-zA-Z0-9_]*)\\s*(:?=)",
+            "match": "(?:^\\s*|(?<=::))([a-zA-Z_][a-zA-Z0-9_]*)\\s*(:=)",
+            "captures": {
+                "1": { "name": "variable.other.readwrite.ca65" },
+                "2": { "name": "keyword.operator.assignment.ca65" }
+            }
+        },
+        {
+            "match": "(?:^\\s*|(?<=::))([a-zA-Z_][a-zA-Z0-9_]*)\\s*(=)",
             "captures": {
                 "1": { "name": "variable.other.constant.ca65" },
                 "2": { "name": "keyword.operator.assignment.ca65" }
@@ -141,5 +190,48 @@
             "name": "variable.other.symbol.cheap.ca65",
             "match": "@[a-zA-Z0-9_]*"
         }
-    ]
+    ],
+    "repository": {
+        "namespace-prefix": {
+            "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\b(::)",
+            "captures": {
+                "1": { "name": "entity.name.namespace.ca65" },
+                "2": { "name": "punctuation.separator.namespace.ca65" }
+            }
+        },
+        "jsdoc-tags": {
+            "patterns": [
+                {
+                    "match": "(?i)(?<!\\S)((@)(?:param|arg|argument|input|in|output|out))\\b(?:[ \\t]+(\\{[^}]+\\}))?(?:[ \\t]+((?:[^\\s*]|\\*(?!/))+))?",
+                    "captures": {
+                        "1": { "name": "storage.type.class.jsdoc" },
+                        "2": { "name": "punctuation.definition.block.tag.jsdoc" },
+                        "3": { "name": "entity.name.type.instance.jsdoc" },
+                        "4": { "name": "variable.other.jsdoc" }
+                    }
+                },
+                {
+                    "begin": "(?i)(?<!\\S)((@)(?:clobbers?|preserves?))\\b",
+                    "end": "(?=$|\\*/|[ \\t]+[-–—]|[:(])",
+                    "beginCaptures": {
+                        "1": { "name": "storage.type.class.jsdoc" },
+                        "2": { "name": "punctuation.definition.block.tag.jsdoc" }
+                    },
+                    "patterns": [
+                        {
+                            "name": "variable.other.jsdoc",
+                            "match": "[^\\s,:*()]+"
+                        }
+                    ]
+                },
+                {
+                    "match": "(?i)(?<!\\S)((@)(?:returns?|modifies|uses|throws|deprecated|see|since|author|note|warning|example|todo|brief|details))\\b",
+                    "captures": {
+                        "1": { "name": "storage.type.class.jsdoc" },
+                        "2": { "name": "punctuation.definition.block.tag.jsdoc" }
+                    }
+                }
+            ]
+        }
+    }
 }

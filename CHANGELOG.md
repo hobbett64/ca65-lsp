@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.3.0] - 2026-11-16
 ### Added
-- Added a shared `ca65 -l` listing cache (`listingCache`) reusing background validation results across diagnostics, the side-by-side hex listing, and the status bar byte/cycle analyzer.
+- Shared `ca65 -l` listing cache (`listingCache`) reusing background validation results across diagnostics, the side-by-side hex listing, and the status bar byte/cycle analyzer.
+- Optional **ld65 linker configuration (`.cfg`) integration** via `ca65.linkerConfig` (default `""`):
+  - Enriches `.segment "..."` autocomplete (showing `.cfg` segments first with `type`, `load`/`run`, and memory bounds) and hovercards.
+  - Supports Go to Definition (`F12`) from `.segment "NAME"` and built-in segment directives (`.bss`, `.code`, `.data`, `.rodata`, `.zeropage`) directly to the `.cfg` segment definition.
+  - Resolves `type = zp` / `rw` / `bss` / `ro` segments for `.import`/`.importzp` checks, semantic token classification, and `unknown-linker-segment` warnings, with automatic revalidation on `.cfg` edits.
+- **Branch-out-of-range Quick Fix:** Offers one-click fixes on `ca65` `Range error` diagnostics to invert conditional branches (`beq`/`bne`/`bcc`/`bcs`/`bmi`/`bpl`/`bvc`/`bvs`, 65C02 `bbr0`–`bbr7`/`bbs0`–`bbs7`) with a `:+` trampoline `jmp`, or replace `bra` with `jmp` (`brl` on `65816`).
+- Added **`ca65.enableInstructionHover`** and **`ca65.enableDirectiveHover`** settings (`default: true`) to toggle opcode and directive hovercards independently.
+- Added JSDoc-style `@` annotation completions (`@param`, `@returns`, `@clobbers`, `@preserves`, `@modifies`, `@uses`, `@note`, `@warning`, etc.) in block comments alongside `#jsdoc-tags` and `Scope::` namespace-prefix TextMate grammar highlighting.
 
 ### Changed
 - **Instruction Hovercard & Reference Panel:**
@@ -17,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Listing & Status Bar Polish:**
   - Unified the status bar counter (`$(file-binary) <bytes> $(clock) <cycles>`) and `Line | Hex | Cycles` tooltip (showing `n/a` for non-instruction lines and disabling click-to-open when assembly fails).
   - Updated `ca65.showHexListing` to open in the same side split with viewport-synced scrolling, cleaner formatting without `;` prefixes, and live `ca65` stderr errors instead of stale hex when assembly fails.
+- **Hovercard, Completion, & Syntax Polish:**
+  - Standardized symbol sizes to `(1 byte)` / `(N bytes)` across labels and struct fields, omitted `'label'` badges and `Defined in ...` footers, suppressed cheap local/anonymous hovercards, and restored verbatim ```` ```ca65 ```` doc comments.
+  - Updated label completions to display actual segment names (`ZEROPAGE`, `BANK01`, etc.) and `'cheap local'`, auto-quoted `.segment`, `.include`, `.incbin`, `.asciiz`, and `.literal` completions (`"$0"` + auto-suggest for segment/path directives), added opener-matched autocomplete dedent for block closers (`.endproc`, `.endmacro`/`.endmac`, `.endscope`, `.endstruct`, `.endunion`, `.endenum`, `.endrepeat`/`.endrep`, `.endif`, `.else`, `.elseif`), and set `"editor.suggest.snippetsPreventQuickSuggestions": false` for `[ca65]` so autocomplete remains active inside `.if`/`.ifdef`/`.repeat` snippet headers.
+  - Promoted instruction-followed and stacked labels to `SymbolKind.CodeLabel` (`function` semantic tokens & outline icons across custom segments), using segments / `.cfg` to distinguish mutable vs. `readonly` data and classify macro/empty labels, and changed the generic TextMate label fallback from `entity.name.function.ca65` to `entity.name.label.ca65`.
 
 ## [2.2.0] - 2026-11-16
 ### Added

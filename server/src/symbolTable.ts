@@ -10,17 +10,6 @@ const EMPTY_SCOPES: readonly Scope[] = [];
 const EMPTY_STRING_ARRAY: readonly string[] = Object.freeze([]);
 const EMPTY_REFS: readonly ReferenceInfo[] = Object.freeze([]);
 const ZERO_PAGE_SEGMENTS = new Set(['ZEROPAGE', 'ZP', 'DIRECTPAGE', 'DP']);
-const BUILTIN_SEGMENTS = new Set([
-    'CODE',
-    'DATA',
-    'BSS',
-    'RODATA',
-    'ZEROPAGE',
-    'ZP',
-    'DIRECTPAGE',
-    'DP',
-    'NULL',
-]);
 
 export type SegmentAddrSize = 'zp' | 'abs' | 'far' | 'long';
 
@@ -71,6 +60,19 @@ export function isZeroPageSegmentName(segment: string | null | undefined): boole
 /**
  * Resolves the explicit or workspace-wide address size (`zp`, `abs`, `far`, `long`) for `segment`.
  */
+type LinkerSegmentAddrSizeResolver = (
+    ownerUri: string | undefined,
+    segment: string
+) => SegmentAddrSize | undefined;
+
+let linkerSegmentAddrSizeResolver: LinkerSegmentAddrSizeResolver | undefined;
+
+export function registerLinkerSegmentAddrSizeResolver(
+    resolver: LinkerSegmentAddrSizeResolver | undefined
+): void {
+    linkerSegmentAddrSizeResolver = resolver;
+}
+
 export function resolveSegmentAddrSize(
     segment: string | null | undefined,
     ownerTable?: SymbolTable,
@@ -85,6 +87,8 @@ export function resolveSegmentAddrSize(
             if (declared) return declared;
         }
     }
+    const linkerAddrSize = linkerSegmentAddrSizeResolver?.(ownerTable?.uri, segment);
+    if (linkerAddrSize) return linkerAddrSize;
     return isZeroPageSegmentName(segment) ? 'zp' : undefined;
 }
 
@@ -124,16 +128,6 @@ export function classifyLabelSegment(
         default:
             return 'unknown';
     }
-}
-
-/**
- * Formats built-in segment names (CODE, BSS, ZEROPAGE, RODATA, DATA, etc.) in lowercase
- * while preserving user casing for custom segments.
- */
-export function formatSegmentDisplayName(segment: string): string {
-    return BUILTIN_SEGMENTS.has(segment.trim().toUpperCase())
-        ? segment.toLowerCase()
-        : segment;
 }
 
 export interface DocumentLinkDirective {
@@ -204,6 +198,7 @@ export class SymbolTableEntity {
 
 export enum SymbolKind {
     Label = "label",
+    CodeLabel = "code label",
     ResLabel = "res label",
     DataLabel = "data label",
     StringLabel = "string label",
@@ -211,6 +206,14 @@ export enum SymbolKind {
     Variable = "variable",
     StructMember = "struct member",
     EnumMember = "enum member",
+}
+
+export function isLabelSymbolKind(kind: SymbolKind): boolean {
+    return kind === SymbolKind.Label
+        || kind === SymbolKind.CodeLabel
+        || kind === SymbolKind.ResLabel
+        || kind === SymbolKind.DataLabel
+        || kind === SymbolKind.StringLabel;
 }
 
 export class Symbol extends SymbolTableEntity {
@@ -636,6 +639,10 @@ export class SymbolTable {
 
     public getSegmentAtLine(line: number): string {
         return this.getSegmentInfoAtLine(line).segment;
+    }
+
+    public getExplicitSegmentEntries(): { line: number; segment: string; explicit: boolean }[] {
+        return this.segmentHistory.filter(entry => entry.explicit);
     }
 
     public getDeclaredSegments(): string[] {

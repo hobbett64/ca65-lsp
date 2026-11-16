@@ -95,6 +95,8 @@ const DATA_LABEL_DIRECTIVES = new Set([
 
 const STRING_LABEL_DIRECTIVES = new Set(['.asciiz', '.literal']);
 const LABEL_KIND_TRANSPARENT_DIRECTIVES = new Set([
+    '.a16',
+    '.a8',
     '.align',
     '.assert',
     '.charmap',
@@ -104,6 +106,8 @@ const LABEL_KIND_TRANSPARENT_DIRECTIVES = new Set([
     '.endrepeat',
     '.error',
     '.fatal',
+    '.i16',
+    '.i8',
     '.if',
     '.ifblank',
     '.ifconst',
@@ -113,7 +117,13 @@ const LABEL_KIND_TRANSPARENT_DIRECTIVES = new Set([
     '.ifnref',
     '.ifref',
     '.out',
+    '.p02',
+    '.p4510',
+    '.p816',
+    '.pc02',
+    '.psc02',
     '.repeat',
+    '.smart',
     '.warning',
 ]);
 const STRING_BYTE_LIST_RE = /^"(?:[^"\\]|\\.)*"(?:\s*,\s*(?:"(?:[^"\\]|\\.)*"|\$0*(?:0|[AaDd])|0|10|13))*$/;
@@ -296,6 +306,8 @@ export interface StrippedLine {
 export interface CursorCommentContext {
     /** True if the cursor lies inside a `;` or `/* ... *\/` comment. */
     inComment: boolean;
+    /** True if the cursor lies inside a `/* ... *\/` block comment (rather than a `;` line comment). */
+    inBlockComment?: boolean;
     /** True if the cursor lies inside a single- or double-quoted string literal (and not a comment). */
     inString: boolean;
     /** Raw text on the cursor's line from column 0 up to the cursor. */
@@ -595,6 +607,7 @@ export function getCursorCommentContext(
             if (closeIdx === -1) {
                 return {
                     inComment: true,
+                    inBlockComment: true,
                     inString: false,
                     rawLineToCursor,
                     logicalCodeToCursor: logicalParts.join(' '),
@@ -639,6 +652,7 @@ export function getCursorCommentContext(
     if (inBlock) {
         return {
             inComment: true,
+            inBlockComment: true,
             inString: false,
             rawLineToCursor,
             logicalCodeToCursor: logicalParts.join(' '),
@@ -967,8 +981,14 @@ class DocumentScanner {
     private currentSegment = 'CODE';
     private segmentStack: string[] = [];
     private currentLabel: Symbol | undefined;
+    private pendingLabels: Symbol[] = [];
     private pendingLabelKindSet = false;
     private nextAnonLabelIndex = 0;
+
+    private clearCurrentLabel(): void {
+        this.currentLabel = undefined;
+        this.pendingLabels.length = 0;
+    }
 
     constructor(
         private readonly document: TextDocument,
@@ -1201,7 +1221,7 @@ class DocumentScanner {
     }
 
     private openScope(kind: ScopeKind, segments: readonly LogicalLineSegment[], command: LineItem, args?: LineItem): void {
-        this.currentLabel = undefined;
+        this.clearCurrentLabel();
         const argsIndex = args?.index ?? (command.index + command.text.length);
         const defRange = args?.text
             ? mapSpanToRange(segments, args.index, args.index + args.text.length)
@@ -1367,12 +1387,17 @@ class DocumentScanner {
         }
 
         this.addSingleReference('symbol', segments, label.text, label.index, this.currentScope);
-        this.currentLabel = this.currentScope.addSymbol(
+        if (this.pendingLabelKindSet) {
+            this.pendingLabels.length = 0;
+        }
+        const addedLabel = this.currentScope.addSymbol(
             label.text,
             mapSpanToRange(segments, label.index, label.index + label.text.length),
             SymbolKind.Label,
             this.currentSegment
         );
+        this.currentLabel = addedLabel;
+        this.pendingLabels.push(addedLabel);
         this.pendingLabelKindSet = false;
     }
 
@@ -1393,7 +1418,7 @@ class DocumentScanner {
         }
 
         if (cmd === '.endproc' || cmd === '.endscope') {
-            this.currentLabel = undefined;
+            this.clearCurrentLabel();
             const closePos = mapOffsetToPosition(segments, command.index, false);
             return this.closeScope(CLOSE_SCOPE_KINDS[cmd], closePos.line, closePos.character);
         }
@@ -1409,7 +1434,7 @@ class DocumentScanner {
         }
 
         if (SEGMENT_DIRECTIVES.has(cmd)) {
-            this.currentLabel = undefined;
+            this.clearCurrentLabel();
             if (cmd === '.segment') {
                 const parsedSeg = parseSegmentDirectiveArgs(argsText);
                 this.currentSegment = parsedSeg.segment;
@@ -1429,7 +1454,7 @@ class DocumentScanner {
         }
 
         if (cmd === '.popseg') {
-            this.currentLabel = undefined;
+            this.clearCurrentLabel();
             if (this.segmentStack.length > 0) {
                 this.currentSegment = this.segmentStack.pop()!;
                 this.symbolTable.recordSegmentChange(cmdLine, this.currentSegment);
@@ -1443,7 +1468,7 @@ class DocumentScanner {
         }
 
         if (cmd === '.include') {
-            this.handleIncludeDirective(segments, cmdLine, args);
+            this.handleIncludeDirective(segments, args);
             return true;
         }
 
@@ -1470,7 +1495,7 @@ class DocumentScanner {
         argsIndex: number,
         name?: string
     ): void {
-        this.currentLabel = undefined;
+        this.clearCurrentLabel();
         if (!name) return;
 
         const rawParams = argsText.slice(name.length).trim();
@@ -1496,7 +1521,7 @@ class DocumentScanner {
         argsText: string,
         argsIndex: number
     ): void {
-        this.currentLabel = undefined;
+        this.clearCurrentLabel();
         const defMatch = argsText.match(/([a-zA-Z_@.][a-zA-Z0-9_]*)(?:\(([^)]*)\))?/);
         const name = defMatch?.[1];
         if (!name) return;
@@ -1573,10 +1598,9 @@ class DocumentScanner {
 
     private handleIncludeDirective(
         segments: readonly LogicalLineSegment[],
-        cmdLine: number,
         args?: LineItem
     ): void {
-        this.currentLabel = undefined;
+        this.clearCurrentLabel();
         if (!args) return;
 
         const argsText = args.text;
@@ -1605,21 +1629,30 @@ class DocumentScanner {
     }
 
     private updateLabelKindFromCommand(cmd: string, argsText: string): void {
-        if (!this.currentLabel || this.pendingLabelKindSet || LABEL_KIND_TRANSPARENT_DIRECTIVES.has(cmd)) return;
+        if (this.pendingLabels.length === 0 || this.pendingLabelKindSet || LABEL_KIND_TRANSPARENT_DIRECTIVES.has(cmd)) return;
 
         this.pendingLabelKindSet = true;
-        if (cmd.charCodeAt(0) !== 46 /* . */) return;
-
-        if (cmd === '.res' || cmd === '.tag') {
-            this.currentLabel.kind = SymbolKind.ResLabel;
+        let resolvedKind: SymbolKind | undefined;
+        if (cmd.charCodeAt(0) !== 46 /* . */) {
+            if (getMnemonicInfo(cmd, this.settings.cpu)) {
+                resolvedKind = SymbolKind.CodeLabel;
+            }
+        } else if (cmd === '.res' || cmd === '.tag') {
+            resolvedKind = SymbolKind.ResLabel;
         } else if (cmd === '.byt' || cmd === '.byte') {
-            this.currentLabel.kind = STRING_BYTE_LIST_RE.test(argsText)
+            resolvedKind = STRING_BYTE_LIST_RE.test(argsText)
                 ? SymbolKind.StringLabel
                 : SymbolKind.DataLabel;
         } else if (DATA_LABEL_DIRECTIVES.has(cmd)) {
-            this.currentLabel.kind = SymbolKind.DataLabel;
+            resolvedKind = SymbolKind.DataLabel;
         } else if (STRING_LABEL_DIRECTIVES.has(cmd)) {
-            this.currentLabel.kind = SymbolKind.StringLabel;
+            resolvedKind = SymbolKind.StringLabel;
+        }
+
+        if (resolvedKind) {
+            for (const lbl of this.pendingLabels) {
+                lbl.kind = resolvedKind;
+            }
         }
     }
 

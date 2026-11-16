@@ -329,6 +329,7 @@ export function getLSPSymbolKind(
 
     if (item instanceof Symbol) {
         switch (item.kind) {
+            case SymbolKind.CodeLabel: return LSPSymbolKind.Function;
             case SymbolKind.ResLabel: return LSPSymbolKind.Variable;
             case SymbolKind.DataLabel: return LSPSymbolKind.Array;
             case SymbolKind.StringLabel: return LSPSymbolKind.String;

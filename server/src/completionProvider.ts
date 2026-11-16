@@ -15,14 +15,20 @@ import {
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
-import { getCursorCommentContext } from './documentScanner';
+import { getCursorCommentContext, maskCommentsAtDocumentLine, stripCommentsInLine } from './documentScanner';
 import { directiveData, getMnemonicInfo, getMnemonicsForCpu, resolveDirectiveAlias } from './dataManager';
-import { Export, formatSegmentDisplayName, Import, ImportKind, Macro, MacroKind, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
+import { Export, Import, ImportKind, isLabelSymbolKind, Macro, MacroKind, Scope, ScopeKind, Symbol, SymbolTable, SymbolTableEntity } from './symbolTable';
 import { findCheapLocalLabelDefinition, getCheapLocalLabelDefinitions } from './cheapLocalLabelUtils';
 import { IncludesGraph } from './includesGraph';
 import { getLSPSymbolKind, resolveExport, resolveImport } from './symbolResolver';
 import { findCanonicalIncludePath, getSearchDirectories, getWorkspaceRelativePath, uriToFsPath } from './pathUtils';
 import { Ca65Cpu, Ca65Settings, normalizeCpu } from './settings';
+import {
+    formatLinkerSegmentDetail,
+    formatLinkerSegmentMarkdown,
+    LinkerConfigData,
+    loadLinkerConfigForUri,
+} from './linkerConfig';
 import { isAutoIncludable, makeImportEdit, makeIncludeEdit } from './editUtils';
 import { getCachedTextDocument } from './documentCache';
 import {
@@ -78,6 +84,105 @@ const SEGMENT_PATH_CONTEXT_RE = /^\s*(?:[a-zA-Z_@.][a-zA-Z0-9_@.]*:\s*)?\.segmen
 const TAG_CONTEXT_RE = /(?:^|[\s:])\.tag\s+[a-zA-Z0-9_.:]*$/i;
 const SIZEOF_CONTEXT_RE = /(?:^|[^a-zA-Z0-9_.])\.sizeof\s*\(\s*[a-zA-Z0-9_.:]*$/i;
 const STANDARD_SEGMENT_NAMES = ['CODE', 'ZEROPAGE', 'RODATA', 'BSS', 'DATA'] as const;
+const QUOTED_DIRECTIVE_SNIPPETS: Readonly<Record<string, { triggerSuggest: boolean }>> = {
+    '.segment': { triggerSuggest: true },
+    '.include': { triggerSuggest: true },
+    '.incbin': { triggerSuggest: true },
+    '.asciiz': { triggerSuggest: false },
+    '.literal': { triggerSuggest: false },
+};
+const TRIGGER_SUGGEST_COMMAND = {
+    title: 'Trigger Suggest',
+    command: 'editor.action.triggerSuggest',
+};
+
+interface BlockDirectiveGroup {
+    openers: ReadonlySet<string>;
+    closers: ReadonlySet<string>;
+    targets: ReadonlySet<string>;
+}
+
+const IF_OPENERS = new Set([
+    '.if', '.ifblank', '.ifconst', '.ifdef', '.ifnblank', '.ifndef',
+    '.ifp02', '.ifp816', '.ifpc02', '.ifref', '.ifnref',
+]);
+
+const BLOCK_DIRECTIVE_GROUPS: readonly BlockDirectiveGroup[] = [
+    { openers: new Set(['.proc']), closers: new Set(['.endproc']), targets: new Set(['.endproc']) },
+    { openers: new Set(['.macro', '.mac']), closers: new Set(['.endmacro', '.endmac']), targets: new Set(['.endmacro', '.endmac']) },
+    { openers: new Set(['.scope']), closers: new Set(['.endscope']), targets: new Set(['.endscope']) },
+    { openers: new Set(['.struct']), closers: new Set(['.endstruct']), targets: new Set(['.endstruct']) },
+    { openers: new Set(['.union']), closers: new Set(['.endunion']), targets: new Set(['.endunion']) },
+    { openers: new Set(['.enum']), closers: new Set(['.endenum']), targets: new Set(['.endenum']) },
+    { openers: new Set(['.repeat']), closers: new Set(['.endrepeat', '.endrep']), targets: new Set(['.endrepeat', '.endrep']) },
+    { openers: IF_OPENERS, closers: new Set(['.endif']), targets: new Set(['.endif', '.else', '.elseif']) },
+];
+
+const BLOCK_TARGET_TO_GROUP = new Map<string, number>();
+const BLOCK_CMD_TO_OPENER_GROUP = new Map<string, number>();
+const BLOCK_CMD_TO_CLOSER_GROUP = new Map<string, number>();
+BLOCK_DIRECTIVE_GROUPS.forEach((group, idx) => {
+    for (const op of group.openers) BLOCK_CMD_TO_OPENER_GROUP.set(op, idx);
+    for (const cl of group.closers) BLOCK_CMD_TO_CLOSER_GROUP.set(cl, idx);
+    for (const t of group.targets) BLOCK_TARGET_TO_GROUP.set(t, idx);
+});
+
+const LINE_COMMAND_RE = /^([ \t]*)(?:[a-zA-Z_@.][a-zA-Z0-9_@.]*:[ \t]*)?(\.[a-zA-Z0-9_]+)\b/;
+
+function computeCloserDedentEdits(
+    document: TextDocument,
+    position: Position,
+    lineToCursor: string,
+    currentWord: string,
+    cComments: boolean
+): Map<string, TextEdit> | undefined {
+    // Only dedent when cursor is in pure leading-indent + directive command position (no label before it)
+    if (lineToCursor.length === 0 || !lineToCursor.endsWith(currentWord)) {
+        return undefined;
+    }
+    const currentIndent = lineToCursor.slice(0, lineToCursor.length - currentWord.length);
+    if (!/^[ \t]+$/.test(currentIndent)) {
+        return undefined;
+    }
+    if (currentWord.length > 0 && !currentWord.startsWith('.')) {
+        return undefined;
+    }
+
+    const stacks: string[][] = BLOCK_DIRECTIVE_GROUPS.map(() => []);
+    let inBlock = false;
+    for (let ln = 0; ln < position.line; ln++) {
+        const rawLine = document.getText({
+            start: { line: ln, character: 0 },
+            end: { line: ln + 1, character: 0 },
+        });
+        const stripped = stripCommentsInLine(rawLine, inBlock, cComments);
+        inBlock = stripped.inBlockComment;
+        const m = stripped.code.match(LINE_COMMAND_RE);
+        if (!m) continue;
+        const cmd = m[2].toLowerCase();
+        const opGroup = BLOCK_CMD_TO_OPENER_GROUP.get(cmd);
+        if (opGroup !== undefined) {
+            stacks[opGroup].push(m[1]);
+            continue;
+        }
+        const clGroup = BLOCK_CMD_TO_CLOSER_GROUP.get(cmd);
+        if (clGroup !== undefined && stacks[clGroup].length > 0) {
+            stacks[clGroup].pop();
+        }
+    }
+
+    const edits = new Map<string, TextEdit>();
+    const indentRange = Range.create(position.line, 0, position.line, currentIndent.length);
+    for (const [targetCmd, groupIdx] of BLOCK_TARGET_TO_GROUP) {
+        const stack = stacks[groupIdx];
+        if (stack.length === 0) continue;
+        const openerIndent = stack[stack.length - 1];
+        if (openerIndent.length < currentIndent.length) {
+            edits.set(targetCmd, TextEdit.replace(indentRange, openerIndent));
+        }
+    }
+    return edits.size > 0 ? edits : undefined;
+}
 
 function isInsideDefineHeader(afterDefine: string): boolean {
     const rest = afterDefine.trimStart();
@@ -166,6 +271,9 @@ function getCompletionItemDetail(entity: SymbolTableEntity): string | undefined 
         }
         return entity.params.length > 0 ? `.macro ${entity.params.join(', ')}` : entity.kind;
     }
+    if (entity instanceof Symbol && isLabelSymbolKind(entity.kind)) {
+        return entity.segment || 'label';
+    }
     if (
         entity instanceof Symbol
         || entity instanceof Scope
@@ -173,7 +281,7 @@ function getCompletionItemDetail(entity: SymbolTableEntity): string | undefined 
         || entity instanceof Export
     ) {
         if (entity.segment && entity.segment.toUpperCase() !== 'CODE') {
-            return `${entity.kind} · ${formatSegmentDisplayName(entity.segment)}`;
+            return `${entity.kind} · ${entity.segment}`;
         }
         return entity.kind;
     }
@@ -271,7 +379,7 @@ function getCheapLocalLabelCompletions(
         const item: CompletionItem = {
             label: labelName,
             kind: CompletionItemKind.Reference,
-            detail: 'cheap_local_label',
+            detail: 'cheap local',
             textEdit: TextEdit.replace(replacementRange, labelName),
             sortText: CHEAP_LOCAL_ITEM_PREFIX + labelName.slice(1),
             data: defLoc ? {
@@ -375,20 +483,79 @@ function getTableCompletionMeta(symbolTable: SymbolTable): CachedTableCompletion
 function appendStaticTemplates(
     target: CompletionItem[],
     templates: readonly Omit<CompletionItem, 'textEdit'>[],
-    replacementRange: Range
+    replacementRange: Range,
+    allowQuotedArgSnippet: boolean = false,
+    dedentEdits?: ReadonlyMap<string, TextEdit>
 ): void {
     for (let i = 0; i < templates.length; i++) {
         const t = templates[i];
-        target.push({
+        const quotedSpec = allowQuotedArgSnippet ? QUOTED_DIRECTIVE_SNIPPETS[t.label] : undefined;
+        const dedentEdit = dedentEdits?.get(t.label);
+        const item: CompletionItem = {
             label: t.label,
             kind: t.kind,
             detail: t.detail,
-            insertTextFormat: t.insertTextFormat,
+            insertTextFormat: quotedSpec ? InsertTextFormat.Snippet : t.insertTextFormat,
             sortText: t.sortText,
             data: t.data,
-            textEdit: TextEdit.replace(replacementRange, t.insertText ?? t.label),
-        });
+            textEdit: TextEdit.replace(
+                replacementRange,
+                quotedSpec ? `${t.label} "$0"` : (t.insertText ?? t.label)
+            ),
+        };
+        if (quotedSpec?.triggerSuggest) {
+            item.command = TRIGGER_SUGGEST_COMMAND;
+        }
+        if (dedentEdit) {
+            item.additionalTextEdits = [dedentEdit];
+        }
+        target.push(item);
     }
+}
+
+const DOC_ANNOTATION_ITEMS: Array<{
+    tag: string;
+    detail: string;
+    insertText: string;
+}> = [
+    { tag: '@input', detail: 'Document input register, label, or address', insertText: '@input ${1:arg} ${0:description}' },
+    { tag: '@output', detail: 'Document output register, label, or address', insertText: '@output ${1:arg} ${0:description}' },
+    { tag: '@param', detail: 'Document parameter or argument', insertText: '@param ${1:name} ${0:description}' },
+    { tag: '@return', detail: 'Document return value or status flags', insertText: '@return ${0:description}' },
+    { tag: '@clobber', detail: 'Document modified registers or flags', insertText: '@clobber ${0:registers}' },
+    { tag: '@preserve', detail: 'Document preserved registers or memory', insertText: '@preserve ${0:registers}' },
+    { tag: '@modifies', detail: 'Document modified memory or state', insertText: '@modifies ${0:targets}' },
+    { tag: '@uses', detail: 'Document referenced symbols or memory', insertText: '@uses ${0:targets}' },
+    { tag: '@note', detail: 'Additional usage note', insertText: '@note ${0:text}' },
+    { tag: '@warning', detail: 'Important caveat or hazard', insertText: '@warning ${0:text}' },
+    { tag: '@example', detail: 'Usage example', insertText: '@example\n' },
+    { tag: '@see', detail: 'Cross-reference symbol or resource', insertText: '@see ${0:symbol}' },
+    { tag: '@deprecated', detail: 'Mark symbol as deprecated', insertText: '@deprecated ${0:reason}' },
+    { tag: '@author', detail: 'Author', insertText: '@author ${0:name}' },
+    { tag: '@since', detail: 'Version introduced', insertText: '@since ${0:version}' },
+    { tag: '@todo', detail: 'Pending task or follow-up', insertText: '@todo ${0:task}' },
+];
+
+function getDocAnnotationCompletions(position: Position, rawLineToCursor: string): CompletionItem[] {
+    const match = rawLineToCursor.match(/(?:^|[\s*])(@[a-zA-Z]*)$/);
+    if (!match) {
+        return [];
+    }
+    const prefix = match[1];
+    const replaceRange = Range.create(
+        position.line,
+        position.character - prefix.length,
+        position.line,
+        position.character
+    );
+    return DOC_ANNOTATION_ITEMS.map((entry, idx) => ({
+        label: entry.tag,
+        kind: CompletionItemKind.Keyword,
+        detail: entry.detail,
+        insertTextFormat: InsertTextFormat.Snippet,
+        sortText: `00_${String(idx).padStart(2, '0')}_${entry.tag}`,
+        textEdit: TextEdit.replace(replaceRange, entry.insertText),
+    }));
 }
 
 export function initializeCompletionProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
@@ -409,7 +576,9 @@ export function initializeCompletionProvider(connection: _Connection, documents:
                 lineContinuations: settings.lineContinuations,
             });
             if (cursorCtx.inComment) {
-                return [];
+                return cursorCtx.inBlockComment
+                    ? getDocAnnotationCompletions(position, cursorCtx.rawLineToCursor)
+                    : [];
             }
 
             const lineToCursor = cursorCtx.logicalCodeToCursor;
@@ -425,7 +594,8 @@ export function initializeCompletionProvider(connection: _Connection, documents:
             // --- .SEGMENT NAME CONTEXT ---
             const segmentMatch = lineToCursor.match(SEGMENT_PATH_CONTEXT_RE);
             if (segmentMatch) {
-                return getSegmentNameCompletions(document.uri, position, segmentMatch[1], symbolTables);
+                const linkerConfig = loadLinkerConfigForUri(document.uri, settings, documents);
+                return getSegmentNameCompletions(document.uri, position, segmentMatch[1], symbolTables, linkerConfig);
             }
 
             if (cursorCtx.inString) {
@@ -498,9 +668,18 @@ export function initializeCompletionProvider(connection: _Connection, documents:
 
             if (isCommandContext) {
                 // --- COMMAND CONTEXT: Suggest mnemonics, control commands, and macros ---
+                const maskedLine = maskCommentsAtDocumentLine(document, position.line, undefined, settings.cComments);
+                const allowQuotedArgSnippet = maskedLine.slice(position.character).trim().length === 0;
+                const dedentEdits = computeCloserDedentEdits(
+                    document,
+                    position,
+                    lineToCursor,
+                    currentWord,
+                    settings.cComments
+                );
                 const completionItems: CompletionItem[] = [];
                 appendStaticTemplates(completionItems, templates.mnemonics, replacementRange);
-                appendStaticTemplates(completionItems, templates.controlDirectives, replacementRange);
+                appendStaticTemplates(completionItems, templates.controlDirectives, replacementRange, allowQuotedArgSnippet, dedentEdits);
                 const macroItems = await getCompletionMacros(document, symbolTables, settings);
                 for (let i = 0; i < macroItems.length; i++) {
                     completionItems.push(macroItems[i]);
@@ -721,6 +900,7 @@ async function getIncludePathCompletions(
                 detail: isDir ? 'Folder' : (isIncbin ? 'Binary file' : 'Include file'),
                 sortText: sortGroup + insertLabel.toLowerCase(),
                 textEdit: TextEdit.replace(replaceRange, insertLabel),
+                command: isDir ? TRIGGER_SUGGEST_COMMAND : undefined,
             });
         }
     }
@@ -899,7 +1079,8 @@ function getSegmentNameCompletions(
     documentUri: string,
     position: Position,
     partialSegment: string,
-    allSymbolTables: Map<string, SymbolTable>
+    allSymbolTables: Map<string, SymbolTable>,
+    linkerConfig: LinkerConfigData | null
 ): CompletionItem[] {
     const replaceRange = Range.create(
         position.line,
@@ -910,34 +1091,46 @@ function getSegmentNameCompletions(
     const items: CompletionItem[] = [];
     const seen = new Set<string>();
 
-    const pushSegment = (name: string, sortGroup: string, detail: string) => {
+    const pushSegment = (name: string, sortGroup: string, detail: string, docMarkdown?: string) => {
         if (!name || seen.has(name)) return;
         seen.add(name);
         items.push({
             label: name,
             kind: CompletionItemKind.Module,
             detail,
+            documentation: docMarkdown ? { kind: MarkupKind.Markdown, value: docMarkdown } : undefined,
             sortText: `${sortGroup}${name.toLowerCase()}`,
             textEdit: TextEdit.replace(replaceRange, name),
         });
     };
 
+    if (linkerConfig) {
+        for (const seg of linkerConfig.segmentOrder) {
+            pushSegment(
+                seg.name,
+                '0',
+                formatLinkerSegmentDetail(linkerConfig, seg),
+                formatLinkerSegmentMarkdown(linkerConfig, seg)
+            );
+        }
+    }
+
     const currentTable = allSymbolTables.get(documentUri);
     if (currentTable) {
         for (const seg of currentTable.getDeclaredSegments()) {
-            pushSegment(seg, '0', 'Segment (current file)');
+            pushSegment(seg, '1', 'Segment (current file)');
         }
     }
 
     for (const [uri, st] of allSymbolTables) {
         if (uri === documentUri) continue;
         for (const seg of st.getDeclaredSegments()) {
-            pushSegment(seg, '1', 'Segment (workspace)');
+            pushSegment(seg, '2', 'Segment (workspace)');
         }
     }
 
     for (const seg of STANDARD_SEGMENT_NAMES) {
-        pushSegment(seg, '2', 'Standard ca65 segment');
+        pushSegment(seg, '3', 'Standard ca65 segment');
     }
 
     return items;

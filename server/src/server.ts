@@ -29,7 +29,13 @@ import { initializeDocumentLinkProvider } from './documentLinkProvider';
 import { initializeWorkspaceSymbolProvider } from './workspaceSymbolProvider';
 import { initializeInlayHintProvider } from './inlayHintProvider';
 import { IncludesGraph } from './includesGraph';
-import { SymbolTable } from './symbolTable';
+import { registerLinkerSegmentAddrSizeResolver, SymbolTable } from './symbolTable';
+import {
+    clearLinkerConfigCache,
+    getLinkerSegmentAddrSize,
+    loadLinkerConfigForUri,
+    resolveLinkerConfigFsPath,
+} from './linkerConfig';
 import { initializeHoverProvider } from './hoverProvider';
 import { initializeReferencesProvider } from './referencesProvider';
 import { initializeDefinitionProvider } from './definitionProvider';
@@ -285,6 +291,47 @@ connection.onInitialized(async () => {
 });
 
 // Helper function to get the setting for a document
+const resolvedSettingsSync = new Map<string, Ca65Settings>();
+
+export function getCachedSettingsSync(resource: string): Ca65Settings | undefined {
+    const scopeKey = getWorkspaceFolderOfFile(resource) ?? resource;
+    return resolvedSettingsSync.get(scopeKey);
+}
+
+registerLinkerSegmentAddrSizeResolver((ownerUri, segment) => {
+    if (!ownerUri) return undefined;
+    const settings = getCachedSettingsSync(ownerUri);
+    if (!settings?.linkerConfig) return undefined;
+    const config = loadLinkerConfigForUri(ownerUri, settings, documents);
+    return getLinkerSegmentAddrSize(config, segment);
+});
+
+function isLinkerConfigUri(uri: string): boolean {
+    if (uri.toLowerCase().endsWith('.cfg')) return true;
+    const targetPath = path.normalize(uriToFsPath(uri));
+    for (const [scopeKey, settings] of resolvedSettingsSync) {
+        if (!settings.linkerConfig) continue;
+        const cfgPath = resolveLinkerConfigFsPath(scopeKey, settings.linkerConfig);
+        if (cfgPath && path.normalize(cfgPath) === targetPath) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function revalidateOpenRoots(): void {
+    const validatedRoots = new Set<string>();
+    for (const doc of documents.all()) {
+        if (isLinkerConfigUri(doc.uri)) continue;
+        const roots = includesGraph.getIncludingRootsArray(doc.uri);
+        const hasUnvalidatedRoot = roots.some(root => !validatedRoots.has(root));
+        if (roots.length === 0 || hasUnvalidatedRoot) {
+            for (const root of roots) validatedRoots.add(root);
+            triggerValidation(doc.uri, false);
+        }
+    }
+}
+
 export function getDocumentSettings(resource: string): Thenable<Ca65Settings> {
     const scopeKey = getWorkspaceFolderOfFile(resource) ?? resource;
     let result = documentSettings.get(scopeKey);
@@ -293,9 +340,14 @@ export function getDocumentSettings(resource: string): Thenable<Ca65Settings> {
             scopeUri: scopeKey,
             section: 'ca65'
         }).then(
-            settings => resolveCa65Settings(settings),
+            settings => {
+                const resolved = resolveCa65Settings(settings);
+                resolvedSettingsSync.set(scopeKey, resolved);
+                return resolved;
+            },
             err => {
                 documentSettings.delete(scopeKey);
+                resolvedSettingsSync.delete(scopeKey);
                 throw err;
             }
         );
@@ -568,9 +620,11 @@ connection.onDidChangeConfiguration(async () => {
             }
         }
         documentSettings.clear();
+        resolvedSettingsSync.clear();
         clearResolvedDirsCache();
         clearExecutablePathCache();
         clearUnopenedDocumentCache();
+        clearLinkerConfigCache();
         invalidateOverlaySignatures();
         await ensureDocumentRefreshed();
         abortValidation();
@@ -630,15 +684,7 @@ connection.onDidChangeConfiguration(async () => {
             }
         }
 
-        const validatedRoots = new Set<string>();
-        for (const doc of openDocs) {
-            const roots = includesGraph.getIncludingRootsArray(doc.uri);
-            const hasUnvalidatedRoot = roots.some(root => !validatedRoots.has(root));
-            if (roots.length === 0 || hasUnvalidatedRoot) {
-                for (const root of roots) validatedRoots.add(root);
-                triggerValidation(doc.uri, false);
-            }
-        }
+        revalidateOpenRoots();
     } catch (err) {
         connection.console.error(`Failed to handle configuration change: ${err}`);
     }
@@ -647,6 +693,10 @@ connection.onDidChangeConfiguration(async () => {
 documents.onDidSave((event) => {
     markDocumentSaved(event.document.uri, event.document.version);
     invalidateCachedDocument(event.document.uri);
+    if (isLinkerConfigUri(event.document.uri)) {
+        clearLinkerConfigCache();
+        revalidateOpenRoots();
+    }
 });
 
 documents.onDidClose((event) => {
@@ -662,6 +712,9 @@ documents.onDidClose((event) => {
     lastDocumentVersions.delete(uri);
     clearDocumentDirtyState(uri);
     invalidateCachedDocument(uri);
+    if (isLinkerConfigUri(uri)) {
+        clearLinkerConfigCache();
+    }
 });
 
 documents.onDidChangeContent(async (change) => {
@@ -671,6 +724,14 @@ documents.onDidChangeContent(async (change) => {
         return;
     }
     lastDocumentVersions.set(doc.uri, doc.version);
+
+    if (isLinkerConfigUri(doc.uri)) {
+        clearLinkerConfigCache();
+        if (!isInitialOpen) {
+            revalidateOpenRoots();
+        }
+        return;
+    }
 
     try {
         if (isInitialOpen) {
@@ -689,9 +750,15 @@ connection.onDidChangeWatchedFiles(async (params: DidChangeWatchedFilesParams) =
 
     connection.console.log('Watched file change detected. Re-scanning affected files.');
     clearResolvedDirsCache();
+    clearLinkerConfigCache();
     invalidateOverlaySignatures();
+    let cfgChanged = false;
     for (const event of params.changes) {
         invalidateCachedDocument(event.uri);
+        if (isLinkerConfigUri(event.uri)) {
+            cfgChanged = true;
+            continue;
+        }
         const openDoc = documents.get(event.uri);
         if (openDoc) {
             // Already handled via onDidSave or onDidChangeContent
@@ -754,6 +821,9 @@ connection.onDidChangeWatchedFiles(async (params: DidChangeWatchedFilesParams) =
             connection.console.error(`Failed to handle watched file: ${event.uri}, error: ${err}`);
         }
     }
+    if (cfgChanged) {
+        revalidateOpenRoots();
+    }
 });
 
 // --- Initialize Features from Modules ---
@@ -772,7 +842,7 @@ initializeSignatureHelpProvider(connection, documents);
 initializeInlayHintProvider(connection, documents);
 initializeDocumentHighlightProvider(connection, documents);
 initializeCodeActionProvider(connection, documents);
-initializeSemanticTokensProvider(connection);
+initializeSemanticTokensProvider(connection, documents);
 initializeOverlayProvider(connection, documents);
 
 // --- Start the server ---

@@ -4,7 +4,6 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import { assembleTranslationUnit, Ca65AssembleResult } from './diagnostics';
 import { getCachedTextDocument } from './documentCache';
 import {
-    clearLstCache,
     collectRootTuUris,
     computeTuSignature,
     getCachedLstEntry,
@@ -85,10 +84,6 @@ function getMappedOverlayLines(entry: ValidLstCacheEntry, uri: string): OverlayL
 }
 
 const activeOverlayControllers = new Map<string, AbortController>();
-
-export function clearOverlayCaches(): void {
-    clearLstCache();
-}
 
 export function invalidateOverlaySignatures(): void {
     invalidateLstSignatures();

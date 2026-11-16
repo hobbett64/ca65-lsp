@@ -23,10 +23,11 @@ import { Ca65Settings } from './settings';
 import which from "which";
 import { fsPathToUri, getWorkspaceFolderOfFile, resolveWorkspaceRelativeDirs, uriToFsPath } from './pathUtils';
 import { countReferencesByFile, isEntityUsed, resolveImport } from './symbolResolver';
-import { ImportKind, isZeroPageSegment, Scope, ScopeKind, Symbol as Ca65Symbol, SymbolKind as Ca65SymbolKind, SymbolTableEntity } from './symbolTable';
+import { ImportKind, isLabelSymbolKind, isZeroPageSegment, Scope, ScopeKind, Symbol as Ca65Symbol, SymbolTableEntity } from './symbolTable';
 import { maskCommentsAtDocumentLine } from './documentScanner';
 import { getCachedTextDocument, isOpenDocumentPotentiallyDirty } from './documentCache';
 import { collectRootTuUris, computeTuSignature, storeFailedLstAttempt, storeValidLstEntry } from './listingCache';
+import { findSegmentDirectiveInLine, loadLinkerConfigForUri, lookupLinkerSegment } from './linkerConfig';
 
 const execFileAsync = promisify(execFile);
 
@@ -39,6 +40,7 @@ const unsupportedFeaturesByPath: Map<string, Set<string>> = new Map();
 const reportedCliErrors: Set<string> = new Set();
 const lastCompilerDiagnosticsByUri: Map<string, Diagnostic[]> = new Map();
 const lastUnusedDiagnosticsByUri: Map<string, Diagnostic[]> = new Map();
+const lastUnknownSegmentDiagnosticsByUri: Map<string, Diagnostic[]> = new Map();
 const lastMismatchSignatureByUri: Map<string, string> = new Map();
 const VALIDATION_ROOT_CONCURRENCY = 4;
 const SHADOW_IO_CONCURRENCY = 16;
@@ -137,10 +139,7 @@ async function findUnusedSymbolDiagnostics(
 
 function entityCarriesSegmentAddress(entity: SymbolTableEntity): boolean {
     if (entity instanceof Ca65Symbol) {
-        return entity.kind === Ca65SymbolKind.Label
-            || entity.kind === Ca65SymbolKind.ResLabel
-            || entity.kind === Ca65SymbolKind.DataLabel
-            || entity.kind === Ca65SymbolKind.StringLabel;
+        return isLabelSymbolKind(entity.kind);
     }
     return entity instanceof Scope && entity.kind === ScopeKind.Proc;
 }
@@ -195,6 +194,46 @@ export function findImportMismatchDiagnostics(uri: string): Diagnostic[] {
         }
     }
 
+    return diagnostics;
+}
+
+/**
+ * Checks explicit `.segment "NAME"` directives against segments declared in `ca65.linkerConfig`.
+ */
+export async function findUnknownLinkerSegmentDiagnostics(
+    uri: string,
+    settings: Ca65Settings,
+    docCache?: Map<string, TextDocument | null>
+): Promise<Diagnostic[]> {
+    const linkerConfig = loadLinkerConfigForUri(uri, settings, documents);
+    if (!linkerConfig || linkerConfig.segments.size === 0) {
+        return [];
+    }
+    const st = symbolTables.get(uri);
+    if (!st || st.getExplicitSegmentEntries().length === 0) {
+        return [];
+    }
+    const doc = docCache
+        ? await getDocumentCached(uri, docCache)
+        : await getCachedTextDocument(uri, documents);
+    if (!doc) {
+        return [];
+    }
+
+    const diagnostics: Diagnostic[] = [];
+    for (let line = 0; line < doc.lineCount; line++) {
+        const hit = findSegmentDirectiveInLine('', line, settings.cComments, doc);
+        if (!hit) continue;
+        if (!lookupLinkerSegment(linkerConfig, hit.segmentName)) {
+            diagnostics.push({
+                severity: DiagnosticSeverity.Warning,
+                range: hit.nameRange,
+                message: `Segment '${hit.segmentName}' is not defined in linker config '${path.basename(linkerConfig.fsPath)}'.`,
+                source: 'ca65-lsp',
+                code: 'unknown-linker-segment',
+            });
+        }
+    }
     return diagnostics;
 }
 
@@ -865,12 +904,19 @@ export function triggerValidation(uri: string, debounce: boolean = true, allFile
                 }
             }
 
-            // 4. Warn on .import/.importzp vs resolved segment/exportzp mismatches.
+            // 4. Warn on .import/.importzp vs resolved segment/exportzp mismatches, and unknown linker segments.
             for (const fileUri of filesToUpdate) {
                 const mismatchDiags = findImportMismatchDiagnostics(fileUri);
                 lastMismatchSignatureByUri.set(fileUri, getMismatchSignature(mismatchDiags));
                 if (mismatchDiags.length > 0) {
                     fullDiagnosticsByUri.get(fileUri)?.push(...mismatchDiags);
+                }
+
+                const unknownSegmentDiags = await findUnknownLinkerSegmentDiagnostics(fileUri, settings, docCache);
+                if (signal.aborted) return;
+                lastUnknownSegmentDiagnosticsByUri.set(fileUri, unknownSegmentDiags);
+                if (unknownSegmentDiags.length > 0) {
+                    fullDiagnosticsByUri.get(fileUri)?.push(...unknownSegmentDiags);
                 }
             }
 
@@ -918,6 +964,7 @@ export function triggerValidation(uri: string, debounce: boolean = true, allFile
                         diagnostics: [
                             ...(lastCompilerDiagnosticsByUri.get(otherUri) ?? []),
                             ...(lastUnusedDiagnosticsByUri.get(otherUri) ?? []),
+                            ...(lastUnknownSegmentDiagnosticsByUri.get(otherUri) ?? []),
                             ...nextMismatch,
                         ],
                     });

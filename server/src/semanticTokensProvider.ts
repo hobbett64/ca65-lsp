@@ -5,7 +5,9 @@ import {
     SemanticTokensLegend,
     SemanticTokenModifiers,
     SemanticTokenTypes,
+    TextDocuments,
 } from 'vscode-languageserver/node';
+import { TextDocument } from 'vscode-languageserver-textdocument';
 import {
     ensureDocumentRefreshed,
     getDocumentSettings,
@@ -14,6 +16,11 @@ import {
     performanceMonitor,
     symbolTables,
 } from './server';
+import {
+    classifyLinkerSegmentCategory,
+    LinkerConfigData,
+    loadLinkerConfigForUri,
+} from './linkerConfig';
 import {
     classifyLabelSegment,
     Macro,
@@ -72,7 +79,8 @@ interface RawSemanticToken {
 function classifyEntity(
     entity: SymbolTableEntity,
     isDeclaration: boolean,
-    fallbackTable?: SymbolTable
+    fallbackTable?: SymbolTable,
+    linkerConfig?: LinkerConfigData | null
 ): { tokenType: number; tokenModifiers: number } | null {
     const declFlag = isDeclaration ? MOD_DECLARATION : 0;
 
@@ -115,6 +123,11 @@ function classifyEntity(
                 };
             case Ca65SymbolKind.Variable:
             case Ca65SymbolKind.StructMember:
+            case Ca65SymbolKind.CodeLabel:
+                return {
+                    tokenType: TOKEN_TYPE_INDEX[SemanticTokenTypes.function],
+                    tokenModifiers: declFlag,
+                };
             case Ca65SymbolKind.ResLabel:
                 return {
                     tokenType: TOKEN_TYPE_INDEX[SemanticTokenTypes.variable],
@@ -123,10 +136,13 @@ function classifyEntity(
             case Ca65SymbolKind.DataLabel:
             case Ca65SymbolKind.StringLabel: {
                 const ownerTable = symbolTables.get(entity.uri) ?? fallbackTable;
-                const segCat = classifyLabelSegment(
+                let segCat = classifyLabelSegment(
                     entity.segment,
                     resolveSegmentAddrSize(entity.segment, ownerTable, symbolTables)
                 );
+                if (segCat === 'unknown' && linkerConfig) {
+                    segCat = classifyLinkerSegmentCategory(linkerConfig, entity.segment) ?? 'unknown';
+                }
                 const readonlyFlag = segCat === 'data' || segCat === 'bss' ? 0 : MOD_READONLY;
                 return {
                     tokenType: TOKEN_TYPE_INDEX[SemanticTokenTypes.variable],
@@ -135,10 +151,18 @@ function classifyEntity(
             }
             case Ca65SymbolKind.Label: {
                 const ownerTable = symbolTables.get(entity.uri) ?? fallbackTable;
-                switch (classifyLabelSegment(
+                let segCat = classifyLabelSegment(
                     entity.segment,
                     resolveSegmentAddrSize(entity.segment, ownerTable, symbolTables)
-                )) {
+                );
+                if (segCat === 'unknown' && linkerConfig) {
+                    const linkerCat = classifyLinkerSegmentCategory(linkerConfig, entity.segment);
+                    // Only treat RAM segments (zp/bss/rw) as variables here; ld65 code segments are also type=ro.
+                    if (linkerCat === 'bss' || linkerCat === 'data') {
+                        segCat = linkerCat;
+                    }
+                }
+                switch (segCat) {
                     case 'code':
                         return {
                             tokenType: TOKEN_TYPE_INDEX[SemanticTokenTypes.function],
@@ -165,6 +189,8 @@ function classifyEntity(
     return null;
 }
 
+let openDocuments: TextDocuments<TextDocument> | undefined;
+
 export async function computeSemanticTokens(uri: string): Promise<SemanticTokens> {
     const builder = new SemanticTokensBuilder();
     const symbolTable = symbolTables.get(uri);
@@ -173,6 +199,7 @@ export async function computeSemanticTokens(uri: string): Promise<SemanticTokens
     }
 
     const settings = await getDocumentSettings(uri);
+    const linkerConfig = loadLinkerConfigForUri(uri, settings, openDocuments);
     const tokens: RawSemanticToken[] = [];
 
     for (const entity of symbolTable.getAllDefinedEntities()) {
@@ -180,7 +207,7 @@ export async function computeSemanticTokens(uri: string): Promise<SemanticTokens
         if (def.start.line !== def.end.line || def.end.character <= def.start.character) {
             continue;
         }
-        const classified = classifyEntity(entity, true, symbolTable);
+        const classified = classifyEntity(entity, true, symbolTable, linkerConfig);
         if (!classified) continue;
 
         tokens.push({
@@ -205,7 +232,7 @@ export async function computeSemanticTokens(uri: string): Promise<SemanticTokens
         );
         if (!resolved || resolved instanceof Array) continue;
 
-        const classified = classifyEntity(resolved, false, symbolTable);
+        const classified = classifyEntity(resolved, false, symbolTable, linkerConfig);
         if (!classified) continue;
 
         tokens.push({
@@ -237,7 +264,11 @@ export async function computeSemanticTokens(uri: string): Promise<SemanticTokens
     return builder.build();
 }
 
-export function initializeSemanticTokensProvider(connection: _Connection): void {
+export function initializeSemanticTokensProvider(
+    connection: _Connection,
+    documents?: TextDocuments<TextDocument>
+): void {
+    openDocuments = documents;
     connection.languages.semanticTokens.on(async (params) => {
         await initializationGate.isInitialized;
         await ensureDocumentRefreshed?.(params.textDocument.uri);

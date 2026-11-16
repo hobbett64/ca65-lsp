@@ -23,7 +23,6 @@ interface RenameTarget {
 }
 
 function resolveRenameTarget(
-    uri: string,
     position: { line: number; character: number },
     document: TextDocument,
     symbolTable: SymbolTable,
@@ -69,7 +68,7 @@ export function initializeRenameProvider(connection: _Connection, documents: Tex
         }
 
         const settings = await getDocumentSettings(uri);
-        const target = resolveRenameTarget(uri, params.position, document, symbolTable, settings);
+        const target = resolveRenameTarget(params.position, document, symbolTable, settings);
         if (!target) {
             return null;
         }
@@ -95,7 +94,7 @@ export function initializeRenameProvider(connection: _Connection, documents: Tex
         }
 
         const settings = await getDocumentSettings(uri);
-        const target = resolveRenameTarget(uri, params.position, document, symbolTable, settings);
+        const target = resolveRenameTarget(params.position, document, symbolTable, settings);
         if (!target) {
             return null;
         }

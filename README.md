@@ -8,20 +8,21 @@ This extension provides a full-featured language server to make writing `ca65` a
 
 * **ca65-backed & LSP Diagnostics:**
     * Live validation by running `ca65` in the background and mapping errors to editor lines.
-    * Built-in LSP checks for `.import`/`.importzp` and `.export`/`.exportzp` zeropage mismatches (with one-click Quick Fixes) and unused symbols.
+    * Built-in LSP checks for `.import`/`.importzp` and `.export`/`.exportzp` zeropage mismatches (with one-click Quick Fixes), unused symbols, and unknown `.segment` names when a linker config is configured.
+    * Quick Fixes for `ca65` branch `Range error` diagnostics (invert conditional branch + trampoline `jmp`, or `bra` -> `jmp`/`brl`).
 * **Code Navigation:**
-    * **Go to Definition:** Jump directly to the definition of any label, constant, variable, macro, enum, struct, or scope. Works across local, included, and workspace-exported symbols.
+    * **Go to Definition:** Jump directly to the definition of any label, constant, variable, macro, enum, struct, scope, or `.segment` / built-in segment directive (`.bss`, `.code`, `.data`, `.rodata`, `.zeropage`) in your configured `ca65.linkerConfig` `.cfg` file. Works across local, included, and workspace-exported symbols.
     * **Find All References & Safe Rename:** Find all usages across the workspace or rename symbols (`F2`) with `prepareRename` validation and cheap local (`@label`) normalization.
     * **Call Hierarchy:** See incoming and outgoing `jsr`/`jmp` (and `65816` `jsl`/`jml`) calls for procedures and labels.
-    * **Outline view:** Nested file outline with segment-based symbol icons, non-`CODE` segment annotations (e.g. `(ZEROPAGE)`, `(RODATA)`, `(BSS)`, `(BANK01)`), `(macro)` labels, and source-order sorting.
+    * **Outline view:** Nested file outline with instruction/segment-aware symbol icons, non-`CODE` segment annotations (e.g. `(ZEROPAGE)`, `(RODATA)`, `(BSS)`, `(BANK01)`), `(macro)` labels, and source-order sorting.
 * **Code Intelligence:**
-    * **Rich Hover Information:** Shows segment badges (`CODE`, `ZEROPAGE`, `RODATA`, etc.) alongside kind labels (`label`, `proc`, `constant`, `variable`, `enum`, `struct`, `union`, `macro`, `define`, `anonymous label`), byte sizes (`[N]`), evaluated constant values, qualified cheap local names (`scope::label@local`), anonymous label indices, multi-base number literal hovers (Hex, Dec, Bin), verbatim `;` and `/** ... */` doc comments, clickable source links, and CPU-aware lowercase instruction hovers (`6502`, `65SC02`, `65C02`, `W65C02`, `65816`) with compact `Affected flags`, badge-styled `Addressing modes`, and a **See details** link.
-    * **Context-Aware Autocompletion & Snippets:** Suggests CPU-filtered mnemonics, directives, block snippets (`.proc`, `.macro`, `.scope`, `.struct`, `.union`, `.enum`, `.repeat`, `.if*`), `Scope::` members, `.tag` and `.sizeof(` struct/union types, `.segment "..."` segment names, `.include`/`.incbin` paths, and auto-import/include suggestions — while suppressing nuisance popups inside comments, strings, numbers, and declaration names.
+    * **Rich Hover Information:** Shows segment badges (`CODE`, `ZEROPAGE`, `RODATA`, etc.) alongside kind badges (`proc`, `constant`, `variable`, `enum`, `struct`, `union`, `macro`, `define`), `(N bytes)` sizes, evaluated constant values, multi-base number literal hovers (Hex, Dec, Bin), verbatim `;` and `/** ... */` doc comments, linker segment/memory details on `.segment "..."`, and toggleable CPU-aware lowercase instruction and directive hovers (`ca65.enableInstructionHover`, `ca65.enableDirectiveHover`, `6502`–`65816`) with a **See details** link into the Reference panel.
+    * **Context-Aware Autocompletion & Snippets:** Suggests CPU-filtered mnemonics, directives, block snippets (`.proc`, `.macro`, `.scope`, `.struct`, `.union`, `.enum`, `.repeat`, `.if*`) with automatic block-closer/branch dedent, auto-quoted `.segment`/`.include`/`.incbin`/`.asciiz`/`.literal` completions, `Scope::` members, `.tag`/`.sizeof(` types, `.segment "..."` names (prioritizing `ca65.linkerConfig`), `.include`/`.incbin` paths, `@` doc-comment tags, and auto-import/include suggestions.
     * **Signature Help:** Active parameter hints for `.macro` calls and `.define` function-like macros.
     * **Import Tracing & Anonymous Label Indexing:** Inlay hints for `.import` origins and `(1)`/`(2)` anonymous label indices (`ca65.anonymousLabelIndexHints`).
     * **C-Style Comments & Line Continuations:** Parses `/* ... */` block comments (`ca65.cComments`) and backslash (`\`) line continuations (`ca65.lineContinuations`) across definitions, references, hovers, completions, signature help, and instruction cycle analysis.
 * **Editor & Assembly Tools:**
-    * **Syntax Highlighting & Semantic Tokens:** TextMate grammar for ca65 syntax paired with LSP semantic tokens for `.proc`, `CODE`/data/ZP/BSS labels, `.macro`, constants, `.enum`, `.struct`, `.scope`, and `.set` variables.
+    * **Syntax Highlighting & Semantic Tokens:** TextMate grammar (with `/** ... */` doc tags and `Scope::` prefixes) paired with LSP semantic tokens distinguishing instruction-followed code labels (`function`), data/ZP/BSS/RAM labels (`variable` + `readonly` on read-only segments), `.proc`, `.macro`, constants, `.enum`, `.struct`, `.scope`, and `.set` variables.
     * **Side-by-Side Hex & Address Listing:** Open `ca65: Show Hex & Address Listing Side-by-Side` (`$(file-binary)` editor title icon, or click the status bar counter) to inspect assembled addresses and emitted bytes aligned line-for-line with viewport-synced scrolling, or view live `ca65` errors when assembly fails.
     * **Status Bar Cycle/Byte Counter & Active Segment:** Displays compact byte sizes and cycle counts (including 8/16-bit `M`/`X` ranges for `65816`) with a unified `Line | Hex | Cycles` tooltip for the current line or selection, plus the active segment at the cursor line with click-to-jump navigation to the directive that set it.
     * **Code Folding & Sticky Scroll:** Fold `.proc`, `.macro`, `.scope`, `.struct`, `.union`, `.enum`, and conditional blocks.
@@ -72,9 +73,10 @@ Configure structured assembler and editor settings via the VS Code Settings UI:
 * **`ca65.includeDirs` & `ca65.binIncludeDirs`:** Search paths for `.include` (defaults to `["**/include"]`) and `.incbin` (defaults to `[]`).
 * **`ca65.implicitImports`:** Treats undefined symbols as implicit imports (`--auto-import`).
 * **`ca65.cComments` & `ca65.lineContinuations`:** Control `--feature c_comments` and `--feature line_continuations` (both default to `true`, automatically enabled when supported by your `ca65` executable and skipped if unsupported).
+* **`ca65.linkerConfig`:** Optional path to an ld65 linker configuration (`.cfg`) file (default `""`) enabling `.segment` completions, hover details, go-to-definition, `type = zp`/`rw`/`ro` segment resolution, and unknown-segment warnings.
 * **`ca65.additionalArgs`:** Optional extra CLI flags passed to `ca65` (defaults to `[]`, e.g. `["-D", "DEBUG=1", "-s"]`; output flags `-o`, `-l`, `--listing`, `--create-dep`, `--create-full-dep` are ignored).
 
-Diagnostics and UX toggles (`ca65.enableStderrDiagnostics`, `ca65.enableUnusedSymbolDiagnostics`, inlay hints, status bar indicators, `ca65.smartFolding`, `ca65.autoIncludeExtensions`) can also be configured individually.
+Diagnostics and UX toggles (`ca65.enableStderrDiagnostics`, `ca65.enableUnusedSymbolDiagnostics`, `ca65.enableInstructionHover`, `ca65.enableDirectiveHover`, inlay hints, status bar indicators, `ca65.smartFolding`, `ca65.autoIncludeExtensions`) can also be configured individually.
 
 Please see the Settings gear icon in the installed extension to easily set this and other settings.
 

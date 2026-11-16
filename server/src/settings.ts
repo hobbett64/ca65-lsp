@@ -136,6 +136,9 @@ export interface Ca65Settings {
     additionalArgs: string[];
     enableStatusBarCycleCount: boolean;
     enableStatusBarSegment: boolean;
+    enableInstructionHover: boolean;
+    enableDirectiveHover: boolean;
+    linkerConfig: string;
 }
 
 /**
@@ -166,6 +169,9 @@ export function resolveCa65Settings(raw: unknown): Ca65Settings {
         importFromHints: typeof rawObj.importFromHints === 'boolean' ? rawObj.importFromHints : true,
         enableStatusBarCycleCount: typeof rawObj.enableStatusBarCycleCount === 'boolean' ? rawObj.enableStatusBarCycleCount : true,
         enableStatusBarSegment: typeof rawObj.enableStatusBarSegment === 'boolean' ? rawObj.enableStatusBarSegment : true,
+        enableInstructionHover: typeof rawObj.enableInstructionHover === 'boolean' ? rawObj.enableInstructionHover : true,
+        enableDirectiveHover: typeof rawObj.enableDirectiveHover === 'boolean' ? rawObj.enableDirectiveHover : true,
+        linkerConfig: typeof rawObj.linkerConfig === 'string' ? rawObj.linkerConfig.trim() : '',
         smartFolding: typeof rawObj.smartFolding === 'boolean' ? rawObj.smartFolding : true,
         autoIncludeExtensions: Array.isArray(rawObj.autoIncludeExtensions)
             ? cleanStringArray(rawObj.autoIncludeExtensions)
