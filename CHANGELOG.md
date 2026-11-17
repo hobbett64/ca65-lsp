@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-11-17
+### Added
+- Support for symbol identification in C-style doc comments, which enable hover support, go-to-definition, symbol renaming, etc in the comment itself when wrapped in {} or after an annotation (e.g. @see, @input, @clobber). Also provides a "See <symbol>" line in the hover card that provides hyperlinks to all of the referenced symbols.
+
 ## [2.3.0] - 2026-11-16
 ### Added
 - Shared `ca65 -l` listing cache (`listingCache`) reusing background validation results across diagnostics, the side-by-side hex listing, and the status bar byte/cycle analyzer.

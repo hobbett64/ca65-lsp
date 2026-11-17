@@ -8,7 +8,13 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
 import { findAllCheapLocalLabelReferences } from './cheapLocalLabelUtils';
 import { findAllAnonLabelReferences } from './anonymousLabelUtils';
-import { getAllReferenceLocationsForEntity, resolveReferenceAtPosition } from './symbolResolver';
+import {
+    findCommentReferenceLocationsForEntity,
+    getAllReferenceLocationsForEntity,
+    mergeUniqueLocations,
+    resolveCommentSegmentAtPosition,
+    resolveReferenceAtPosition,
+} from './symbolResolver';
 
 export function initializeReferencesProvider(connection: _Connection, documents: TextDocuments<TextDocument>) {
     /**
@@ -30,15 +36,26 @@ export function initializeReferencesProvider(connection: _Connection, documents:
             
             const foundEntity = resolveReferenceAtPosition(
                 uri, params.position, symbolTables, includesGraph, settings.implicitImports
-            );
+            ) ?? resolveCommentSegmentAtPosition(
+                uri, params.position, document, symbolTables, includesGraph, settings.implicitImports, settings.cComments
+            )?.entity;
 
             if (foundEntity) {
-                return getAllReferenceLocationsForEntity(
+                const codeLocations = getAllReferenceLocationsForEntity(
                     foundEntity,
                     symbolTables,
                     includesGraph,
                     settings.implicitImports
                 );
+                const commentLocations = await findCommentReferenceLocationsForEntity(
+                    foundEntity,
+                    documents,
+                    symbolTables,
+                    includesGraph,
+                    settings.implicitImports,
+                    settings.cComments
+                );
+                return mergeUniqueLocations(codeLocations, commentLocations);
             }
 
             // Didn't find a real symbol, check if it's a cheap or anonymous reference.

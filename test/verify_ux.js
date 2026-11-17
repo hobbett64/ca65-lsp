@@ -1179,6 +1179,165 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         const alignedItems = Array.isArray(alignedComp) ? alignedComp : alignedComp.items;
         assert(!alignedItems.find(i => i.label === '.endproc')?.additionalTextEdits, 'Already-aligned .endproc should not emit redundant dedent edit');
 
+        // 16. Doc comment symbol links (*See:* footer in hover card + in-editor hover & Ctrl+Click on {symbol} / @see)
+        const docLinkTestPath = path.join(tmpRoot, 'doc_link_test.s');
+        const docLinkTestUri = pathToFileURL(docLinkTestPath).toString();
+        const docLinkLines = [
+            '.include "inc/defs.inc"',
+            '/**',
+            ' * Doc with {Player::init} and {@link Entity}',
+            ' * @param {u8} count',
+            ' * @input zp_counter Held button counter',
+            ' * @modifies bss_var, ro_incbin Updated buffers',
+            ' * @see Player::hp - health ref',
+            ' */',
+            'doc_linked_sub:',
+            '  rts',
+            '.scope LocalScope',
+            'local_helper:',
+            '  rts',
+            '; Calls {local_helper}',
+            'local_caller:',
+            '  rts',
+            '.endscope',
+            '',
+        ];
+        const docLinkText = docLinkLines.join('\n');
+        fs.writeFileSync(docLinkTestPath, docLinkText);
+        notify('textDocument/didOpen', { textDocument: { uri: docLinkTestUri, languageId: 'ca65', version: 1, text: docLinkText } });
+        await new Promise(r => setTimeout(r, 150));
+
+        const subHover = await request('textDocument/hover', {
+            textDocument: { uri: docLinkTestUri },
+            position: { line: 8, character: 4 },
+        });
+        assert(subHover && subHover.contents && subHover.contents.value, 'Expected hover on doc_linked_sub');
+        const subHoverMd = subHover.contents.value;
+        assert(subHoverMd.includes('```ca65\n/**\n * Doc with {Player::init}'), `Expected verbatim ca65 doc block, got:\n${subHoverMd}`);
+        assert(
+            subHoverMd.includes(`*See:* [Player::init](${defsUri}#L`)
+            && subHoverMd.includes(`, [Entity](${defsUri}#L`)
+            && subHoverMd.includes(`, [zp\\_counter](${varsUri}#L`)
+            && subHoverMd.includes(`, [bss\\_var](${varsUri}#L`)
+            && subHoverMd.includes(`, [ro\\_incbin](${varsUri}#L`)
+            && subHoverMd.includes(`, [Player::hp](${defsUri}#L`),
+            `Expected comma-separated clickable *See:* links for resolved symbols, got:\n${subHoverMd}`
+        );
+        assert(!subHoverMd.includes('[u8]') && !subHoverMd.includes('[Held]') && !subHoverMd.includes('[Updated]'), 'Unresolved types and trailing description words must not appear in *See:* links');
+
+        const localCallerHover = await request('textDocument/hover', {
+            textDocument: { uri: docLinkTestUri },
+            position: { line: 14, character: 4 },
+        });
+        assert(
+            localCallerHover && localCallerHover.contents.value.includes(`*See:* [LocalScope::local\\_helper](${docLinkTestUri}#L12)`),
+            `Expected unqualified {local_helper} inside LocalScope to render qualified name in *See:*, got:\n${localCallerHover && localCallerHover.contents.value}`
+        );
+
+        const bracedStart = docLinkLines[2].indexOf('Player::init');
+        const bracedChar = bracedStart + 3;
+        const commentSymHover = await request('textDocument/hover', {
+            textDocument: { uri: docLinkTestUri },
+            position: { line: 2, character: bracedChar },
+        });
+        assert(commentSymHover && commentSymHover.contents.value.includes('Player::**init**'), `Expected in-comment hover on {Player::init}, got ${JSON.stringify(commentSymHover)}`);
+
+        const commentSymDef = await request('textDocument/definition', {
+            textDocument: { uri: docLinkTestUri },
+            position: { line: 2, character: bracedChar },
+        });
+        assert(Array.isArray(commentSymDef) && commentSymDef[0].targetUri === defsUri, `Expected LocationLink to defs.inc, got ${JSON.stringify(commentSymDef)}`);
+        assert.deepStrictEqual(
+            commentSymDef[0].originSelectionRange,
+            {
+                start: { line: 2, character: bracedStart },
+                end: { line: 2, character: bracedStart + 'Player::init'.length },
+            },
+            'Expected originSelectionRange to span the entire qualified Player::init token'
+        );
+        assert.deepStrictEqual(
+            commentSymDef[0].targetRange,
+            commentSymDef[0].targetSelectionRange,
+            'Expected targetRange to match single-line targetSelectionRange'
+        );
+
+        const inputChar = docLinkLines[4].indexOf('zp_counter') + 2;
+        const inputSymDef = await request('textDocument/definition', {
+            textDocument: { uri: docLinkTestUri },
+            position: { line: 4, character: inputChar },
+        });
+        assert(Array.isArray(inputSymDef) && inputSymDef[0].targetUri === varsUri, `Expected in-comment Go to Definition on @input zp_counter (without braces) to jump to vars.s, got ${JSON.stringify(inputSymDef)}`);
+
+        const modifiesSecondChar = docLinkLines[5].indexOf('ro_incbin') + 2;
+        const modifiesSymDef = await request('textDocument/definition', {
+            textDocument: { uri: docLinkTestUri },
+            position: { line: 5, character: modifiesSecondChar },
+        });
+        assert(Array.isArray(modifiesSymDef) && modifiesSymDef[0].targetUri === varsUri, `Expected in-comment Go to Definition on second item in @modifies list, got ${JSON.stringify(modifiesSymDef)}`);
+
+        const descWordChar = docLinkLines[4].indexOf('Held') + 1;
+        const descWordDef = await request('textDocument/definition', {
+            textDocument: { uri: docLinkTestUri },
+            position: { line: 4, character: descWordChar },
+        });
+        assert.strictEqual(descWordDef, null, 'Description word after @input target must not resolve as a symbol');
+
+        const unresolvedTypeChar = docLinkLines[3].indexOf('u8') + 1;
+        const unresolvedTypeDef = await request('textDocument/definition', {
+            textDocument: { uri: docLinkTestUri },
+            position: { line: 3, character: unresolvedTypeChar },
+        });
+        assert.strictEqual(unresolvedTypeDef, null, 'Unresolved {u8} in @param should not resolve to a definition');
+
+        const initInCommentChar = docLinkLines[2].indexOf('init') + 1;
+        const prepCommentLeaf = await request('textDocument/prepareRename', {
+            textDocument: { uri: docLinkTestUri },
+            position: { line: 2, character: initInCommentChar },
+        });
+        assert.strictEqual(prepCommentLeaf?.placeholder, 'init', `Expected prepareRename on leaf in {Player::init} to be 'init', got ${JSON.stringify(prepCommentLeaf)}`);
+
+        const scopeInCommentChar = docLinkLines[2].indexOf('Player') + 1;
+        const prepCommentScope = await request('textDocument/prepareRename', {
+            textDocument: { uri: docLinkTestUri },
+            position: { line: 2, character: scopeInCommentChar },
+        });
+        assert.strictEqual(prepCommentScope?.placeholder, 'Player', `Expected prepareRename on scope in {Player::init} to be 'Player', got ${JSON.stringify(prepCommentScope)}`);
+
+        const renameHelperEdit = await request('textDocument/rename', {
+            textDocument: { uri: docLinkTestUri },
+            position: { line: 11, character: 2 }, // local_helper: definition in code
+            newName: 'renamed_helper',
+        });
+        const helperDocEdits = renameHelperEdit?.changes?.[docLinkTestUri] || [];
+        assert.strictEqual(helperDocEdits.length, 2, `Expected rename on local_helper to update both definition and {local_helper} comment reference, got ${JSON.stringify(helperDocEdits)}`);
+        assert(helperDocEdits.some(e => e.range.start.line === 11 && e.newText === 'renamed_helper'), 'Expected definition edit on line 11');
+        assert(
+            helperDocEdits.some(e =>
+                e.range.start.line === 13
+                && e.range.start.character === docLinkLines[13].indexOf('local_helper')
+                && e.range.end.character === docLinkLines[13].indexOf('local_helper') + 'local_helper'.length
+                && e.newText === 'renamed_helper'
+            ),
+            `Expected comment reference edit on line 13, got ${JSON.stringify(helperDocEdits)}`
+        );
+
+        const renameInitFromComment = await request('textDocument/rename', {
+            textDocument: { uri: docLinkTestUri },
+            position: { line: 2, character: initInCommentChar },
+            newName: 'reset',
+        });
+        const initDocCommentEdits = renameInitFromComment?.changes?.[docLinkTestUri] || [];
+        assert(
+            initDocCommentEdits.some(e =>
+                e.range.start.line === 2
+                && e.range.start.character === docLinkLines[2].indexOf('init')
+                && e.range.end.character === docLinkLines[2].indexOf('init') + 'init'.length
+                && e.newText === 'reset'
+            ),
+            `Expected rename on Player::init to replace only the 'init' leaf in {Player::init}, got ${JSON.stringify(initDocCommentEdits)}`
+        );
+        assert(renameInitFromComment?.changes?.[defsUri]?.length > 0, 'Expected rename initiated in comment to also update definition in defs.inc');
+
         console.log('ALL UX IMPROVEMENT E2E CHECKS PASSED!');
     } finally {
         try { await request('shutdown', null); notify('exit', null); } catch {}

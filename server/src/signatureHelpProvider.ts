@@ -102,7 +102,10 @@ async function getMacroDocComment(
         return undefined;
     }
 
-    return formatDocCommentForHover(docCommentBlock) || undefined;
+    return formatDocCommentForHover(docCommentBlock, {
+        uri: macro.uri,
+        line: macro.definition.start.line,
+    }) || undefined;
 }
 
 function buildMacroSignatureInfo(macro: Macro, documentation?: string): SignatureInformation {

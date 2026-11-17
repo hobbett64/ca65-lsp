@@ -32,7 +32,14 @@
         },
         {
             "name": "comment.line.semicolon.ca65",
-            "match": ";.*$"
+            "match": ";.*$",
+            "captures": {
+                "0": {
+                    "patterns": [
+                        { "include": "#jsdoc-tags" }
+                    ]
+                }
+            }
         },
         {
             "name": "string.quoted.double.ca65",
@@ -225,10 +232,28 @@
                     ]
                 },
                 {
-                    "match": "(?i)(?<!\\S)((@)(?:returns?|modifies|uses|throws|deprecated|see|since|author|note|warning|example|todo|brief|details))\\b",
+                    "match": "(?i)(?<!\\S)((@)(?:see|modifies|uses))\\b(?:[ \\t]+((?:\\{?(?:::)?[a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*\\}?)(?:[ \\t]*,[ \\t]*(?:\\{?(?:::)?[a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*\\}?))*))?",
+                    "captures": {
+                        "1": { "name": "storage.type.class.jsdoc" },
+                        "2": { "name": "punctuation.definition.block.tag.jsdoc" },
+                        "3": { "name": "variable.other.jsdoc" }
+                    }
+                },
+                {
+                    "match": "(?i)(?<!\\S)((@)(?:returns?|throws|deprecated|since|author|note|warning|example|todo|brief|details))\\b",
                     "captures": {
                         "1": { "name": "storage.type.class.jsdoc" },
                         "2": { "name": "punctuation.definition.block.tag.jsdoc" }
+                    }
+                },
+                {
+                    "match": "(\\{)(?:((@)link)[ \\t]+)?((?:::)?[a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*)(\\})",
+                    "captures": {
+                        "1": { "name": "punctuation.definition.bracket.curly.ca65" },
+                        "2": { "name": "storage.type.class.jsdoc" },
+                        "3": { "name": "punctuation.definition.block.tag.jsdoc" },
+                        "4": { "name": "entity.name.type.instance.jsdoc" },
+                        "5": { "name": "punctuation.definition.bracket.curly.ca65" }
                     }
                 }
             ]

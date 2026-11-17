@@ -798,7 +798,11 @@ export function initializeCompletionProvider(connection: _Connection, documents:
                             const { docCommentBlock } = extractLeadingDocInfo(targetDoc, data.targetLine);
                             const parts = [`\`\`\`ca65\n${data.targetName || ''}\n\`\`\``];
                             if (docCommentBlock) {
-                                const renderedDoc = formatDocCommentForHover(docCommentBlock);
+                                const renderedDoc = formatDocCommentForHover(docCommentBlock, {
+                                    uri: data.targetUri,
+                                    line: data.targetLine,
+                                    implicitImports: settings.implicitImports,
+                                });
                                 if (renderedDoc) {
                                     parts.push(renderedDoc);
                                 }

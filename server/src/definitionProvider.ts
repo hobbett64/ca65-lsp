@@ -2,13 +2,15 @@ import {
     _Connection,
     TextDocuments,
     Definition,
+    DefinitionLink,
     DefinitionParams,
     Location,
+    LocationLink,
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { getAnonymousLabelDefinition } from './anonymousLabelUtils';
 import { findCheapLocalLabelAtPosition, findCheapLocalLabelDefinition } from './cheapLocalLabelUtils';
-import { resolveReferenceAtPosition } from './symbolResolver';
+import { findCommentSymbolAtPosition, resolveCommentSymbol, resolveReferenceAtPosition } from './symbolResolver';
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, symbolTables } from './server';
 import {
     findBuiltinSegmentDirectiveAtPosition,
@@ -21,7 +23,7 @@ export function initializeDefinitionProvider(connection: _Connection, documents:
     /**
      * Handles the "Go to Definition" request.
      */
-    connection.onDefinition(async (params: DefinitionParams): Promise<Definition | undefined> => {
+    connection.onDefinition(async (params: DefinitionParams): Promise<Definition | DefinitionLink[] | undefined> => {
         await initializationGate.isInitialized;
         await ensureDocumentRefreshed?.(params.textDocument.uri);
 
@@ -38,6 +40,28 @@ export function initializeDefinitionProvider(connection: _Connection, documents:
 
         if (foundEntity) {
             return Location.create(foundEntity.uri, foundEntity.definition);
+        }
+
+        const commentHit = findCommentSymbolAtPosition(document, params.position, settings.cComments);
+        if (commentHit) {
+            const commentEntity = resolveCommentSymbol(
+                params.textDocument.uri,
+                params.position,
+                commentHit.rawName,
+                symbolTables,
+                includesGraph,
+                settings.implicitImports
+            );
+            if (commentEntity) {
+                return [
+                    LocationLink.create(
+                        commentEntity.uri,
+                        commentEntity.definition,
+                        commentEntity.definition,
+                        commentHit.range
+                    ),
+                ];
+            }
         }
 
         const segHit = findSegmentDirectiveAtPosition(document, params.position, settings.cComments)

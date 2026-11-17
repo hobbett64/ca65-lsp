@@ -13,7 +13,12 @@ import { URI } from 'vscode-uri';
 import { getMnemonicInfo, MnemonicInfo, MnemonicModeInfo, resolveDirectiveAlias } from './dataManager';
 import { Ca65Cpu } from './settings';
 import { isLabelSymbolKind, Macro, MacroKind, Scope, ScopeKind, Symbol as Ca65Symbol, SymbolKind as Ca65SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
-import { resolveReference } from './symbolResolver';
+import {
+    extractCommentSymbolTokensInLine,
+    findCommentSymbolAtPosition,
+    resolveCommentSymbol,
+    resolveReference,
+} from './symbolResolver';
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
 import { getCachedTextDocument } from './documentCache';
 import { evaluateConstantEntity, evaluateLabelSize, evaluateLocationLabelSize, evaluateStructFieldBadge } from './instructionAnalyzer';
@@ -83,6 +88,38 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
         });
         const maskedLine = maskCommentsAtDocumentLine(document, position.line, undefined, settings.cComments);
 
+        const commentHit = findCommentSymbolAtPosition(document, position, settings.cComments);
+        if (commentHit) {
+            const commentEntity = resolveCommentSymbol(
+                textDocument.uri,
+                position,
+                commentHit.rawName,
+                symbolTables,
+                includesGraph,
+                settings.implicitImports
+            );
+            if (commentEntity) {
+                const definitionDocument = await getCachedTextDocument(commentEntity.uri, documents);
+                if (definitionDocument) {
+                    const defSettings = commentEntity.uri === textDocument.uri
+                        ? settings
+                        : await getDocumentSettings(commentEntity.uri);
+                    return {
+                        contents: {
+                            kind: MarkupKind.Markdown,
+                            value: generateSymbolTableEntityMarkdown(
+                                commentEntity,
+                                definitionDocument,
+                                defSettings.implicitImports,
+                                defSettings.binIncludeDirs
+                            ),
+                        },
+                        range: commentHit.range,
+                    };
+                }
+            }
+        }
+
         const segHit = findSegmentDirectiveAtPosition(document, position, settings.cComments);
         if (segHit) {
             const linkerConfig = loadLinkerConfigForUri(textDocument.uri, settings, documents);
@@ -147,13 +184,56 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
 
 // --- Markdown Generation Functions ---
 
+export interface DocCommentFormatContext {
+    uri: string;
+    line: number;
+    implicitImports?: boolean;
+}
+
 /**
  * Renders an extracted doc comment block verbatim inside a `ca65` code fence
- * so comment syntax highlighting and monospace alignment (tables, diagrams) are preserved.
+ * so comment syntax highlighting and monospace alignment (tables, diagrams) are preserved,
+ * and appends clickable Markdown links for any resolved `{symbol}` / `{@link symbol}` / `@see` targets.
  */
-export function formatDocCommentForHover(docCommentBlock: string): string {
+export function formatDocCommentForHover(
+    docCommentBlock: string,
+    context?: DocCommentFormatContext
+): string {
     if (!docCommentBlock || /^\/\*+\s*\*\/$/.test(docCommentBlock.trim())) return '';
-    return '```ca65\n' + docCommentBlock + '\n```';
+    const codeFence = '```ca65\n' + docCommentBlock + '\n```';
+    if (!context || !symbolTables || !includesGraph) {
+        return codeFence;
+    }
+
+    const lines = docCommentBlock.split(/\r?\n/);
+    const seenEntities = new Set<SymbolTableEntity>();
+    const seeLinks: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+        for (const hit of extractCommentSymbolTokensInLine(lines[i], i)) {
+            const resolved = resolveCommentSymbol(
+                context.uri,
+                { line: context.line, character: 0 },
+                hit.rawName,
+                symbolTables,
+                includesGraph,
+                Boolean(context.implicitImports)
+            );
+            if (resolved && !seenEntities.has(resolved)) {
+                seenEntities.add(resolved);
+                const { prefixParts, leaf } = formatQualifiedPrefixAndLeaf(resolved);
+                const qualifiedDisplayName = prefixParts.length > 0
+                    ? `${prefixParts.join('::')}::${leaf}`
+                    : leaf;
+                const oneBasedLine = resolved.definition.start.line + 1;
+                seeLinks.push(`[${escapeInlineMarkdown(qualifiedDisplayName)}](${resolved.uri}#L${oneBasedLine})`);
+            }
+        }
+    }
+
+    if (seeLinks.length === 0) {
+        return codeFence;
+    }
+    return `${codeFence}\n\n*See:* ${seeLinks.join(', ')}`;
 }
 
 export function extractLeadingDocInfo(document: TextDocument, definitionLine: number): {
@@ -405,7 +485,8 @@ function assembleEntityHoverMarkdown(
         trailingParts?: string[];
     },
     defLine: number,
-    document: TextDocument
+    document: TextDocument,
+    implicitImports: boolean = false
 ): string {
     const headerParts: string[] = [];
     if (header.segment) {
@@ -422,7 +503,11 @@ function assembleEntityHoverMarkdown(
     const sections: string[] = [headerParts.join(' ')];
     const { docCommentBlock } = extractLeadingDocInfo(document, defLine);
     if (docCommentBlock) {
-        const renderedDoc = formatDocCommentForHover(docCommentBlock);
+        const renderedDoc = formatDocCommentForHover(docCommentBlock, {
+            uri: document.uri,
+            line: defLine,
+            implicitImports,
+        });
         if (renderedDoc) {
             sections.push(renderedDoc);
         }
@@ -530,7 +615,8 @@ export function generateSymbolTableEntityMarkdown(
     return assembleEntityHoverMarkdown(
         { segment, badges, signatureMarkdown: finalSignature, trailingParts },
         definitionStart,
-        document
+        document,
+        implicitImports
     );
 }
 

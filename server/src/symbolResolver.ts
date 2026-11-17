@@ -1,11 +1,16 @@
 import {
     Position,
+    Range,
     SymbolKind as LSPSymbolKind,
     Location,
 } from 'vscode-languageserver-types';
+import { TextDocument } from 'vscode-languageserver-textdocument';
 import { SymbolTable, Symbol, SymbolTableEntity, Macro, Scope, ScopeKind, MacroKind, SymbolKind, ReferenceInfo, Export, Import, classifyLabelSegment, resolveSegmentAddrSize, SegmentAddrSize } from './symbolTable';
 import { IncludesGraph } from './includesGraph';
 import { exportsMap, performanceMonitor } from './server';
+import { maskCommentsAtDocumentLine } from './documentScanner';
+import { getCachedTextDocument } from './documentCache';
+import { TextDocuments } from 'vscode-languageserver/node';
 
 const cachedLocalResolutionsPerUri: Map<string, Map<ReferenceInfo, SymbolTableEntity | null>> = new Map();
 const cachedExportResolutionsPerUri: Map<string, Map<Export, Symbol | Scope | null>> = new Map();
@@ -51,6 +56,190 @@ export function resolveReferenceAtPosition(
     }
     const resolved = resolveReference(ref, allSymbolTables, includesGraph, implicitImports);
     return resolved;
+}
+
+export interface CommentSymbolHit {
+    rawName: string;
+    range: Range;
+    hitStartChar: number;
+    hitEndChar: number;
+}
+
+const BRACED_COMMENT_SYMBOL_RE = /\{(?:@link\s+)?((?:::)?[a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*)\}/g;
+const SINGLE_IDENT_TAG_RE = /(?<!\S)@(?:param|arg|argument|input|in|output|out)\b(?:[ \t]+\{[^}]+\})?[ \t]+(\{?((?:::)?[a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*)\}?)/gi;
+const COMMA_LIST_TAG_RE = /(?<!\S)(@(?:see|modifies|uses))\b([ \t]+\{?(?:::)?[a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*\}?(?:[ \t]*,[ \t]*\{?(?:::)?[a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*\}?)*)/gi;
+const REG_LIST_TAG_RE = /(?<!\S)(@(?:clobbers?|preserves?))\b([ \t]+[^\r\n*]*)/gi;
+const IDENT_TARGET_TOKEN_RE = /\{?((?:::)?[a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*)\}?/g;
+
+export function extractCommentSymbolTokensInLine(
+    rawLine: string,
+    lineNumber: number,
+    maskedLine?: string
+): CommentSymbolHit[] {
+    const hits: CommentSymbolHit[] = [];
+    const seenStartChars = new Set<number>();
+
+    const isCommentSpan = (start: number, end: number): boolean => {
+        if (!maskedLine) return true;
+        return maskedLine.slice(start, end).trim().length === 0;
+    };
+
+    const pushTokenHit = (rawName: string, tokenStart: number, tokenEnd: number, hasOpenBrace: boolean) => {
+        const nameStart = hasOpenBrace ? tokenStart + 1 : tokenStart;
+        const nameEnd = nameStart + rawName.length;
+        if (seenStartChars.has(nameStart)) return;
+        seenStartChars.add(nameStart);
+        hits.push({
+            rawName,
+            range: Range.create(lineNumber, nameStart, lineNumber, nameEnd),
+            hitStartChar: tokenStart,
+            hitEndChar: tokenEnd,
+        });
+    };
+
+    let m: RegExpExecArray | null;
+    BRACED_COMMENT_SYMBOL_RE.lastIndex = 0;
+    while ((m = BRACED_COMMENT_SYMBOL_RE.exec(rawLine)) !== null) {
+        const hitStart = m.index;
+        const hitEnd = hitStart + m[0].length;
+        if (!isCommentSpan(hitStart, hitEnd)) continue;
+        const rawName = m[1];
+        const nameStart = hitEnd - 1 - rawName.length;
+        const nameEnd = hitEnd - 1;
+        seenStartChars.add(nameStart);
+        hits.push({
+            rawName,
+            range: Range.create(lineNumber, nameStart, lineNumber, nameEnd),
+            hitStartChar: hitStart,
+            hitEndChar: hitEnd,
+        });
+    }
+
+    SINGLE_IDENT_TAG_RE.lastIndex = 0;
+    while ((m = SINGLE_IDENT_TAG_RE.exec(rawLine)) !== null) {
+        const fullStart = m.index;
+        const fullEnd = fullStart + m[0].length;
+        if (!isCommentSpan(fullStart, fullEnd)) continue;
+        const tokenStr = m[1];
+        const rawName = m[2];
+        const tokenStart = fullEnd - tokenStr.length;
+        pushTokenHit(rawName, tokenStart, fullEnd, tokenStr.startsWith('{'));
+    }
+
+    COMMA_LIST_TAG_RE.lastIndex = 0;
+    while ((m = COMMA_LIST_TAG_RE.exec(rawLine)) !== null) {
+        const tagStart = m.index;
+        const tagEnd = tagStart + m[0].length;
+        if (!isCommentSpan(tagStart, tagEnd)) continue;
+        const tailOffset = tagStart + m[1].length;
+        const tail = m[2];
+        let tm: RegExpExecArray | null;
+        IDENT_TARGET_TOKEN_RE.lastIndex = 0;
+        while ((tm = IDENT_TARGET_TOKEN_RE.exec(tail)) !== null) {
+            const tokenStart = tailOffset + tm.index;
+            const tokenEnd = tokenStart + tm[0].length;
+            pushTokenHit(tm[1], tokenStart, tokenEnd, tm[0].startsWith('{'));
+        }
+    }
+
+    REG_LIST_TAG_RE.lastIndex = 0;
+    while ((m = REG_LIST_TAG_RE.exec(rawLine)) !== null) {
+        const tagStart = m.index;
+        const tagEnd = tagStart + m[0].length;
+        if (!isCommentSpan(tagStart, tagEnd)) continue;
+        const tailOffset = tagStart + m[1].length;
+        let tail = m[2];
+        const stopMatch = tail.match(/[ \t]+[-–—][ \t]|[:(]|\*\//);
+        if (stopMatch && stopMatch.index !== undefined) {
+            tail = tail.slice(0, stopMatch.index);
+        }
+        let tm: RegExpExecArray | null;
+        IDENT_TARGET_TOKEN_RE.lastIndex = 0;
+        while ((tm = IDENT_TARGET_TOKEN_RE.exec(tail)) !== null) {
+            const tokenStart = tailOffset + tm.index;
+            const tokenEnd = tokenStart + tm[0].length;
+            pushTokenHit(tm[1], tokenStart, tokenEnd, tm[0].startsWith('{'));
+        }
+    }
+
+    hits.sort((a, b) => a.hitStartChar - b.hitStartChar);
+    return hits;
+}
+
+export function findCommentSymbolAtPosition(
+    document: TextDocument,
+    position: Position,
+    cComments: boolean = true
+): CommentSymbolHit | null {
+    if (position.line < 0 || position.line >= document.lineCount) {
+        return null;
+    }
+    const rawLine = document.getText({
+        start: { line: position.line, character: 0 },
+        end: { line: position.line + 1, character: 0 },
+    });
+    const maskedLine = maskCommentsAtDocumentLine(document, position.line, undefined, cComments);
+    const hits = extractCommentSymbolTokensInLine(rawLine, position.line, maskedLine);
+    for (const hit of hits) {
+        if (position.character >= hit.hitStartChar && position.character <= hit.hitEndChar) {
+            return hit;
+        }
+    }
+    return null;
+}
+
+export function resolveCommentSymbol(
+    uri: string,
+    position: Position,
+    rawName: string,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+    implicitImports: boolean = false
+): SymbolTableEntity | undefined {
+    if (!rawName) return undefined;
+    const isGlobal = rawName.startsWith('::');
+    const clean = isGlobal ? rawName.slice(2) : rawName;
+    const parts = clean.split('::').filter(Boolean);
+    if (parts.length === 0) return undefined;
+
+    const leaf = parts[parts.length - 1];
+    const qualifiers = isGlobal ? ['', ...parts.slice(0, -1)] : parts.slice(0, -1);
+    const symbolTable = allSymbolTables.get(uri);
+    const scope = symbolTable?.getScopeAtPosition(position) ?? symbolTable?.getRootScope();
+
+    if (scope) {
+        const loc = Range.create(position, position);
+        for (const ctx of ['symbol', 'scope'] as const) {
+            const resolved = resolveReference(
+                new ReferenceInfo(uri, leaf, qualifiers, ctx, loc, scope),
+                allSymbolTables,
+                includesGraph,
+                implicitImports
+            );
+            if (resolved) return resolved;
+        }
+    }
+
+    if (!isGlobal && qualifiers.length === 0) {
+        const macro = resolveMacroByName(uri, leaf, allSymbolTables, includesGraph);
+        if (macro) return macro;
+        const imported = resolveImport(leaf, allSymbolTables, includesGraph);
+        if (imported) return imported;
+    }
+
+    const searchQualifiers = isGlobal ? qualifiers.slice(1) : qualifiers;
+    for (const st of allSymbolTables.values()) {
+        const root = st.getRootScope();
+        const found = root.findDefinition(leaf, searchQualifiers, 'symbol')
+            ?? root.findDefinition(leaf, searchQualifiers, 'scope');
+        if (found) return found;
+        if (!isGlobal && qualifiers.length === 0) {
+            const m = st.getMacro(leaf);
+            if (m) return m;
+        }
+    }
+
+    return undefined;
 }
 
 /**
@@ -300,6 +489,132 @@ export function getAllReferenceLocationsForEntity(
 ): Location[] {
     return getAllReferencesForEntity(entity, allSymbolTables, includesGraph, implicitImports)
         .map((ref) => { return { uri: ref.uri, range: ref.location }})
+}
+
+export interface CommentSegmentSpan {
+    name: string;
+    prefixRawName: string;
+    range: Range;
+    isLeaf: boolean;
+}
+
+export function splitCommentTokenSegments(hit: CommentSymbolHit): CommentSegmentSpan[] {
+    const raw = hit.rawName;
+    const line = hit.range.start.line;
+    const baseChar = hit.range.start.character;
+    const isGlobal = raw.startsWith('::');
+    const spans: CommentSegmentSpan[] = [];
+
+    let offset = isGlobal ? 2 : 0;
+    while (offset < raw.length) {
+        const nextSep = raw.indexOf('::', offset);
+        const endOffset = nextSep >= 0 ? nextSep : raw.length;
+        const segName = raw.slice(offset, endOffset);
+        if (segName.length > 0) {
+            spans.push({
+                name: segName,
+                prefixRawName: raw.slice(0, endOffset),
+                range: Range.create(line, baseChar + offset, line, baseChar + endOffset),
+                isLeaf: nextSep < 0,
+            });
+        }
+        if (nextSep < 0) break;
+        offset = nextSep + 2;
+    }
+    return spans;
+}
+
+export function resolveCommentSegmentAtPosition(
+    uri: string,
+    position: Position,
+    document: TextDocument,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+    implicitImports: boolean = false,
+    cComments: boolean = true
+): { entity: SymbolTableEntity; range: Range; placeholder: string } | null {
+    const hit = findCommentSymbolAtPosition(document, position, cComments);
+    if (!hit) return null;
+    const segments = splitCommentTokenSegments(hit);
+    if (segments.length === 0) return null;
+
+    const targetSeg = segments.find(
+        s => position.character >= s.range.start.character && position.character <= s.range.end.character
+    ) ?? segments[segments.length - 1];
+
+    const entity = resolveCommentSymbol(
+        uri,
+        position,
+        targetSeg.prefixRawName,
+        allSymbolTables,
+        includesGraph,
+        implicitImports
+    );
+    if (!entity) return null;
+    return {
+        entity,
+        range: targetSeg.range,
+        placeholder: targetSeg.name,
+    };
+}
+
+export async function findCommentReferenceLocationsForEntity(
+    entity: SymbolTableEntity,
+    documents: TextDocuments<TextDocument>,
+    allSymbolTables: Map<string, SymbolTable>,
+    includesGraph: IncludesGraph,
+    implicitImports: boolean = false,
+    cComments: boolean = true
+): Promise<Location[]> {
+    const targetName = entity.name;
+    if (!targetName) return [];
+
+    const locations: Location[] = [];
+    for (const uri of allSymbolTables.keys()) {
+        const doc = await getCachedTextDocument(uri, documents);
+        if (!doc) continue;
+        const fullText = doc.getText();
+        if (!fullText.includes(targetName)) continue;
+
+        const lines = fullText.split(/\r?\n/);
+        for (let ln = 0; ln < lines.length; ln++) {
+            const rawLine = lines[ln];
+            if (!rawLine.includes(targetName)) continue;
+            const maskedLine = maskCommentsAtDocumentLine(doc, ln, undefined, cComments);
+            const hits = extractCommentSymbolTokensInLine(rawLine, ln, maskedLine);
+            for (const hit of hits) {
+                for (const seg of splitCommentTokenSegments(hit)) {
+                    if (seg.name !== targetName) continue;
+                    const resolved = resolveCommentSymbol(
+                        uri,
+                        { line: ln, character: hit.hitStartChar },
+                        seg.prefixRawName,
+                        allSymbolTables,
+                        includesGraph,
+                        implicitImports
+                    );
+                    if (resolved === entity) {
+                        locations.push(Location.create(uri, seg.range));
+                    }
+                }
+            }
+        }
+    }
+
+    return locations;
+}
+
+export function mergeUniqueLocations(primary: Location[], extra: Location[]): Location[] {
+    if (extra.length === 0) return primary;
+    const seen = new Set<string>();
+    const out: Location[] = [];
+    for (const loc of [...primary, ...extra]) {
+        const key = `${loc.uri}:${loc.range.start.line}:${loc.range.start.character}:${loc.range.end.line}:${loc.range.end.character}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(loc);
+    }
+    return out;
 }
 
 function getLabelSymbolKindBySegment(segment: string | null | undefined, addrSize?: SegmentAddrSize): LSPSymbolKind {

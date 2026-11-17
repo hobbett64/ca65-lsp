@@ -10,7 +10,13 @@ import {
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, symbolTables } from './server';
-import { getAllReferenceLocationsForEntity, resolveReference } from './symbolResolver';
+import {
+    findCommentReferenceLocationsForEntity,
+    getAllReferenceLocationsForEntity,
+    mergeUniqueLocations,
+    resolveCommentSegmentAtPosition,
+    resolveReference,
+} from './symbolResolver';
 import { findAllCheapLocalLabelReferences } from './cheapLocalLabelUtils';
 import { SymbolTable, SymbolTableEntity } from './symbolTable';
 import { Ca65Settings } from './settings';
@@ -38,6 +44,23 @@ function resolveRenameTarget(
                 entity,
             };
         }
+    }
+
+    const commentTarget = resolveCommentSegmentAtPosition(
+        document.uri,
+        position,
+        document,
+        symbolTables,
+        includesGraph,
+        settings.implicitImports,
+        settings.cComments
+    );
+    if (commentTarget) {
+        return {
+            range: commentTarget.range,
+            placeholder: commentTarget.placeholder,
+            entity: commentTarget.entity,
+        };
     }
 
     const cheapLocations = findAllCheapLocalLabelReferences(document, position);
@@ -102,12 +125,21 @@ export function initializeRenameProvider(connection: _Connection, documents: Tex
         let allLocations: Location[];
         let effectiveNewName = params.newName;
         if (target.entity) {
-            allLocations = getAllReferenceLocationsForEntity(
+            const codeLocations = getAllReferenceLocationsForEntity(
                 target.entity,
                 symbolTables,
                 includesGraph,
                 settings.implicitImports
             );
+            const commentLocations = await findCommentReferenceLocationsForEntity(
+                target.entity,
+                documents,
+                symbolTables,
+                includesGraph,
+                settings.implicitImports,
+                settings.cComments
+            );
+            allLocations = mergeUniqueLocations(codeLocations, commentLocations);
         } else {
             allLocations = target.cheapLocations || [];
             if (!effectiveNewName.startsWith('@')) {
