@@ -1,0 +1,9 @@
+{
+    // Turn on cc65 C mode for this project (off by default).
+    "ca65.enableCSupport": true,
+    // If the clangd extension is installed, keep it quiet in this folder so C files aren't served twice.
+    "clangd.enable": false,
+    "ca65.cc65.target": "nes",
+    "ca65.cc65.additionalArgs": ["-O"],
+    "ca65.linkerConfig": "nes-demo.cfg"
+}

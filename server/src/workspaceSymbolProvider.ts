@@ -5,6 +5,7 @@ import {
 } from 'vscode-languageserver/node';
 import { ensureDocumentRefreshed, initializationGate, symbolTables } from './server';
 import { getLSPSymbolKind } from './symbolResolver';
+import { isEmbeddedUri } from './embeddedDocs';
 
 export function initializeWorkspaceSymbolProvider(connection: _Connection) {
     /**
@@ -18,6 +19,7 @@ export function initializeWorkspaceSymbolProvider(connection: _Connection) {
         const lspSymbols: SymbolInformation[] = [];
 
         for (const [uri, symbolTable] of symbolTables) {
+            if (isEmbeddedUri(uri)) continue;
             for (const entity of symbolTable.getAllDefinedEntities()) {
 
                 if (query && !entity.name.toLowerCase().includes(query)) {

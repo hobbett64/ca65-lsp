@@ -30,9 +30,12 @@ import {
 } from 'vscode-languageclient/node';
 import * as fs from 'fs/promises';
 import { Uri } from 'vscode';
+import { CBridge, createCa65BridgeMiddleware } from './cBridge';
+import { setupCc65AssemblyView } from './cc65AssemblyView';
 
 
 let client: LanguageClient;
+let cBridgeInstance: CBridge | undefined;
 
 function hasExplicitConfigValue(cfg: WorkspaceConfiguration, key: string): boolean {
 	const inspected = cfg.inspect(key);
@@ -142,8 +145,17 @@ export function activate(context: ExtensionContext) {
 	};
 	context.subscriptions.push({ dispose: disposeWatchers });
 
+	// cc65 C mode: links C symbols (served by clangd) with global ca65 symbols.
+	const cBridge = new CBridge(context);
+	cBridgeInstance = cBridge;
+	context.subscriptions.push(cBridge);
+
 	const clientOptions: LanguageClientOptions = {
-		documentSelector: [{ scheme: 'file', language: 'ca65' }],
+		documentSelector: [
+			{ scheme: 'file', language: 'ca65' },
+			// Embedded documents holding cc65 inline asm from C sources (see inlineAsmDocuments.ts)
+			{ scheme: 'ca65-inline', language: 'ca65' },
+		],
 		synchronize: {
 			configurationSection: 'ca65',
 			fileEvents: activeWatchers
@@ -152,6 +164,7 @@ export function activate(context: ExtensionContext) {
 			isTrusted: { enabledCommands: ['ca65.showReference'] },
 		},
 		middleware: {
+			...createCa65BridgeMiddleware(cBridge),
 			workspace: {
 				configuration: async (params, token, next) => {
 					const result = await Promise.resolve(next(params, token));
@@ -179,6 +192,13 @@ export function activate(context: ExtensionContext) {
 
 	const clientReady = Promise.resolve(client.start());
 	console.log('ca65 Language Client started.');
+
+	cBridge.attachCa65Client(client, clientReady);
+	cBridge.activate();
+	setupCc65AssemblyView(context, cBridge.cc65Diagnostics, async (content) => {
+		await clientReady;
+		return client.sendRequest('ca65/parseListing', { content });
+	});
 
 	context.subscriptions.push(workspace.onDidChangeConfiguration((event) => {
 		if (
@@ -537,7 +557,7 @@ function setupCycleStatusBar(
 	registerCursorStatusBarUpdater<InstructionAnalysisSummary | null>(context, clientReady, {
 		priority: 100,
 		settingKey: 'enableStatusBarCycleCount',
-		affectingSettings: ['ca65.enableStatusBarCycleCount', 'ca65.cpu', 'ca65.implicitImports', 'ca65.cComments', 'ca65.lineContinuations', 'ca65.additionalArgs'],
+		affectingSettings: ['ca65.enableStatusBarCycleCount', 'ca65.cpu', 'ca65.cc65.target', 'ca65.implicitImports', 'ca65.cComments', 'ca65.lineContinuations', 'ca65.additionalArgs'],
 		subscribeRefresh: (trigger) => {
 			context.subscriptions.push(onListingUpdated((uris) => trigger(uris)));
 		},
@@ -612,7 +632,8 @@ function buildListingUri(sourceUri: Uri): Uri {
 	const baseName = path.basename(sourceUri.fsPath) || 'listing';
 	return Uri.from({
 		scheme: LISTING_SCHEME,
-		path: `/${baseName}.lst`,
+		// "<name> (listing)" selects the ca65-listing language (see package.json filenamePatterns).
+		path: `/${baseName} (listing)`,
 		query: encodeURIComponent(sourceUri.toString()),
 	});
 }
@@ -725,13 +746,13 @@ function setupSideBySideHexListing(
 
 			if (!data || data.source === 'none' || data.error || data.stale) {
 				if (data?.error) {
-					const lines = ['Cannot generate listing due to assembly errors. Fix errors to update.'];
+					const lines = ['; Cannot generate listing due to assembly errors. Fix errors to update.'];
 					if (data.errors && data.errors.length > 0) {
-						lines.push('', ...data.errors);
+						lines.push(';', ...data.errors.map(e => `; ${e}`));
 					}
 					return lines.join('\n');
 				}
-				return 'ca65 listing unavailable (ensure ca65 is installed or configured via ca65.executablePath).';
+				return '; ca65 listing unavailable (ensure ca65 is installed or configured via ca65.executablePath).';
 			}
 
 			const sourceLines = srcDoc.getText().split(/\r?\n/);
@@ -862,11 +883,11 @@ function setupSideBySideHexListing(
 	);
 }
 
-export function deactivate(): Thenable<void> | undefined {
-	if (!client) {
-		return undefined;
-	}
-	return client.stop();
+export async function deactivate(): Promise<void> {
+	await Promise.all([
+		cBridgeInstance?.stop(),
+		client?.stop(),
+	]);
 }
 
 const cachedReferenceBodyByCpu = new Map<string, string>();

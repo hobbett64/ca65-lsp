@@ -10,9 +10,9 @@ import {
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { URI } from 'vscode-uri';
 
-import { getMnemonicInfo, MnemonicInfo, MnemonicModeInfo, resolveDirectiveAlias } from './dataManager';
+import { getMnemonicInfo, isCc65RuntimeSymbol, MnemonicInfo, MnemonicModeInfo, resolveDirectiveAlias } from './dataManager';
 import { Ca65Cpu } from './settings';
-import { isLabelSymbolKind, Macro, MacroKind, Scope, ScopeKind, Symbol as Ca65Symbol, SymbolKind as Ca65SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
+import { Import, isLabelSymbolKind, Macro, MacroKind, Scope, ScopeKind, Symbol as Ca65Symbol, SymbolKind as Ca65SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
 import {
     extractCommentSymbolTokensInLine,
     findCommentSymbolAtPosition,
@@ -467,6 +467,14 @@ function formatEntityHeaderParts(entity: SymbolTableEntity): {
         return {
             segment: entity.segment,
             badges: [],
+            signatureMarkdown: qualifiedMarkdown,
+        };
+    }
+    // An import nothing in the workspace defines, provided by the cc65 runtime library.
+    if (entity instanceof Import && isCc65RuntimeSymbol(entity.name)) {
+        return {
+            segment: entity.segment,
+            badges: ['cc65 runtime'],
             signatureMarkdown: qualifiedMarkdown,
         };
     }

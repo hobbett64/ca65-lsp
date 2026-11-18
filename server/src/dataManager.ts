@@ -318,7 +318,23 @@ export function resolveDirectiveAlias(key: string): DirectiveInfo | null {
     return null;
 }
 
+let cc65RuntimeSymbols = new Set<string>();
+
+/** True for symbols exported by the cc65 runtime library (`pusha`, `incsp2`, `sp`, `tmp1`, ...). */
+export function isCc65RuntimeSymbol(name: string): boolean {
+    return cc65RuntimeSymbols.has(name);
+}
+
 export function loadAllData(connection: _Connection) {
+    // cc65 runtime symbols (generated from cc65's libraries; see the file's "source" note)
+    try {
+        const runtimePath = path.join(__dirname, '..', 'data', 'cc65_runtime_symbols.json');
+        const runtime = JSON.parse(fs.readFileSync(runtimePath, 'utf8'));
+        cc65RuntimeSymbols = new Set(Array.isArray(runtime?.symbols) ? runtime.symbols : []);
+    } catch (error) {
+        connection.console.error(`Failed to load cc65 runtime symbols: ${error}`);
+    }
+
     // Load 6502 mnemonics data
     const mnemonicPath = path.join(__dirname, '..', 'data', '6502_mnemonics.json');
     try {

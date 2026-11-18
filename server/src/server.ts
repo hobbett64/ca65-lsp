@@ -41,6 +41,7 @@ import { initializeReferencesProvider } from './referencesProvider';
 import { initializeDefinitionProvider } from './definitionProvider';
 import { initializeRenameProvider } from './renameProvider';
 import { initializeCallHierarchyProvider } from './callHierarchyProvider';
+import { initializeCrossLanguageBridge } from './crossLanguageBridge';
 import { initializeDocumentHighlightProvider } from './documentHighlightProvider';
 import { initializeCompletionProvider } from './completionProvider';
 import { initializeSignatureHelpProvider } from './signatureHelpProvider';
@@ -51,6 +52,7 @@ import { getListingStateForUri } from './listingCache';
 import { invalidateOverlaySignatures, initializeOverlayProvider } from './overlayProvider';
 import { deleteCachedResolutions } from './symbolResolver';
 import { ExportsMap } from './exportsMap';
+import { embeddedToHostUri, isEmbeddedUri } from './embeddedDocs';
 import {
     Ca65Cpu,
     Ca65Settings,
@@ -293,8 +295,14 @@ connection.onInitialized(async () => {
 // Helper function to get the setting for a document
 const resolvedSettingsSync = new Map<string, Ca65Settings>();
 
+/** Settings scope for a document: its workspace folder (embedded inline-asm documents use their C host's). */
+function getSettingsScopeKey(resource: string): string {
+    const settingsResource = embeddedToHostUri(resource) ?? resource;
+    return getWorkspaceFolderOfFile(settingsResource) ?? settingsResource;
+}
+
 export function getCachedSettingsSync(resource: string): Ca65Settings | undefined {
-    const scopeKey = getWorkspaceFolderOfFile(resource) ?? resource;
+    const scopeKey = getSettingsScopeKey(resource);
     return resolvedSettingsSync.get(scopeKey);
 }
 
@@ -333,7 +341,7 @@ function revalidateOpenRoots(): void {
 }
 
 export function getDocumentSettings(resource: string): Thenable<Ca65Settings> {
-    const scopeKey = getWorkspaceFolderOfFile(resource) ?? resource;
+    const scopeKey = getSettingsScopeKey(resource);
     let result = documentSettings.get(scopeKey);
     if (!result) {
         result = connection.workspace.getConfiguration({
@@ -715,6 +723,16 @@ documents.onDidClose((event) => {
     if (isLinkerConfigUri(uri)) {
         clearLinkerConfigCache();
     }
+    if (isEmbeddedUri(uri)) {
+        // Embedded inline-asm documents exist only while open.
+        deleteCachedResolutions(uri);
+        for (const tuUri of includesGraph.getTranslationUnitSet(uri)) {
+            deleteCachedResolutions(tuUri);
+        }
+        symbolTables.delete(uri);
+        includesGraph.removeFile(uri);
+        exportsMap.removeUri(uri);
+    }
 });
 
 documents.onDidChangeContent(async (change) => {
@@ -735,7 +753,14 @@ documents.onDidChangeContent(async (change) => {
 
     try {
         if (isInitialOpen) {
-            await updateAndValidate(doc, false);
+            // Track the initial scan so requests that arrive right after didOpen wait for it.
+            const initialScan: Promise<void> = updateAndValidate(doc, false).finally(() => {
+                if (inFlightRefreshes.get(doc.uri) === initialScan) {
+                    inFlightRefreshes.delete(doc.uri);
+                }
+            });
+            inFlightRefreshes.set(doc.uri, initialScan);
+            await initialScan;
         } else {
             markDocumentModifiedSinceSave(doc.uri);
             scheduleDocumentRefresh(doc);
@@ -844,6 +869,7 @@ initializeDocumentHighlightProvider(connection, documents);
 initializeCodeActionProvider(connection, documents);
 initializeSemanticTokensProvider(connection, documents);
 initializeOverlayProvider(connection, documents);
+initializeCrossLanguageBridge(connection, documents);
 
 // --- Start the server ---
 documents.listen(connection);

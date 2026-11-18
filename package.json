@@ -3,7 +3,7 @@
     "description": "ca65 Assembly language support for VS Code",
     "author": "Quang Luong",
     "license": "MIT",
-    "version": "2.3.0",
+    "version": "2.5.0",
     "publisher": "hobbett",
     "repository": {
         "type": "git",
@@ -14,7 +14,9 @@
     },
     "main": "./client/out/extension.js",
     "activationEvents": [
-        "onLanguage:ca65"
+        "onLanguage:ca65",
+        "workspaceContains:**/*.s",
+        "workspaceContains:**/*.asm"
     ],
     "contributes": {
         "languages": [
@@ -30,6 +32,16 @@
                     ".inc"
                 ],
                 "configuration": "./language-configuration.json"
+            },
+            {
+                "id": "ca65-listing",
+                "aliases": [
+                    "ca65 Listing"
+                ],
+                "filenamePatterns": [
+                    "* (listing)",
+                    "* (assembly)"
+                ]
             }
         ],
         "grammars": [
@@ -37,6 +49,24 @@
                 "language": "ca65",
                 "scopeName": "source.ca65",
                 "path": "./syntaxes/ca65.tmLanguage.json"
+            },
+            {
+                "scopeName": "ca65.inline-asm.injection",
+                "path": "./syntaxes/ca65-inline-asm.injection.json",
+                "injectTo": [
+                    "source.c"
+                ],
+                "embeddedLanguages": {
+                    "meta.embedded.inline.ca65": "ca65"
+                }
+            },
+            {
+                "language": "ca65-listing",
+                "scopeName": "source.ca65-listing",
+                "path": "./syntaxes/ca65-listing.tmLanguage.json",
+                "embeddedLanguages": {
+                    "meta.embedded.code.ca65": "ca65"
+                }
             }
         ],
         "configurationDefaults": {
@@ -48,6 +78,7 @@
         },
         "configuration": {
             "title": "ca65 Language Support",
+            "id": "ca65",
             "properties": {
                 "ca65.executablePath": {
                     "type": "string",
@@ -70,6 +101,7 @@
                 "ca65.cpu": {
                     "type": "string",
                     "enum": [
+                        "auto",
                         "6502",
                         "65SC02",
                         "65C02",
@@ -77,14 +109,15 @@
                         "65816"
                     ],
                     "enumDescriptions": [
+                        "Auto: the CPU implied by `ca65.cc65.target` (6502 for most targets, including the default c64 and nes; 65C02 for apple2enh, cx16, geos-apple, sim65c02, and pce; 65SC02 for lynx and supervision)",
                         "NMOS 6502 (NES, C64, Atari 2600/800, Apple II)",
                         "CMOS 65SC02 (Atari Lynx, early Apple IIc; no bit ops or WAI/STP)",
                         "CMOS 65C02 with Rockwell bit instructions (BBR/BBS/RMB/SMB)",
                         "Full WDC 65C02S with Rockwell bit ops plus WAI/STP (Commander X16; requires cc65 2.19+)",
                         "WDC 65C816 16-bit (SNES / Super Famicom, Apple IIgs)"
                     ],
-                    "description": "Target CPU architecture used for instruction hovers, completions, timing/size estimates, reference guide, and `ca65 --cpu` diagnostics.",
-                    "default": "6502",
+                    "description": "Target CPU architecture used for instruction hovers, completions, timing/size estimates, reference guide, and `ca65 --cpu` diagnostics. `auto` (default) uses the CPU implied by `ca65.cc65.target`; an explicit CPU overrides it everywhere, including cc65 C mode.",
+                    "default": "auto",
                     "order": 3
                 },
                 "ca65.includeDirs": {
@@ -205,6 +238,131 @@
                     "default": "",
                     "order": 20
                 },
+                "ca65.enableCSupport": {
+                    "type": "boolean",
+                    "default": false,
+                    "order": 21,
+                    "markdownDescription": "(Work in progress) **cc65 C mode**: C support for mixed C/assembly cc65 projects. Runs clangd for the workspace's C files (configured for the cc65 dialect) and links C and assembly symbols (`foo` in C ↔ `_foo` in assembly), with cc65 diagnostics, inline assembly support, and the generated assembly view. Requires clangd (and cc65 for diagnostics and the assembly view). If you use another C extension (clangd, C/C++), disable it for cc65 workspaces, or C files will get results from both."
+                },
+                "ca65.cc65.executablePath": {
+                    "type": "string",
+                    "description": "(Work in progress) Path to the cc65 C compiler, used for C diagnostics (instead of clangd's), the generated assembly view, and to locate cc65's headers. If unset, cc65 is resolved from PATH (or next to `ca65.executablePath`).",
+                    "default": "",
+                    "order": 22
+                },
+                "ca65.cc65.target": {
+                    "type": "string",
+                    "enum": [
+                        "c64",
+                        "nes",
+                        "apple2",
+                        "apple2enh",
+                        "atari",
+                        "atarixl",
+                        "atari2600",
+                        "atari5200",
+                        "atmos",
+                        "bbc",
+                        "c16",
+                        "c65",
+                        "c128",
+                        "cbm510",
+                        "cbm610",
+                        "creativision",
+                        "cx16",
+                        "gamate",
+                        "geos-apple",
+                        "geos-cbm",
+                        "lunix",
+                        "lynx",
+                        "osic1p",
+                        "pce",
+                        "pet",
+                        "plus4",
+                        "sim6502",
+                        "sim65c02",
+                        "supervision",
+                        "telestrat",
+                        "vic20",
+                        "none"
+                    ],
+                    "enumDescriptions": [
+                        "Commodore 64 (cc65 default)",
+                        "Nintendo Entertainment System / Famicom",
+                        "Apple ][, ][+",
+                        "Enhanced Apple //e, //c",
+                        "Atari 8-bit (400/800)",
+                        "Atari 8-bit XL/XE",
+                        "Atari 2600",
+                        "Atari 5200",
+                        "Oric Atmos",
+                        "BBC Micro",
+                        "Commodore 16 / 116",
+                        "Commodore 65 (requires a newer cc65)",
+                        "Commodore 128",
+                        "Commodore CBM 510 (P500)",
+                        "Commodore CBM 610/620/630/710/720",
+                        "VTech Creativision",
+                        "Commander X16",
+                        "Bit Corporation Gamate",
+                        "GEOS for Apple II",
+                        "GEOS for Commodore",
+                        "LUnix",
+                        "Atari Lynx",
+                        "Ohio Scientific Challenger 1P",
+                        "PC Engine / TurboGrafx-16",
+                        "Commodore PET",
+                        "Commodore Plus/4",
+                        "sim65 6502 simulator",
+                        "sim65 65C02 simulator",
+                        "Watara Supervision",
+                        "Oric Telestrat",
+                        "Commodore VIC-20",
+                        "No target (bare cc65 runtime)"
+                    ],
+                    "description": "(Work in progress) cc65 target system (`cc65 -t`) used when compiling C files for diagnostics and the generated assembly view: it selects the target's predefined macros (e.g. `__C64__`, `__NES__`), CPU, and string character set. The target macros are also defined for clangd. Defaults to `c64`, like cc65 without `-t`.",
+                    "default": "c64",
+                    "order": 23
+                },
+                "ca65.cc65.additionalArgs": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "(Work in progress) Additional command-line arguments passed to cc65 for C diagnostics and the generated assembly view, e.g. `[\"-Oirs\"]` or `[\"--code-name\", \"BANK1\"]`, to match your build. Output and dependency-file options are ignored.",
+                    "order": 24
+                },
+                "ca65.clangd.path": {
+                    "type": "string",
+                    "description": "(Work in progress) Path to the clangd executable. If unset, clangd is resolved from PATH.",
+                    "default": "",
+                    "order": 25
+                },
+                "ca65.clangd.arguments": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "(Work in progress) Additional command-line arguments passed to clangd.",
+                    "default": [],
+                    "order": 26
+                },
+                "ca65.clangd.compileFlags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "(Work in progress) Additional compiler flags for C files, e.g. target defines such as `\"-D__C64__\"` or extra include paths. Used in the generated compile database and as clangd's fallback flags.",
+                    "default": [],
+                    "order": 27
+                },
+                "ca65.clangd.cc65IncludeDir": {
+                    "type": "string",
+                    "description": "(Work in progress) cc65's C include directory (the one containing cc65's `stdio.h`). If unset, it is located from CC65_INC, CC65_HOME, or the cc65 installation next to the ca65 executable.",
+                    "default": "",
+                    "order": 28
+                },
                 "ca65.enableCa65StdErrDiagnostics": {
                     "type": "boolean",
                     "deprecationMessage": "Deprecated: use `ca65.enableStderrDiagnostics` instead.",
@@ -235,6 +393,19 @@
             {
                 "command": "ca65.dumpDebugInfo",
                 "title": "ca65: Dump Debug Info to Output"
+            },
+            {
+                "command": "ca65.clangd.restart",
+                "title": "ca65: Restart clangd (cc65 C mode)"
+            },
+            {
+                "command": "ca65.showCAssembly",
+                "title": "ca65: Show Generated Assembly (cc65) Side-by-Side",
+                "icon": "$(file-code)"
+            },
+            {
+                "command": "ca65.createAsmStub",
+                "title": "ca65: Create Assembly Stub for C Function"
             }
         ],
         "menus": {
@@ -243,6 +414,11 @@
                     "command": "ca65.showHexListing",
                     "when": "editorLangId == ca65",
                     "enablement": "!ca65.listingError",
+                    "group": "navigation"
+                },
+                {
+                    "command": "ca65.showCAssembly",
+                    "when": "resourceExtname == .c && ca65.cc65Available",
                     "group": "navigation"
                 }
             ]

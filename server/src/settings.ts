@@ -27,6 +27,40 @@ const CPU_LOOKUP: Record<string, Ca65Cpu> = {
 };
 
 /**
+ * CPU implied by a cc65 target (`cc65 -t`), as reported by cc65's own `.setcpu` output (cc65 2.19).
+ * HuC6280 (`pce`) is not supported by the extension's instruction data and maps to its base, 65C02.
+ */
+const CC65_TARGET_CPUS: Record<string, Ca65Cpu> = {
+    apple2enh: '65C02',
+    cx16: '65C02',
+    'geos-apple': '65C02',
+    sim65c02: '65C02',
+    pce: '65C02',
+    lynx: '65SC02',
+    supervision: '65SC02',
+};
+
+/** Default `ca65.cc65.target`; keep in sync with package.json and client/src/cc65Toolchain.ts. */
+export const DEFAULT_CC65_TARGET = 'c64';
+
+export function cpuForCc65Target(target: unknown): Ca65Cpu {
+    const name = typeof target === 'string' && target.trim() ? target.trim().toLowerCase() : DEFAULT_CC65_TARGET;
+    return CC65_TARGET_CPUS[name] ?? '6502';
+}
+
+/**
+ * Resolves `ca65.cpu`: an explicit CPU, or `auto` (the default) for the CPU implied by
+ * `ca65.cc65.target`, like `-t` sets the CPU in the cc65 tools unless `--cpu` overrides it.
+ */
+export function resolveCpuSetting(cpu: unknown, cc65Settings: unknown): Ca65Cpu {
+    if (cpu === undefined || (typeof cpu === 'string' && cpu.trim().toLowerCase() === 'auto')) {
+        const target = cc65Settings && typeof cc65Settings === 'object' ? (cc65Settings as Record<string, unknown>).target : undefined;
+        return cpuForCc65Target(target);
+    }
+    return normalizeCpu(cpu);
+}
+
+/**
  * Normalizes a raw CPU setting value into a supported Tier-1 ca65 CPU identifier.
  */
 export function normalizeCpu(value: unknown): Ca65Cpu {
@@ -152,7 +186,7 @@ export function resolveCa65Settings(raw: unknown): Ca65Settings {
     return {
         executablePath: typeof rawObj.executablePath === 'string' ? rawObj.executablePath : '',
         fileExtensions: resolveConfiguredFileExtensions(rawObj),
-        cpu: normalizeCpu(rawObj.cpu),
+        cpu: resolveCpuSetting(rawObj.cpu, rawObj.cc65),
         includeDirs: Array.isArray(rawObj.includeDirs)
             ? cleanStringArray(rawObj.includeDirs)
             : Array.from(DEFAULT_INCLUDE_DIRS),

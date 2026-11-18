@@ -10,6 +10,7 @@ import { IncludesGraph } from './includesGraph';
 import { exportsMap, performanceMonitor } from './server';
 import { maskCommentsAtDocumentLine } from './documentScanner';
 import { getCachedTextDocument } from './documentCache';
+import { isEmbeddedUri } from './embeddedDocs';
 import { TextDocuments } from 'vscode-languageserver/node';
 
 const cachedLocalResolutionsPerUri: Map<string, Map<ReferenceInfo, SymbolTableEntity | null>> = new Map();
@@ -258,6 +259,8 @@ export function resolveReference(
 ): SymbolTableEntity | undefined {
     return performanceMonitor.time('resolveReference', () => {
         const localReference = resolveLocalReference(ref, allSymbolTables, includesGraph);
+        // cc65 assembles inline asm with `.autoimport on`, so embedded documents import implicitly.
+        implicitImports = implicitImports || isEmbeddedUri(ref.uri);
 
         // We found an import. Now check all of the exported symbols in the workspace.
         // If there is no exported symbol, treat the import itself as the definition since we may
@@ -438,7 +441,7 @@ export function getAllReferencesForEntity(
         if (isExported) {
             for (const symbolTable of allSymbolTables.values()) {
                 if (symbolTable.getReferencesByName(entity.name).length === 0) continue;
-                if (!implicitImports && symbolTable.uri !== entity.uri) {
+                if (!implicitImports && symbolTable.uri !== entity.uri && !isEmbeddedUri(symbolTable.uri)) {
                     const tuSet = includesGraph.getTranslationUnitSet(symbolTable.uri);
                     if (!tuSet.has(entity.uri)) {
                         let hasImportInTu = symbolTable.hasImport(entity.name);

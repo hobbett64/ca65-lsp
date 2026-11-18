@@ -15,6 +15,7 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import * as path from 'path';
 import { execFile } from 'child_process';
 import { ensureDocumentRefreshed, exportsMap, getDocumentSettings, includesGraph, performanceMonitor, symbolTables } from './server';
+import { isEmbeddedUri } from './embeddedDocs';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as os from "os";
@@ -764,6 +765,11 @@ export function abortValidation() {
  * @param allFilesToUpdate A pre-calculated set of all files that need their diagnostics refreshed.
  */
 export function triggerValidation(uri: string, debounce: boolean = true, allFilesToUpdate?: Set<string>) {
+    // Embedded inline-asm documents are never assembled and never get diagnostics.
+    if (isEmbeddedUri(uri)) return;
+    if (allFilesToUpdate) {
+        allFilesToUpdate = new Set(Array.from(allFilesToUpdate).filter(u => !isEmbeddedUri(u)));
+    }
     abortValidation();
 
     if (allFilesToUpdate && allFilesToUpdate.size > 0) {

@@ -1,0 +1,31 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "ca65 Listing",
+    "scopeName": "source.ca65-listing",
+    "comment": "Hex listing views: `address  bytes | code`. The columns are only recognized when a line matches that layout; everything after `|` (and lines without columns) is ca65.",
+    "patterns": [
+        { "include": "#listing-line" },
+        { "include": "source.ca65" }
+    ],
+    "repository": {
+        "listing-line": {
+            "begin": "^\\s*(\\+?\\$[0-9A-Fa-f]+r?)?\\s*((?:(?:[0-9A-Fa-f]{2}|rr|xx)(?:\\s+(?:[0-9A-Fa-f]{2}|rr|xx))*(?:…\\s*\\(\\d+B\\))?|res \\d+B))?\\s*(\\|) ?",
+            "beginCaptures": {
+                "1": { "name": "comment.other.address.ca65-listing" },
+                "2": { "patterns": [ { "include": "#bytes" } ] },
+                "3": { "name": "comment.other.separator.ca65-listing" }
+            },
+            "end": "$",
+            "contentName": "meta.embedded.code.ca65",
+            "patterns": [ { "include": "source.ca65" } ]
+        },
+        "bytes": {
+            "patterns": [
+                { "name": "comment.other.relocatable.ca65-listing", "match": "\\b(?:rr|xx)\\b" },
+                { "name": "comment.other.truncated.ca65-listing", "match": "…\\s*\\(\\d+B\\)" },
+                { "name": "constant.numeric.reserved.ca65-listing", "match": "res \\d+B" },
+                { "name": "constant.numeric.hex.ca65-listing", "match": "\\b[0-9A-Fa-f]{2}\\b" }
+            ]
+        }
+    }
+}

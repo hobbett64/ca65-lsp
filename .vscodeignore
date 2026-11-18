@@ -31,3 +31,6 @@ test/
 .DS_Store
 Thumbs.db
 *.log
+
+# Example projects
+examples/

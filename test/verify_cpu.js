@@ -120,6 +120,23 @@ function posOf(lines, needle, offset = 1) {
     return { line, character: lines[line].indexOf(needle) + offset };
 }
 
+// `ca65.cpu: auto` follows the CPU implied by `ca65.cc65.target` (verified against cc65's .setcpu output).
+{
+    const settingsModule = require(require('path').resolve(process.cwd(), 'server/out/settings.js'));
+    const { resolveCpuSetting, resolveCa65Settings } = settingsModule;
+    const a = require('assert');
+    a.strictEqual(resolveCpuSetting('auto', { target: 'nes' }), '6502');
+    a.strictEqual(resolveCpuSetting('auto', { target: 'cx16' }), '65C02');
+    a.strictEqual(resolveCpuSetting('auto', { target: 'lynx' }), '65SC02');
+    a.strictEqual(resolveCpuSetting('auto', { target: 'pce' }), '65C02', 'HuC6280 falls back to its 65C02 base');
+    a.strictEqual(resolveCpuSetting(undefined, undefined), '6502', 'no settings: default target c64 -> 6502');
+    a.strictEqual(resolveCpuSetting('AUTO', { target: 'apple2enh' }), '65C02');
+    a.strictEqual(resolveCpuSetting('65816', { target: 'cx16' }), '65816', 'an explicit CPU overrides the target');
+    a.strictEqual(resolveCpuSetting('auto', { target: 'unknown-target' }), '6502');
+    a.strictEqual(resolveCa65Settings({ cpu: 'auto', cc65: { target: 'lynx' } }).cpu, '65SC02');
+    console.log('auto CPU resolution checks passed');
+}
+
 (async () => {
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ca65-cpu-'));
     let activeCpu = '6502';

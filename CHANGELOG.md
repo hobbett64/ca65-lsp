@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-11-18
+### Added
+- Hovers of imports provided by the cc65 runtime library (`pusha`, `popax`, `incsp2`, `sp`, `tmp1`, ...) are tagged `cc65 runtime`.
+- **cc65 C mode (work in progress)**: C support for mixed C/assembly cc65 projects. Behavior and settings may still change.
+  - Runs `clangd` for the workspace's C files (off by default; enable with `ca65.enableCSupport`) with a generated cc65-dialect compile database (cc65 headers, 16-bit `int`/pointers, unsigned `char`, `__fastcall__`/`__asm__`/`__AX__` shims).
+  - Links C symbols with global assembly symbols (`foo` ↔ `_foo`) for Go to Definition, Find All References, and Rename in both directions, plus Go to Declaration from assembly to the C declaration. Hovers in C files are clangd's own; in assembly, symbols implemented in assembly show the asm hovercard followed by their C declaration (prototype including `__fastcall__`/`__cdecl__`), and symbols implemented in C show clangd's hovercard.
+  - **Create assembly stub** code action for C prototypes that nothing implements yet, documenting where cc65 passes each argument, what to return, and how many bytes to pop (verified against cc65's generated code).
+  - **Inline assembly** (`__asm__("...")`/`asm("...")`): ca65 highlighting, hovers, completion, Go to Definition, Find All References, and Rename inside the string. Inline uses take part in cross-language references and renames, and `%v` arguments stay visible to clangd.
+  - **cc65 diagnostics** for C files instead of clangd's: open C files are compiled with cc65 as you type, header errors are reported on the headers, and the output is assembled with ca65 to report inline asm errors on the `__asm__` string.
+  - **Generated assembly view** (`ca65: Show Generated Assembly (cc65) Side-by-Side`, or **Show Assembly** in the status bar of C files): read-only cc65 output for the current C file beside it, with address/bytes columns, C ↔ assembly line highlighting (including file-scope variables, and for `#include` lines the imports and code their header produces), and live refresh.
+  - Settings: `ca65.cc65.executablePath`, `ca65.cc65.target` (default `c64`, like cc65), `ca65.cc65.additionalArgs`, `ca65.enableCSupport`, `ca65.clangd.path`, `ca65.clangd.arguments`, `ca65.clangd.compileFlags`, `ca65.clangd.cc65IncludeDir`; command `ca65: Restart clangd (cc65 C mode)`.
+  - `examples/cc65-c-mode` in the repository: a small NES project to try it.
+
+### Changed
+- `ca65.cpu` defaults to the new `auto`, which uses the CPU implied by `ca65.cc65.target` (`6502` for the default `c64`, so existing setups are unchanged). An explicit CPU now also applies to cc65 C mode (`--cpu`).
+- The hex listing and the generated assembly view use a dedicated `ca65 Listing` syntax: dimmed addresses and `rr`/`xx` placeholders, highlighted bytes, and ca65 highlighting for the code (tabs are now titled `<file> (listing)` / `<file> (assembly)`).
+- The extension now also activates in workspaces containing `.s`/`.asm` files (not only when a ca65 file is opened), so cc65 C mode is available when a C file is opened first.
+
 ## [2.4.0] - 2026-11-17
 ### Added
 - Support for symbol identification in C-style doc comments, which enable hover support, go-to-definition, symbol renaming, etc in the comment itself when wrapped in {} or after an annotation (e.g. @see, @input, @clobber). Also provides a "See <symbol>" line in the hover card that provides hyperlinks to all of the referenced symbols.

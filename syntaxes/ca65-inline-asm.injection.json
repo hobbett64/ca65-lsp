@@ -1,0 +1,64 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "cc65 inline assembly",
+    "scopeName": "ca65.inline-asm.injection",
+    "injectionSelector": "L:source.c -comment -string",
+    "patterns": [
+        {
+            "include": "#inline-asm"
+        }
+    ],
+    "repository": {
+        "inline-asm": {
+            "begin": "\\b(__asm__|asm)\\s*(\\()\\s*(\")",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.other.asm.c"
+                },
+                "2": {
+                    "name": "punctuation.section.parens.begin.bracket.round.c"
+                },
+                "3": {
+                    "name": "punctuation.definition.string.begin.c"
+                }
+            },
+            "end": "(\")",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.definition.string.end.c"
+                }
+            },
+            "contentName": "meta.embedded.inline.ca65",
+            "patterns": [
+                {
+                    "include": "#template"
+                }
+            ]
+        },
+        "template": {
+            "patterns": [
+                {
+                    "name": "constant.character.escape.c",
+                    "match": "\\\\."
+                },
+                {
+                    "comment": "'%%' is a literal '%' in the template, so '%%1010' is the binary literal %1010.",
+                    "name": "constant.numeric.ca65",
+                    "match": "%%[01]+\\b"
+                },
+                {
+                    "name": "constant.other.placeholder.c",
+                    "match": "%[bwlvogs%]"
+                },
+                {
+                    "comment": "A ';' comment runs to the closing quote, not to the end of the line.",
+                    "name": "comment.line.semicolon.ca65",
+                    "match": ";(?:[^\"\\\\]|\\\\.)*"
+                },
+                {
+                    "include": "source.ca65"
+                }
+            ]
+        }
+    }
+}
