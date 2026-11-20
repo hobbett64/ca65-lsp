@@ -206,6 +206,16 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         '  .assert 1, error, "ok"',
         '  lda #0',
         '  rts',
+        '.scope AliasScope',
+        'alias_first:',
+        '@tile = $10',
+        '  lda @tile',
+        '  rts',
+        'alias_second:',
+        '@tile = $20',
+        '  lda @tile ; second',
+        '  rts',
+        '.endscope',
         '.include "inc/',
         'tag_incomplete: .tag ',
         'sizeof_incomplete: .res .sizeof(Ent',
@@ -518,20 +528,56 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         });
         assert(enumScopeHover && enumScopeHover.contents.value.startsWith('enum **GameState**'), `Expected enum **GameState** header, got:\n${enumScopeHover && enumScopeHover.contents.value}`);
 
-        // 2. Hover: cheap local labels (@loop, @zp_top) & anonymous labels (:-, :+) do not show hovercards
+        // 2. Hover: cheap locals (@loop, @zp_top) show their qualified name; anonymous labels (:-, :+) show no hovercard
         const bneLocalLine = lines.findIndex(l => l.includes('bne @loop'));
         const localHover = await request('textDocument/hover', {
             textDocument: { uri: mainUri },
             position: { line: bneLocalLine, character: lines[bneLocalLine].indexOf('@loop') + 2 },
         });
-        assert.strictEqual(localHover, null, `Expected no hovercard for cheap local @loop, got:\n${localHover && localHover.contents.value}`);
+        assert.strictEqual(localHover && localHover.contents.value, '`CODE` PlayerUpdate**\u2060@loop**', `Unexpected hovercard for cheap local @loop:\n${localHover && localHover.contents.value}`);
 
         const zpTopLine = varsLines.findIndex(l => l.startsWith('@zp_top:'));
         const zpTopHover = await request('textDocument/hover', {
             textDocument: { uri: varsUri },
             position: { line: zpTopLine, character: 2 },
         });
-        assert.strictEqual(zpTopHover, null, `Expected no hovercard for cheap local @zp_top, got:\n${zpTopHover && zpTopHover.contents.value}`);
+        assert.strictEqual(zpTopHover && zpTopHover.contents.value, '`ZEROPAGE` **@zp\\_top** (1 byte)', `Unexpected hovercard for cheap local @zp_top:\n${zpTopHover && zpTopHover.contents.value}`);
+
+        // Cheap locals defined by assignment (@tile = $10) are not scope members:
+        // each routine resolves its own @tile, shown as routine@tile with its expression.
+        const aliasRefLine = lines.findIndex(l => l.includes('lda @tile ; second'));
+        const aliasDefLine = lines.findIndex(l => l === '@tile = $20');
+        const aliasHover = await request('textDocument/hover', {
+            textDocument: { uri: mainUri },
+            position: { line: aliasRefLine, character: lines[aliasRefLine].indexOf('@tile') + 2 },
+        });
+        assert.strictEqual(
+            aliasHover && aliasHover.contents.value,
+            'const AliasScope::alias\\_second**\u2060@tile** = `$20`',
+            `Unexpected hovercard for assigned cheap local @tile:\n${aliasHover && aliasHover.contents.value}`
+        );
+        const aliasRefCol = lines[aliasRefLine].indexOf('@tile');
+        assert.deepStrictEqual(aliasHover.range, {
+            start: { line: aliasRefLine, character: aliasRefCol },
+            end: { line: aliasRefLine, character: aliasRefCol + '@tile'.length },
+        });
+        const firstAliasRefLine = lines.findIndex(l => l === '  lda @tile');
+        const firstAliasHover = await request('textDocument/hover', {
+            textDocument: { uri: mainUri },
+            position: { line: firstAliasRefLine, character: lines[firstAliasRefLine].indexOf('@tile') + 2 },
+        });
+        assert.strictEqual(
+            firstAliasHover && firstAliasHover.contents.value,
+            'const AliasScope::alias\\_first**\u2060@tile** = `$10`',
+            `Expected the first routine's own @tile, got:\n${firstAliasHover && firstAliasHover.contents.value}`
+        );
+        const aliasDef = await request('textDocument/definition', {
+            textDocument: { uri: mainUri },
+            position: { line: aliasRefLine, character: lines[aliasRefLine].indexOf('@tile') + 2 },
+        });
+        const aliasDefLoc = Array.isArray(aliasDef) ? aliasDef[0] : aliasDef;
+        const aliasDefRange = aliasDefLoc && (aliasDefLoc.targetRange || aliasDefLoc.range);
+        assert(aliasDefRange && aliasDefRange.start.line === aliasDefLine, `Expected @tile definition on line ${aliasDefLine}, got ${JSON.stringify(aliasDef)}`);
 
         const bneAnonLine = lines.findIndex(l => l.includes('bne :-'));
         const prevAnonHover = await request('textDocument/hover', {
@@ -1200,6 +1246,16 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             'local_caller:',
             '  rts',
             '.endscope',
+            '/**',
+            ' * Intro<p>Second <i>para</i><br>line <code>lda #0</code>',
+            ' * <ol><li>one</li><li><strong>two</strong></li></ol>',
+            ' * Raw <x>, `<code>` and <https://example.com>',
+            ' * @param zp_counter - the counter',
+            ' * @return carry set when',
+            ' *   the counter wrapped',
+            ' */',
+            'param_link_sub:',
+            '  rts',
             '',
         ];
         const docLinkText = docLinkLines.join('\n');
@@ -1215,13 +1271,24 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         const subHoverMd = subHover.contents.value;
         assert(subHoverMd.includes(`Doc with [Player::init](${defsUri}#L`) && subHoverMd.includes(`and [Entity](${defsUri}#L`), `Expected JSDoc rendered as Markdown with inline links, got:\n${subHoverMd}`);
         assert(
-            subHoverMd.includes('\n\n*@param* {u8} count')
-            && subHoverMd.includes(`\n\n*@input* [zp\\_counter](${varsUri}#L`)
-            && subHoverMd.includes(`\n\n*@modifies* [bss\\_var](${varsUri}#L`)
-            && subHoverMd.includes(`, [ro\\_incbin](${varsUri}#L`)
-            && subHoverMd.includes(`\n\n*@see* [Player::hp](${defsUri}#L`)
+            subHoverMd.includes('\n\n*@param* {u8} `count`')
+            && subHoverMd.includes(`\n\n*@input* [\`zp_counter\`](${varsUri}#L4) \u2014 Held button counter`)
+            && subHoverMd.includes(`\n\n*@modifies* [\`bss_var\`](${varsUri}#L`)
+            && subHoverMd.includes(`), [\`ro_incbin\`](${varsUri}#L`) && subHoverMd.includes(') \u2014 Updated buffers')
+            && subHoverMd.includes(`\n\n*@see* [\`Player::hp\`](${defsUri}#L`) && subHoverMd.includes(') \u2014 health ref')
             && !subHoverMd.includes('/**') && !subHoverMd.includes('*See:*'),
             `Expected tag paragraphs with inline clickable links for resolved symbols, got:\n${subHoverMd}`
+        );
+        const paramLinkHover = await request('textDocument/hover', {
+            textDocument: { uri: docLinkTestUri },
+            position: { line: 25, character: 4 },
+        });
+        const paramLinkMd = paramLinkHover && paramLinkHover.contents && paramLinkHover.contents.value;
+        assert(
+            paramLinkMd && paramLinkMd.includes(`*@param* [\`zp_counter\`](${varsUri}#L`) && paramLinkMd.includes(') \u2014 the counter\n\n')
+            && paramLinkMd.includes('\n\n*@return*  \ncarry set when\nthe counter wrapped')
+            && paramLinkMd.includes('\n\nIntro\n\nSecond *para*\\\nline `lda #0`\n\n1. one\n1. **two**\n\nRaw \\<x>, `<code>` and <https://example.com>\n\n*@param*'),
+            `Expected a resolved @param name as a code-span link followed by an em dash, multi-line tag text on its own line, and doc HTML converted to Markdown, got:\n${paramLinkMd}`
         );
         assert(!subHoverMd.includes('[u8]') && !subHoverMd.includes('[Held]') && !subHoverMd.includes('[Updated]'), 'Unresolved types and trailing description words must not appear in *See:* links');
 

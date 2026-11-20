@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Changed
+- `/** ... */` doc comment tags render like VS Code's TypeScript hovers: the tag's targets (the name of `@param`/`@input`/`@output`, the symbols of `@see`/`@modifies`/`@uses`, the registers of `@clobbers`/`@preserves`) show as code, linked when they resolve to a symbol, followed by an em dash and the description (e.g. *@param* `count` — loop count). Tags without targets show the dash before their text (*@return* — carry set on error); text spanning several lines starts on its own line instead.
+- Doc tags (`@param`, `@see`, …) are only highlighted in `/** ... */` blocks at the start of a line (after the `*` gutter or right after `/**`), matching where hovers render them. `{symbol}` links are still highlighted in every comment.
+- Cheap locals show hovercards again: labels show their segment, parent-qualified name and size (e.g. `` `CODE` Gfx::drawSprite@exit ``); cheap locals defined by assignment show a `const` (or `var` for `.set`) badge and the expression they stand for (e.g. ``const Gfx::drawSprite@tile = `r0` ``).
+
+### Fixed
+- HTML tags in `/** ... */` doc comments (e.g. Javadoc's `<p>`) hid the rest of the paragraph in hovers. Common Javadoc HTML is now converted to Markdown (`<p>` paragraphs, `<br>` line breaks, `<b>`/`<strong>`, `<i>`/`<em>`, `<code>`, `<ul>`/`<ol>`/`<li>` lists) and any other tag is shown as written; code spans, fenced code and `<https://...>` links are unchanged.
+- Cheap locals defined by assignment (`@x = expr`, `@x := expr`, `@x .set expr`) were added to the enclosing scope as `Scope::@x`, so two routines defining the same `@x` resolved to one of them. They are now scoped between normal labels like `@x:` labels, with go to definition, references, rename, highlights and completion.
+
 ## [2.6.0] - 2026-11-20
 ### Added
 - `ca65.hoverDocs`: `any` (default) shows `/** ... */` blocks or `;` comments as hover documentation; `docBlocks` shows only `/** ... */` blocks.

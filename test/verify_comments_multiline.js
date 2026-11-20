@@ -550,7 +550,7 @@ function makeLspClient() {
             dsVal
             && dsVal.includes('\n\nDraws a sprite cleanly.\n\n**Important:** call inside NMI.\n- outer\n  - nested')
             && dsVal.includes('```ca65\n@loop:\n  dex\n```')
-            && dsVal.includes('*@param* A tile index\n\n*@param* dst - destination\n\n*@return* Carry set on error\n\n*@clobber* X, Y\n\n*@preserve* tmp0')
+            && dsVal.includes('\n\n*@param* `A` \u2014 tile index\n\n*@param* `dst` \u2014 destination\n\n*@return* \u2014 Carry set on error\n\n*@clobber* `X`, `Y`\n\n*@preserve* `tmp0`')
             && !dsVal.includes('/**') && !dsVal.includes('*/'),
             `Expected JSDoc rendered as Markdown for DrawSprite, got:\n${dsVal}`
         );
@@ -745,7 +745,7 @@ function makeLspClient() {
         assert(
             sigJsdoc
             && sigJsdoc.signatures[0].documentation
-            && sigJsdoc.signatures[0].documentation.value === 'Emits immediate byte.\n\n*@param* val byte to load',
+            && sigJsdoc.signatures[0].documentation.value === 'Emits immediate byte.\n\n*@param* `val` \u2014 byte to load',
             `Signature help should render /** ... */ comment as Markdown, got: ${JSON.stringify(sigJsdoc)}`
         );
 

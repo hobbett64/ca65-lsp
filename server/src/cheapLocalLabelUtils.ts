@@ -3,14 +3,18 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import { findCommentStart, isInBlockCommentBeforeLine, stripCommentsInLine } from './documentScanner';
 
 export const CHEAP_LOCAL_BOUNDARY_REGEX = /^\s*(?:[a-zA-Z_.][a-zA-Z0-9_@.]*:(?![:=<>+-])|\.(?:proc|struct|union)\b)/i;
-const CHEAP_LOCAL_DEF_LINE_REGEX = /^\s*(@[a-zA-Z0-9_@.]+):/;
+// A cheap local is defined as a label (`@name:`) or by assignment (`@name = expr`,
+// `@name := expr`, `@name .set expr`).
+const CHEAP_LOCAL_DEF_SUFFIX = '\\s*(?::|=|\\.set\\b)';
+const CHEAP_LOCAL_DEF_LINE_REGEX = new RegExp(`^\\s*(@[a-zA-Z0-9_@.]+)${CHEAP_LOCAL_DEF_SUFFIX}`, 'i');
 const CHEAP_LOCAL_TOKEN_REGEX = /(?<![a-zA-Z0-9_@.])@[a-zA-Z0-9_@.]+(?![a-zA-Z0-9_@.])/g;
 
 function escapeRegExp(str: string): string {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-export const CHEAP_LOCAL_DEF_REGEX = (name: string) => new RegExp(`^\\s*${escapeRegExp(name)}:`);
+export const CHEAP_LOCAL_DEF_REGEX = (name: string) =>
+    new RegExp(`^\\s*${escapeRegExp(name)}${CHEAP_LOCAL_DEF_SUFFIX}`, 'i');
 
 function extractCodeSlice(text: string, lineStart: number, lineEnd: number): string {
     const end = (lineEnd > lineStart && text.charCodeAt(lineEnd - 1) === 13) ? lineEnd - 1 : lineEnd;
@@ -77,10 +81,12 @@ function startsWithCheapLocalDef(text: string, lineStart: number, lineEnd: numbe
         p++;
     }
     if (p >= lineEnd || text.charCodeAt(p) !== 64) return false; // '@'
+    // Prefilter only: ':' (label or ':='), '=' or '.' (.set) before any ';'.
+    // CHEAP_LOCAL_DEF_LINE_REGEX confirms.
     for (let i = p + 1; i < lineEnd; i++) {
         const c = text.charCodeAt(i);
         if (c === 59) return false;
-        if (c === 58) return true;
+        if (c === 58 || c === 61 || c === 46) return true;
     }
     return false;
 }
@@ -203,7 +209,11 @@ export function findPreviousCheapLocalBoundary(document: TextDocument, startLine
     return findPreviousBoundaryFromOffset(text, document, startLine, bounds.start, bounds.end, text.indexOf('/*') !== -1).line;
 }
 
-function findCheapLocalLabelInText(text: string, document: TextDocument, position: Position): string | null {
+function findCheapLocalTokenInText(
+    text: string,
+    document: TextDocument,
+    position: Position
+): { name: string; range: Range } | null {
     const { start, end } = getLineBounds(text, document, position.line);
     const hasBlockComments = text.indexOf('/*') !== -1;
     const codeLine = extractMaskedCodeAtLine(text, document, position.line, start, end, hasBlockComments);
@@ -213,10 +223,43 @@ function findCheapLocalLabelInText(text: string, document: TextDocument, positio
         const matchStart = match.index;
         const matchEnd = matchStart + match[0].length;
         if (position.character >= matchStart && position.character <= matchEnd) {
-            return match[0];
+            return {
+                name: match[0],
+                range: Range.create(position.line, matchStart, position.line, matchEnd),
+            };
         }
     }
     return null;
+}
+
+function findCheapLocalLabelInText(text: string, document: TextDocument, position: Position): string | null {
+    return findCheapLocalTokenInText(text, document, position)?.name ?? null;
+}
+
+/**
+ * Returns the cheap local token under the cursor (name and range), or null if none.
+ */
+export function findCheapLocalTokenAtPosition(
+    document: TextDocument,
+    position: Position
+): { name: string; range: Range } | null {
+    return findCheapLocalTokenInText(document.getText(), document, position);
+}
+
+/**
+ * If the cheap local is defined by assignment on `codeLine` (`@x = expr`, `@x := expr`,
+ * `@x .set expr`), returns the operator and the expression text; null for a label (`@x:`).
+ */
+export function parseCheapLocalAssignment(
+    codeLine: string,
+    name: string
+): { operator: '=' | ':=' | '.set'; expression: string } | null {
+    const match = codeLine.match(new RegExp(`^\\s*${escapeRegExp(name)}\\s*(:=|=|\\.set\\b)(.*)$`, 'i'));
+    if (!match) {
+        return null;
+    }
+    const operator = match[1].toLowerCase() as '=' | ':=' | '.set';
+    return { operator, expression: match[2].trim() };
 }
 
 /**

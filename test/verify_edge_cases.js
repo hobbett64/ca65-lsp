@@ -28,7 +28,7 @@ Module._load = function (req) {
     return origLoad.apply(this, arguments);
 };
 
-const { findPreviousCheapLocalBoundary, getCheapLocalLabelDefinitions, findAllCheapLocalLabelReferences } =
+const { findPreviousCheapLocalBoundary, getCheapLocalLabelDefinitions, findAllCheapLocalLabelReferences, findCheapLocalLabelDefinition } =
     require(path.resolve(process.cwd(), 'server/out/cheapLocalLabelUtils.js'));
 const { makeIncludeEdit, makeImportEdit, makeExportEdit } =
     require(path.resolve(process.cwd(), 'server/out/editUtils.js'));
@@ -53,6 +53,30 @@ loadAllData({ console: { log() {}, error() {} } });
     const noBoundary = TextDocument.create('file:///test/cl2.s', 'ca65', 1, '\n\n@top:\n  bne @top\n');
     assert.strictEqual(findPreviousCheapLocalBoundary(noBoundary, 2), -1);
     assert.deepStrictEqual(getCheapLocalLabelDefinitions(noBoundary, { line: 3, character: 4 }), ['@top']);
+
+    // Cheap locals defined by assignment are scoped like labels: each routine has its own @x.
+    const assigned = TextDocument.create('file:///test/cl3.s', 'ca65', 1, [
+        'first:',          // 0
+        '@x = r0',         // 1
+        '@y := r1',        // 2
+        '@n .set 3',       // 3
+        '  lda @x',        // 4
+        '  lda @y',        // 5
+        '@done:',          // 6
+        '  rts',           // 7
+        'second:',         // 8
+        '@x = r2 ; other', // 9
+        '  lda @x',        // 10
+        '',
+    ].join('\n'));
+    assert.deepStrictEqual(getCheapLocalLabelDefinitions(assigned, { line: 4, character: 0 }), ['@x', '@y', '@n', '@done']);
+    assert.deepStrictEqual(getCheapLocalLabelDefinitions(assigned, { line: 10, character: 0 }), ['@x']);
+    const firstX = findAllCheapLocalLabelReferences(assigned, { line: 4, character: 7 });
+    assert.deepStrictEqual(firstX.map(l => l.range.start.line), [1, 4]);
+    const secondX = findAllCheapLocalLabelReferences(assigned, { line: 10, character: 7 });
+    assert.deepStrictEqual(secondX.map(l => l.range.start.line), [9, 10]);
+    const def = findCheapLocalLabelDefinition(assigned, { line: 10, character: 7 }, '@x');
+    assert.strictEqual(def.range.start.line, 9);
 }
 
 // 2. editUtils edge cases: comment-only file ending in \n, CRLF sorted insertion

@@ -1194,6 +1194,11 @@ class DocumentScanner {
         const nameIndex = skipWhitespace(text, 0, text.length);
         const definition = mapSpanToRange(segments, nameIndex, nameIndex + name.length);
         this.addReferences(text, segments, 0, this.currentScope);
+        if (name.startsWith('@')) {
+            // Cheap locals live between two normal labels, not in the enclosing
+            // scope, so they are resolved on demand like `@name:` labels.
+            return true;
+        }
         this.currentScope.addSymbol(name, definition, kind, segment);
         return true;
     }

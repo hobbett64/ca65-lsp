@@ -13,7 +13,8 @@
                 "0": { "name": "punctuation.definition.comment.ca65" }
             },
             "patterns": [
-                { "include": "#jsdoc-tags" }
+                { "include": "#jsdoc-tags" },
+                { "include": "#comment-symbol-links" }
             ]
         },
         {
@@ -27,7 +28,7 @@
                 "0": { "name": "punctuation.definition.comment.ca65" }
             },
             "patterns": [
-                { "include": "#jsdoc-tags" }
+                { "include": "#comment-symbol-links" }
             ]
         },
         {
@@ -36,7 +37,7 @@
             "captures": {
                 "0": {
                     "patterns": [
-                        { "include": "#jsdoc-tags" }
+                        { "include": "#comment-symbol-links" }
                     ]
                 }
             }
@@ -209,7 +210,7 @@
         "jsdoc-tags": {
             "patterns": [
                 {
-                    "match": "(?i)(?<!\\S)((@)(?:param|arg|argument|input|in|output|out))\\b(?:[ \\t]+(\\{[^}]+\\}))?(?:[ \\t]+((?:[^\\s*]|\\*(?!/))+))?",
+                    "match": "(?i)(?:^[ \\t]*(?:\\*(?!/)[ \\t]*)?|\\G[ \\t]*)((@)(?:param|arg|argument|input|in|output|out))\\b(?:[ \\t]+(\\{[^}]+\\}))?(?:[ \\t]+((?:[^\\s*]|\\*(?!/))+))?",
                     "captures": {
                         "1": { "name": "storage.type.class.jsdoc" },
                         "2": { "name": "punctuation.definition.block.tag.jsdoc" },
@@ -218,7 +219,7 @@
                     }
                 },
                 {
-                    "begin": "(?i)(?<!\\S)((@)(?:clobbers?|preserves?))\\b",
+                    "begin": "(?i)(?:^[ \\t]*(?:\\*(?!/)[ \\t]*)?|\\G[ \\t]*)((@)(?:clobbers?|preserves?))\\b",
                     "end": "(?=$|\\*/|[ \\t]+[-–—]|[:(])",
                     "beginCaptures": {
                         "1": { "name": "storage.type.class.jsdoc" },
@@ -232,7 +233,7 @@
                     ]
                 },
                 {
-                    "match": "(?i)(?<!\\S)((@)(?:see|modifies|uses))\\b(?:[ \\t]+((?:\\{?(?:::)?[a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*\\}?)(?:[ \\t]*,[ \\t]*(?:\\{?(?:::)?[a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*\\}?))*))?",
+                    "match": "(?i)(?:^[ \\t]*(?:\\*(?!/)[ \\t]*)?|\\G[ \\t]*)((@)(?:see|modifies|uses))\\b(?:[ \\t]+((?:\\{?(?:::)?[a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*\\}?)(?:[ \\t]*,[ \\t]*(?:\\{?(?:::)?[a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*\\}?))*))?",
                     "captures": {
                         "1": { "name": "storage.type.class.jsdoc" },
                         "2": { "name": "punctuation.definition.block.tag.jsdoc" },
@@ -240,12 +241,16 @@
                     }
                 },
                 {
-                    "match": "(?i)(?<!\\S)((@)(?:returns?|throws|deprecated|since|author|note|warning|example|todo|brief|details))\\b",
+                    "match": "(?i)(?:^[ \\t]*(?:\\*(?!/)[ \\t]*)?|\\G[ \\t]*)((@)(?:returns?|throws|deprecated|since|author|note|warning|example|todo|brief|details))\\b",
                     "captures": {
                         "1": { "name": "storage.type.class.jsdoc" },
                         "2": { "name": "punctuation.definition.block.tag.jsdoc" }
                     }
-                },
+                }
+            ]
+        },
+        "comment-symbol-links": {
+            "patterns": [
                 {
                     "match": "(\\{)(?:((@)link)[ \\t]+)?((?:::)?[a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)*)(\\})",
                     "captures": {

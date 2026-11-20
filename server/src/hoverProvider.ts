@@ -22,7 +22,13 @@ import {
 import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializationGate, performanceMonitor, symbolTables } from './server';
 import { getCachedTextDocument } from './documentCache';
 import { evaluateConstantEntity, evaluateLabelSize, evaluateLocationLabelSize, evaluateStructFieldBadge } from './instructionAnalyzer';
-import { findPreviousCheapLocalBoundary, getCheapLocalScopeEndLine } from './cheapLocalLabelUtils';
+import {
+    findCheapLocalLabelDefinition,
+    findCheapLocalTokenAtPosition,
+    findPreviousCheapLocalBoundary,
+    getCheapLocalScopeEndLine,
+    parseCheapLocalAssignment,
+} from './cheapLocalLabelUtils';
 import { findNumberLiteralAtPosition, NumberLiteralHit } from './codeActionProvider';
 import { getWorkspaceRelativePath } from './pathUtils';
 import { maskCommentsAtDocumentLine, stripCommentsInLine } from './documentScanner';
@@ -49,6 +55,31 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
         }
 
         const settings = await getDocumentSettings(textDocument.uri);
+
+        // Cheap locals (@name) aren't in the symbol table: they're resolved within the
+        // span between the surrounding normal labels.
+        const cheapToken = findCheapLocalTokenAtPosition(document, position);
+        if (cheapToken) {
+            const cheapDef = findCheapLocalLabelDefinition(document, position, cheapToken.name);
+            if (!cheapDef) {
+                return undefined;
+            }
+            return {
+                contents: {
+                    kind: MarkupKind.Markdown,
+                    value: generateCheapLocalHoverMarkdown(
+                        cheapToken.name,
+                        cheapDef.range,
+                        document,
+                        symbolTable,
+                        settings.implicitImports,
+                        settings.binIncludeDirs,
+                        settings
+                    ),
+                },
+                range: cheapToken.range,
+            };
+        }
 
         const ref = symbolTable.getReferenceAtPosition(position);
         if (ref) {
@@ -367,7 +398,11 @@ export function renderDefinitionDocMarkdown(
 
 /**
  * Converts a `/** ... *\/` block into Markdown: strips the delimiters and `*` gutter, turns
- * `{symbol}` / `{@link symbol}` / tag targets into links, and gives each `@tag` its own paragraph.
+ * `{symbol}` / `{@link symbol}` / tag targets into links, and renders each `@tag` as its own paragraph in VS Code's TypeScript hover style.
+ * @param docCommentBlock the raw comment text, including the opening and closing delimiters
+ * @param context where the comment's symbol is defined, used to resolve symbol links; omit it to skip linking
+ * @returns the Markdown for the hover, or an empty string if the comment has no text
+ * @see formatDocCommentForHover
  */
 export function formatJsDocForHover(docCommentBlock: string, context?: DocCommentFormatContext): string {
     let lines = docCommentBlock.split(/\r?\n/);
@@ -381,7 +416,7 @@ export function formatJsDocForHover(docCommentBlock: string, context?: DocCommen
     if (common > 0) {
         lines = lines.map((line, idx) => idx === 0 ? line : line.slice(Math.min(common, line.match(/^[ \t]*/)![0].length)));
     }
-    lines = lines.map(line => line.trimEnd());
+    lines = convertDocCommentHtml(lines.map(line => line.trimEnd()));
     while (lines.length > 0 && !lines[0]) lines.shift();
     while (lines.length > 0 && !lines[lines.length - 1]) lines.pop();
     if (lines.length === 0) return '';
@@ -389,7 +424,7 @@ export function formatJsDocForHover(docCommentBlock: string, context?: DocCommen
     const out: string[] = [];
     let inFence = false;
     for (let i = 0; i < lines.length; i++) {
-        let line = lines[i];
+        const line = lines[i];
         if (/^\s*(```|~~~)/.test(line)) {
             inFence = !inFence;
             out.push(line);
@@ -399,15 +434,129 @@ export function formatJsDocForHover(docCommentBlock: string, context?: DocCommen
             out.push(line);
             continue;
         }
-        line = linkCommentSymbols(line, i, context);
-        const tagMatch = /^(\s*)@([a-zA-Z]+)\b/.exec(line);
-        if (tagMatch) {
-            if (out.length > 0 && out[out.length - 1] !== '') out.push('');
-            line = `${tagMatch[1]}*@${tagMatch[2]}*${line.slice(tagMatch[0].length)}`;
+        if (!JSDOC_TAG_LINE_RE.test(line)) {
+            out.push(linkCommentSymbols(line, i, context));
+            continue;
         }
-        out.push(line);
+        // A tag's text runs on until a blank line, the next tag or a code fence.
+        const continuation: string[] = [];
+        while (i + 1 < lines.length && lines[i + 1].trim() && !JSDOC_TAG_LINE_RE.test(lines[i + 1]) && !/^\s*(```|~~~)/.test(lines[i + 1])) {
+            i++;
+            continuation.push(linkCommentSymbols(lines[i].trim(), i, context));
+        }
+        // Each tag is its own paragraph, styled like VS Code's TypeScript hovers.
+        if (out.length > 0 && out[out.length - 1] !== '') out.push('');
+        out.push(formatJsDocTag(line, i - continuation.length, continuation, context));
     }
     return out.join('\n');
+}
+
+const JSDOC_TAG_LINE_RE = /^\s*@[a-zA-Z]+\b/;
+
+/**
+ * Converts the HTML commonly written in Javadoc-style comments (`<p>`, `<br>`, `<b>`/`<strong>`,
+ * `<i>`/`<em>`, `<code>`, `<ul>`/`<ol>`/`<li>`) to Markdown, and escapes any other tag so it shows
+ * as written: raw HTML isn't rendered in hovers, and a line starting with an HTML tag would hide
+ * everything up to the next blank line. Code spans, fenced code and `<https://...>` autolinks are
+ * left alone.
+ */
+function convertDocCommentHtml(lines: string[]): string[] {
+    const out: string[] = [];
+    const fenced = new Set<number>();
+    let inFence = false;
+    const lists: string[] = [];
+    const convert = (text: string): string => text
+        .replace(/<\/?p(?:\s[^>]*)?>/gi, '\n\n')
+        .replace(/<br\s*\/?>/gi, '\\\n')
+        .replace(/<\/?(?:b|strong)>/gi, '**')
+        .replace(/<\/?(?:i|em)>/gi, '*')
+        .replace(/<\/?code>/gi, '`')
+        .replace(/<(\/?)(ul|ol|li)(?:\s[^>]*)?>/gi, (_m, close: string, tag: string) => {
+            const name = tag.toLowerCase();
+            if (name === 'li') return close ? '' : `\n${lists[lists.length - 1] === 'ol' ? '1.' : '-'} `;
+            if (close) lists.pop();
+            else lists.push(name);
+            return '\n\n';
+        })
+        .replace(/<(?=[a-zA-Z/!?])(?![a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^\s<>]*>)/g, '\\<');
+    for (const line of lines) {
+        if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
+        if (inFence || /^\s*(```|~~~)/.test(line)) {
+            fenced.add(out.length);
+            out.push(line);
+            continue;
+        }
+        const converted = line.split(/(`+[^`]*`+)/).map((part, idx) => idx % 2 === 1 ? part : convert(part)).join('');
+        converted.split('\n').forEach((segment, idx) => out.push(idx === 0 ? segment.trimEnd() : segment.trim()));
+    }
+    // Tidy up: no hard break (`\`) right before a paragraph end, and no runs of blank lines.
+    return out
+        .map((line, idx) => !fenced.has(idx) && line.endsWith('\\') && !out[idx + 1]?.trim() ? line.slice(0, -1).trimEnd() : line)
+        .filter((line, idx) => fenced.has(idx) || line !== '' || (idx > 0 && out[idx - 1] !== ''));
+}
+
+const JSDOC_SINGLE_TARGET_TAGS = new Set(['param', 'arg', 'argument', 'template', 'input', 'in', 'output', 'out']);
+const JSDOC_LIST_TARGET_TAGS = new Set(['see', 'modifies', 'uses']);
+const JSDOC_REGISTER_TAGS = new Set(['clobber', 'clobbers', 'preserve', 'preserves']);
+const JSDOC_TARGET_ITEM = String.raw`\{?[^\s,{}]+\}?`;
+
+/**
+ * Splits a tag's text into its targets (a parameter name, a symbol list or registers, matching
+ * the tags `extractCommentSymbolTokensInLine` links) and its description. Returns null for tags
+ * that take no target, such as `@return`.
+ */
+function splitJsDocTagTargets(tag: string, body: string): { type: string; names: string[]; description: string } | null {
+    const lower = tag.toLowerCase();
+    let m: RegExpExecArray | null = null;
+    if (JSDOC_SINGLE_TARGET_TAGS.has(lower)) {
+        m = new RegExp(String.raw`^(\s+\{[^}]*\})?\s+(${JSDOC_TARGET_ITEM})(?:\s+(?:[-\u2013\u2014]\s+)?(.*))?$`).exec(body);
+    } else if (JSDOC_LIST_TARGET_TAGS.has(lower)) {
+        m = new RegExp(String.raw`^()\s+(${JSDOC_TARGET_ITEM}(?:\s*,\s*${JSDOC_TARGET_ITEM})*)(?:\s+(?:[-\u2013\u2014]\s+)?(.*))?$`).exec(body);
+    } else if (JSDOC_REGISTER_TAGS.has(lower)) {
+        // Registers run until ` - `, `:` or `(`, as in `@clobbers A, X - used as temps`.
+        const stop = /\s+[-\u2013\u2014]\s+|\s*:\s*|\s*(?=\()/.exec(body);
+        const targets = stop ? body.slice(0, stop.index) : body;
+        if (targets.trim()) m = ['', '', targets, stop ? body.slice(stop.index + stop[0].length) : ''] as unknown as RegExpExecArray;
+    }
+    if (!m) return null;
+    const names = m[2].split(/[\s,]+/).filter(Boolean).map(n => n.replace(/^\{|\}$/g, ''));
+    return { type: m[1] ?? '', names, description: m[3] ?? '' };
+}
+
+/**
+ * Renders one tag the way VS Code's TypeScript hover does: the tag name in italics, any targets
+ * as code (linked when they resolve to a symbol), then ` — description`, or the description on
+ * its own line when it spans several lines.
+ */
+function formatJsDocTag(line: string, lineIndex: number, continuation: string[], context?: DocCommentFormatContext): string {
+    const [, indent, tag, body] = /^(\s*)@([a-zA-Z]+)\b(.*)$/.exec(line)!;
+    let head = `${indent}*@${tag}*`;
+    let firstLine = body;
+    const split = splitJsDocTagTargets(tag, body);
+    if (split) {
+        const names = split.names.map(name => {
+            const target = resolveCommentLinkTarget(name, context);
+            return target ? `[\`${name}\`](${target})` : `\`${name}\``;
+        });
+        head += `${linkCommentSymbols(split.type, lineIndex, context)} ${names.join(', ')}`;
+        firstLine = split.description;
+    }
+    const text = [linkCommentSymbols(firstLine.trim(), lineIndex, context), ...continuation].filter(Boolean).join('\n');
+    if (!text) return head;
+    return text.includes('\n') ? `${head}  \n${text}` : `${head} \u2014 ${text}`;
+}
+
+function resolveCommentLinkTarget(rawName: string, context?: DocCommentFormatContext): string | undefined {
+    if (!context || !symbolTables || !includesGraph) return undefined;
+    const resolved = resolveCommentSymbol(
+        context.uri,
+        { line: context.line, character: 0 },
+        rawName,
+        symbolTables,
+        includesGraph,
+        Boolean(context.implicitImports)
+    );
+    return resolved ? `${resolved.uri}#L${resolved.definition.start.line + 1}` : undefined;
 }
 
 function linkCommentSymbols(line: string, lineIndex: number, context?: DocCommentFormatContext): string {
@@ -415,16 +564,9 @@ function linkCommentSymbols(line: string, lineIndex: number, context?: DocCommen
     const hits = extractCommentSymbolTokensInLine(line, lineIndex);
     for (let h = hits.length - 1; h >= 0; h--) {
         const hit = hits[h];
-        const resolved = resolveCommentSymbol(
-            context.uri,
-            { line: context.line, character: 0 },
-            hit.rawName,
-            symbolTables,
-            includesGraph,
-            Boolean(context.implicitImports)
-        );
-        if (!resolved) continue;
-        const link = `[${escapeInlineMarkdown(hit.rawName)}](${resolved.uri}#L${resolved.definition.start.line + 1})`;
+        const target = resolveCommentLinkTarget(hit.rawName, context);
+        if (!target) continue;
+        const link = `[${escapeInlineMarkdown(hit.rawName)}](${target})`;
         const braced = line[hit.hitStartChar] === '{';
         const start = braced ? hit.hitStartChar : hit.range.start.character;
         const end = braced ? hit.hitEndChar : hit.range.end.character;
@@ -635,8 +777,31 @@ export function generateCheapLocalHoverMarkdown(
     docOptions: DocCommentOptions = {}
 ): string {
     const defLine = defRange.start.line;
-    const segment = getEffectiveSegmentAtLine(symbolTable, defLine);
     const signatureMarkdown = formatCheapLocalMarkdownName(label, document, defLine, symbolTable);
+
+    // Assigned (@x = r0): show it like a constant, with the expression it stands for.
+    const assignment = parseCheapLocalAssignment(
+        maskCommentsAtDocumentLine(document, defLine, undefined, docOptions.cComments),
+        label
+    );
+    if (assignment) {
+        const trailingParts = assignment.expression
+            ? [`${assignment.operator === '.set' ? '.set' : '='} \`${assignment.expression.replace(/`/g, '\\`')}\``]
+            : [];
+        return assembleEntityHoverMarkdown(
+            {
+                badges: [assignment.operator === '.set' ? 'var' : 'const'],
+                signatureMarkdown,
+                trailingParts,
+            },
+            defLine,
+            document,
+            implicitImports,
+            docOptions
+        );
+    }
+
+    const segment = getEffectiveSegmentAtLine(symbolTable, defLine);
     const endLine = getCheapLocalScopeEndLine(document, defLine);
     const resolvedSize = evaluateLocationLabelSize(
         defRange,
