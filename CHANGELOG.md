@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-11-20
+### Added
+- `ca65.hoverDocs`: `any` (default) shows `/** ... */` blocks or `;` comments as hover documentation; `docBlocks` shows only `/** ... */` blocks.
+
+### Changed
+- Anonymous label index hints now sit just left of the colon, without parentheses: `1:` on declarations, `1:-` / `2:++` on references.
+- Hover doc comments: a `/** ... */` block above a definition is rendered as Markdown (delimiters and `*` gutter stripped, each `@tag` in its own paragraph, `{symbol}` / `{@link symbol}` / tag targets as inline links instead of a *See:* line). Without one, the `;` comments above are shown verbatim (including the `;` markers) followed by a divider and the definition line's trailing `;` comment. Applies to hovers, completion details, and macro signature help.
+
 ## [2.5.0] - 2026-11-18
 ### Added
 - Hovers of imports provided by the cc65 runtime library (`pusha`, `popax`, `incsp2`, `sp`, `tmp1`, ...) are tagged `cc65 runtime`.

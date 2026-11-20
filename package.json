@@ -3,7 +3,7 @@
     "description": "ca65 Assembly language support for VS Code",
     "author": "Quang Luong",
     "license": "MIT",
-    "version": "2.5.0",
+    "version": "2.6.0",
     "publisher": "hobbett",
     "repository": {
         "type": "git",
@@ -232,23 +232,34 @@
                     "default": true,
                     "order": 19
                 },
+                "ca65.hoverDocs": {
+                    "type": "string",
+                    "enum": ["any", "docBlocks"],
+                    "enumDescriptions": [
+                        "A `/** ... */` block above the definition (as Markdown) if there is one, otherwise the `;` comments directly above it and the trailing `;` comment on its line (verbatim, split by a divider).",
+                        "Only `/** ... */` blocks above the definition, rendered as Markdown. Requires `#ca65.cComments#`."
+                    ],
+                    "default": "any",
+                    "order": 20,
+                    "markdownDescription": "Which comments are shown as a symbol's documentation in hovers, completion details, and signature help."
+                },
                 "ca65.linkerConfig": {
                     "type": "string",
                     "description": "Path to an ld65 linker configuration (.cfg) file (absolute or workspace-relative) used for `.segment` completions, hover details, go-to-definition, segment type resolution, and unknown-segment warnings.",
                     "default": "",
-                    "order": 20
+                    "order": 21
                 },
                 "ca65.enableCSupport": {
                     "type": "boolean",
                     "default": false,
-                    "order": 21,
+                    "order": 22,
                     "markdownDescription": "(Work in progress) **cc65 C mode**: C support for mixed C/assembly cc65 projects. Runs clangd for the workspace's C files (configured for the cc65 dialect) and links C and assembly symbols (`foo` in C ↔ `_foo` in assembly), with cc65 diagnostics, inline assembly support, and the generated assembly view. Requires clangd (and cc65 for diagnostics and the assembly view). If you use another C extension (clangd, C/C++), disable it for cc65 workspaces, or C files will get results from both."
                 },
                 "ca65.cc65.executablePath": {
                     "type": "string",
                     "description": "(Work in progress) Path to the cc65 C compiler, used for C diagnostics (instead of clangd's), the generated assembly view, and to locate cc65's headers. If unset, cc65 is resolved from PATH (or next to `ca65.executablePath`).",
                     "default": "",
-                    "order": 22
+                    "order": 23
                 },
                 "ca65.cc65.target": {
                     "type": "string",
@@ -322,7 +333,7 @@
                     ],
                     "description": "(Work in progress) cc65 target system (`cc65 -t`) used when compiling C files for diagnostics and the generated assembly view: it selects the target's predefined macros (e.g. `__C64__`, `__NES__`), CPU, and string character set. The target macros are also defined for clangd. Defaults to `c64`, like cc65 without `-t`.",
                     "default": "c64",
-                    "order": 23
+                    "order": 24
                 },
                 "ca65.cc65.additionalArgs": {
                     "type": "array",
@@ -331,13 +342,13 @@
                     },
                     "default": [],
                     "description": "(Work in progress) Additional command-line arguments passed to cc65 for C diagnostics and the generated assembly view, e.g. `[\"-Oirs\"]` or `[\"--code-name\", \"BANK1\"]`, to match your build. Output and dependency-file options are ignored.",
-                    "order": 24
+                    "order": 25
                 },
                 "ca65.clangd.path": {
                     "type": "string",
                     "description": "(Work in progress) Path to the clangd executable. If unset, clangd is resolved from PATH.",
                     "default": "",
-                    "order": 25
+                    "order": 26
                 },
                 "ca65.clangd.arguments": {
                     "type": "array",
@@ -346,7 +357,7 @@
                     },
                     "description": "(Work in progress) Additional command-line arguments passed to clangd.",
                     "default": [],
-                    "order": 26
+                    "order": 27
                 },
                 "ca65.clangd.compileFlags": {
                     "type": "array",
@@ -355,13 +366,13 @@
                     },
                     "description": "(Work in progress) Additional compiler flags for C files, e.g. target defines such as `\"-D__C64__\"` or extra include paths. Used in the generated compile database and as clangd's fallback flags.",
                     "default": [],
-                    "order": 27
+                    "order": 28
                 },
                 "ca65.clangd.cc65IncludeDir": {
                     "type": "string",
                     "description": "(Work in progress) cc65's C include directory (the one containing cc65's `stdio.h`). If unset, it is located from CC65_INC, CC65_HOME, or the cc65 installation next to the ca65 executable.",
                     "default": "",
-                    "order": 28
+                    "order": 29
                 },
                 "ca65.enableCa65StdErrDiagnostics": {
                     "type": "boolean",

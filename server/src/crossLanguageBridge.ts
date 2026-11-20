@@ -165,7 +165,7 @@ export function initializeCrossLanguageBridge(connection: _Connection, documents
             if (defDoc) {
                 const settings = await getDocumentSettings(definition.uri);
                 hoverMarkdown = generateSymbolTableEntityMarkdown(
-                    definition, defDoc, settings.implicitImports, settings.binIncludeDirs
+                    definition, defDoc, settings.implicitImports, settings.binIncludeDirs, settings
                 );
             }
         }

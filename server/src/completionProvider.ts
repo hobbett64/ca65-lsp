@@ -32,9 +32,8 @@ import {
 import { isAutoIncludable, makeImportEdit, makeIncludeEdit } from './editUtils';
 import { getCachedTextDocument } from './documentCache';
 import {
-    extractLeadingDocInfo,
-    formatDocCommentForHover,
     formatSourceLink,
+    renderDefinitionDocMarkdown,
     generateCheapLocalHoverMarkdown,
     generateDirectiveHoverMarkdown,
     generateMnemonicHoverMarkdown,
@@ -779,7 +778,8 @@ export function initializeCompletionProvider(connection: _Connection, documents:
                                 targetDoc,
                                 targetTable,
                                 settings.implicitImports,
-                                settings.binIncludeDirs
+                                settings.binIncludeDirs,
+                                settings
                             ),
                         };
                     } else {
@@ -791,21 +791,19 @@ export function initializeCompletionProvider(connection: _Connection, documents:
                                     targetEntity,
                                     targetDoc,
                                     settings.implicitImports,
-                                    settings.binIncludeDirs
+                                    settings.binIncludeDirs,
+                                    settings
                                 ),
                             };
                         } else {
-                            const { docCommentBlock } = extractLeadingDocInfo(targetDoc, data.targetLine);
                             const parts = [`\`\`\`ca65\n${data.targetName || ''}\n\`\`\``];
-                            if (docCommentBlock) {
-                                const renderedDoc = formatDocCommentForHover(docCommentBlock, {
-                                    uri: data.targetUri,
-                                    line: data.targetLine,
-                                    implicitImports: settings.implicitImports,
-                                });
-                                if (renderedDoc) {
-                                    parts.push(renderedDoc);
-                                }
+                            const renderedDoc = renderDefinitionDocMarkdown(targetDoc, data.targetLine, {
+                                implicitImports: settings.implicitImports,
+                                cComments: settings.cComments,
+                                hoverDocs: settings.hoverDocs,
+                            });
+                            if (renderedDoc) {
+                                parts.push(renderedDoc);
                             }
                             parts.push(`Defined in ${formatSourceLink(data.targetUri, data.targetLine + 1)}`);
                             item.documentation = {

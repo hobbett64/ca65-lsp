@@ -173,7 +173,15 @@ export interface Ca65Settings {
     enableInstructionHover: boolean;
     enableDirectiveHover: boolean;
     linkerConfig: string;
+    hoverDocs: HoverDocsMode;
 }
+
+/**
+ * Which comments attached to a definition are shown as its documentation in hovers:
+ * - `any`: a `/** ... *\/` block if present, otherwise the `;` comments above plus the trailing `;` comment.
+ * - `docBlocks`: only `/** ... *\/` blocks (needs `cComments`).
+ */
+export type HoverDocsMode = 'any' | 'docBlocks';
 
 /**
  * Resolves raw workspace configuration into a single normalized settings object.
@@ -206,6 +214,7 @@ export function resolveCa65Settings(raw: unknown): Ca65Settings {
         enableInstructionHover: typeof rawObj.enableInstructionHover === 'boolean' ? rawObj.enableInstructionHover : true,
         enableDirectiveHover: typeof rawObj.enableDirectiveHover === 'boolean' ? rawObj.enableDirectiveHover : true,
         linkerConfig: typeof rawObj.linkerConfig === 'string' ? rawObj.linkerConfig.trim() : '',
+        hoverDocs: rawObj.hoverDocs === 'docBlocks' ? 'docBlocks' : 'any',
         smartFolding: typeof rawObj.smartFolding === 'boolean' ? rawObj.smartFolding : true,
         autoIncludeExtensions: Array.isArray(rawObj.autoIncludeExtensions)
             ? cleanStringArray(rawObj.autoIncludeExtensions)

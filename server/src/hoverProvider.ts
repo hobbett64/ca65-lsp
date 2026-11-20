@@ -11,7 +11,7 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import { URI } from 'vscode-uri';
 
 import { getMnemonicInfo, isCc65RuntimeSymbol, MnemonicInfo, MnemonicModeInfo, resolveDirectiveAlias } from './dataManager';
-import { Ca65Cpu } from './settings';
+import { Ca65Cpu, HoverDocsMode } from './settings';
 import { Import, isLabelSymbolKind, Macro, MacroKind, Scope, ScopeKind, Symbol as Ca65Symbol, SymbolKind as Ca65SymbolKind, SymbolTable, SymbolTableEntity } from './symbolTable';
 import {
     extractCommentSymbolTokensInLine,
@@ -25,7 +25,7 @@ import { evaluateConstantEntity, evaluateLabelSize, evaluateLocationLabelSize, e
 import { findPreviousCheapLocalBoundary, getCheapLocalScopeEndLine } from './cheapLocalLabelUtils';
 import { findNumberLiteralAtPosition, NumberLiteralHit } from './codeActionProvider';
 import { getWorkspaceRelativePath } from './pathUtils';
-import { maskCommentsAtDocumentLine } from './documentScanner';
+import { maskCommentsAtDocumentLine, stripCommentsInLine } from './documentScanner';
 import {
     findSegmentDirectiveAtPosition,
     formatLinkerSegmentMarkdown,
@@ -74,7 +74,8 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
                             foundEntity,
                             definitionDocument,
                             defSettings.implicitImports,
-                            defSettings.binIncludeDirs
+                            defSettings.binIncludeDirs,
+                            defSettings
                         )
                     },
                     range: ref.location
@@ -111,7 +112,8 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
                                 commentEntity,
                                 definitionDocument,
                                 defSettings.implicitImports,
-                                defSettings.binIncludeDirs
+                                defSettings.binIncludeDirs,
+                                defSettings
                             ),
                         },
                         range: commentHit.range,
@@ -196,11 +198,15 @@ export interface DocCommentFormatContext {
  * and appends clickable Markdown links for any resolved `{symbol}` / `{@link symbol}` / `@see` targets.
  */
 export function formatDocCommentForHover(
-    docCommentBlock: string,
+    docCommentBlocks: string | string[],
     context?: DocCommentFormatContext
 ): string {
-    if (!docCommentBlock || /^\/\*+\s*\*\/$/.test(docCommentBlock.trim())) return '';
-    const codeFence = '```ca65\n' + docCommentBlock + '\n```';
+    const blocks = (Array.isArray(docCommentBlocks) ? docCommentBlocks : [docCommentBlocks])
+        .filter(block => block && !/^\/\*+\s*\*\/$/.test(block.trim()));
+    if (blocks.length === 0) return '';
+    // Several blocks (comments above, trailing comment) get their own fences, split by a horizontal rule.
+    const codeFence = blocks.map(block => '```ca65\n' + block + '\n```').join('\n\n---\n\n');
+    const docCommentBlock = blocks.join('\n');
     if (!context || !symbolTables || !includesGraph) {
         return codeFence;
     }
@@ -236,93 +242,195 @@ export function formatDocCommentForHover(
     return `${codeFence}\n\n*See:* ${seeLinks.join(', ')}`;
 }
 
-export function extractLeadingDocInfo(document: TextDocument, definitionLine: number): {
+export interface LeadingDocInfo {
+    /** Raw doc comment text: a `/** ... *\/` block when C comments are on, otherwise the touching `;` lines. */
     docCommentBlock: string;
+    /** Trailing `;` comment on the definition line itself (not collected for a `/** ... *\/` block). */
+    inlineComment: string;
+    /** True when `docCommentBlock` is a JSDoc-style `/** ... *\/` block (rendered as Markdown). */
+    isJsDoc: boolean;
     hasInlineExport: boolean;
-} {
-    const rawCommentLines: string[] = [];
+}
+
+/** Settings that decide which comments become hover documentation. */
+export interface DocCommentOptions {
+    cComments?: boolean;
+    hoverDocs?: HoverDocsMode;
+}
+
+/**
+ * Collects the documentation attached to a definition:
+ * - a `/** ... *\/` block directly above the definition (needs `cComments`), otherwise
+ * - unless `hoverDocs` is `docBlocks`, the contiguous `;` comment lines directly above plus the trailing
+ *   `;` comment on the definition line, all verbatim (dividers and bare `;` lines included).
+ * In both cases a single `.export` / `.exportzp` line may sit between the doc and the definition.
+ */
+export function extractLeadingDocInfo(
+    document: TextDocument,
+    definitionLine: number,
+    options: DocCommentOptions = {}
+): LeadingDocInfo {
+    const cComments = options.cComments ?? true;
+    const getLine = (i: number) => document.getText({
+        start: { line: i, character: 0 },
+        end: { line: i + 1, character: 0 }
+    }).replace(/\r?\n$/, '').trimEnd();
+
     let hasInlineExport = false;
-    let inBlockDoc = false;
-
-    for (let i = definitionLine - 1; i >= 0; i--) {
-        const lineText = document.getText({
-            start: { line: i, character: 0 },
-            end: { line: i + 1, character: 0 }
-        });
-
-        const rawNoEol = lineText.replace(/\r?\n$/, '').trimEnd();
-        const trimmedLine = rawNoEol.trimStart();
-        if (inBlockDoc) {
-            rawCommentLines.unshift(rawNoEol);
-            const openIdx = rawNoEol.indexOf('/*');
-            if (openIdx >= 0) {
-                // Reject trailing block comments attached to an earlier code line
-                const prefix = rawNoEol.slice(0, openIdx);
-                if (prefix.trim().length > 0) {
-                    rawCommentLines.length = 0;
-                } else if (openIdx > 0) {
-                    for (let j = 0; j < rawCommentLines.length; j++) {
-                        let strip = 0;
-                        while (strip < openIdx && strip < rawCommentLines[j].length && (rawCommentLines[j][strip] === ' ' || rawCommentLines[j][strip] === '\t')) {
-                            strip++;
-                        }
-                        if (strip > 0) {
-                            rawCommentLines[j] = rawCommentLines[j].slice(strip);
-                        }
-                    }
-                }
-                break;
-            }
-            continue;
-        }
-
-        if (rawCommentLines.length === 0 && trimmedLine.endsWith('*/')) {
-            const openIdx = rawNoEol.indexOf('/*');
-            if (openIdx >= 0) {
-                if (rawNoEol.slice(0, openIdx).trim().length === 0) {
-                    rawCommentLines.unshift(trimmedLine);
-                }
-                break;
-            }
-            rawCommentLines.unshift(rawNoEol);
-            inBlockDoc = true;
-            continue;
-        }
-
-        if (trimmedLine.startsWith(';')) {
-            rawCommentLines.unshift(trimmedLine);
-            continue;
-        }
-
-        // Allow an .export / .exportzp between the doc comment and the symbol def
-        if (rawCommentLines.length === 0) {
-            const lowercase = trimmedLine.toLowerCase();
-            if (i === definitionLine - 1 && lowercase.startsWith('.export')) {
-                hasInlineExport = true;
-                continue;
-            } else if (hasInlineExport && i === definitionLine - 2 && !trimmedLine) {
-                continue;
-            }
-        }
-
-        break;
-    }
-
-    // Trim leading/trailing empty comment markers (e.g. standalone `;` spacer lines)
-    if (!inBlockDoc && !rawCommentLines[0]?.startsWith('/*')) {
-        const isEmptyComment = (line: string) => /^;+\s*$/.test(line);
-        while (rawCommentLines.length > 0 && isEmptyComment(rawCommentLines[0])) {
-            rawCommentLines.shift();
-        }
-        while (rawCommentLines.length > 0 && isEmptyComment(rawCommentLines[rawCommentLines.length - 1])) {
-            rawCommentLines.pop();
+    let i = definitionLine - 1;
+    if (i >= 0 && getLine(i).trimStart().toLowerCase().startsWith('.export')) {
+        hasInlineExport = true;
+        i--;
+        if (i >= 0 && getLine(i).trim().length === 0) {
+            i--;
         }
     }
 
-    return {
-        docCommentBlock: rawCommentLines.join('\n'),
-        hasInlineExport,
+    const empty: LeadingDocInfo = { docCommentBlock: '', inlineComment: '', isJsDoc: false, hasInlineExport };
+    if (cComments) {
+        const jsDoc = collectJsDocBlockAbove(getLine, i);
+        if (jsDoc) {
+            return { ...empty, docCommentBlock: jsDoc, isJsDoc: true };
+        }
+    }
+    if (options.hoverDocs === 'docBlocks') {
+        return empty;
+    }
+
+    const rawCommentLines: string[] = [];
+    for (; i >= 0; i--) {
+        const trimmedLine = getLine(i).trimStart();
+        if (!trimmedLine.startsWith(';')) break;
+        rawCommentLines.unshift(trimmedLine);
+    }
+
+    let inlineComment = '';
+    if (definitionLine >= 0 && definitionLine < document.lineCount) {
+        const defLineText = getLine(definitionLine);
+        const stripped = stripCommentsInLine(defLineText, false, cComments);
+        if (stripped.hasSemicolonComment && stripped.code.trim().length > 0) {
+            inlineComment = defLineText.slice(stripped.code.length).trim();
+        }
+    }
+
+    return { ...empty, docCommentBlock: rawCommentLines.join('\n'), inlineComment };
+}
+
+/** Returns the `/** ... *\/` block whose closing line is `endLine`, dedented to its opener, or '' if there is none. */
+function collectJsDocBlockAbove(getLine: (i: number) => string, endLine: number): string {
+    if (endLine < 0) return '';
+    const last = getLine(endLine);
+    if (!last.endsWith('*/')) return '';
+
+    const rawLines: string[] = [];
+    for (let i = endLine; i >= 0; i--) {
+        const raw = getLine(i);
+        rawLines.unshift(raw);
+        // The closing line itself may also hold the opener (`/** one-liner *\/`); search before its `*/`.
+        const searchIn = i === endLine ? raw.slice(0, raw.length - 2) : raw;
+        const openIdx = searchIn.lastIndexOf('/*');
+        if (openIdx < 0) continue;
+        // Reject trailing block comments attached to an earlier code line, and plain `/* ... */` blocks.
+        if (raw.slice(0, openIdx).trim().length > 0) return '';
+        if (!/^\/\*\*(?!\/)/.test(raw.slice(openIdx))) return '';
+        if (i !== endLine && searchIn.indexOf('*/', openIdx) >= 0) return '';
+        return rawLines.map(line => {
+            let strip = 0;
+            while (strip < openIdx && strip < line.length && (line[strip] === ' ' || line[strip] === '\t')) strip++;
+            return line.slice(strip);
+        }).join('\n');
+    }
+    return '';
+}
+
+/**
+ * Renders the documentation for the definition at `defLine` in `document` (see `extractLeadingDocInfo`):
+ * a `/** ... *\/` block as Markdown, or else the line comments above and the definition line's
+ * trailing comment, each verbatim in a `ca65` code fence, separated by a horizontal rule.
+ */
+export function renderDefinitionDocMarkdown(
+    document: TextDocument,
+    defLine: number,
+    options: DocCommentOptions & { implicitImports?: boolean } = {}
+): string {
+    const info = extractLeadingDocInfo(document, defLine, options);
+    const context: DocCommentFormatContext = {
+        uri: document.uri,
+        line: defLine,
+        implicitImports: options.implicitImports,
     };
+    if (info.isJsDoc) {
+        return info.docCommentBlock ? formatJsDocForHover(info.docCommentBlock, context) : '';
+    }
+    return formatDocCommentForHover([info.docCommentBlock, info.inlineComment], context);
+}
+
+/**
+ * Converts a `/** ... *\/` block into Markdown: strips the delimiters and `*` gutter, turns
+ * `{symbol}` / `{@link symbol}` / tag targets into links, and gives each `@tag` its own paragraph.
+ */
+export function formatJsDocForHover(docCommentBlock: string, context?: DocCommentFormatContext): string {
+    let lines = docCommentBlock.split(/\r?\n/);
+    lines[0] = lines[0].replace(/^\s*\/\*\*/, '');
+    lines[lines.length - 1] = lines[lines.length - 1].replace(/\*\/\s*$/, '');
+
+    // Strip the ` * ` gutter where present, then dedent the remaining lines by their common indent.
+    lines = lines.map((line, idx) => idx === 0 ? line.trimStart() : line.replace(/^[ \t]*\*(?!\/) ?/, ''));
+    const indents = lines.slice(1).filter(l => l.trim()).map(l => l.match(/^[ \t]*/)![0].length);
+    const common = indents.length > 0 ? Math.min(...indents) : 0;
+    if (common > 0) {
+        lines = lines.map((line, idx) => idx === 0 ? line : line.slice(Math.min(common, line.match(/^[ \t]*/)![0].length)));
+    }
+    lines = lines.map(line => line.trimEnd());
+    while (lines.length > 0 && !lines[0]) lines.shift();
+    while (lines.length > 0 && !lines[lines.length - 1]) lines.pop();
+    if (lines.length === 0) return '';
+
+    const out: string[] = [];
+    let inFence = false;
+    for (let i = 0; i < lines.length; i++) {
+        let line = lines[i];
+        if (/^\s*(```|~~~)/.test(line)) {
+            inFence = !inFence;
+            out.push(line);
+            continue;
+        }
+        if (inFence) {
+            out.push(line);
+            continue;
+        }
+        line = linkCommentSymbols(line, i, context);
+        const tagMatch = /^(\s*)@([a-zA-Z]+)\b/.exec(line);
+        if (tagMatch) {
+            if (out.length > 0 && out[out.length - 1] !== '') out.push('');
+            line = `${tagMatch[1]}*@${tagMatch[2]}*${line.slice(tagMatch[0].length)}`;
+        }
+        out.push(line);
+    }
+    return out.join('\n');
+}
+
+function linkCommentSymbols(line: string, lineIndex: number, context?: DocCommentFormatContext): string {
+    if (!context || !symbolTables || !includesGraph) return line;
+    const hits = extractCommentSymbolTokensInLine(line, lineIndex);
+    for (let h = hits.length - 1; h >= 0; h--) {
+        const hit = hits[h];
+        const resolved = resolveCommentSymbol(
+            context.uri,
+            { line: context.line, character: 0 },
+            hit.rawName,
+            symbolTables,
+            includesGraph,
+            Boolean(context.implicitImports)
+        );
+        if (!resolved) continue;
+        const link = `[${escapeInlineMarkdown(hit.rawName)}](${resolved.uri}#L${resolved.definition.start.line + 1})`;
+        const braced = line[hit.hitStartChar] === '{';
+        const start = braced ? hit.hitStartChar : hit.range.start.character;
+        const end = braced ? hit.hitEndChar : hit.range.end.character;
+        line = line.slice(0, start) + link + line.slice(end);
+    }
+    return line;
 }
 
 export function formatHexAndDecimal(value: number): string {
@@ -494,7 +602,8 @@ function assembleEntityHoverMarkdown(
     },
     defLine: number,
     document: TextDocument,
-    implicitImports: boolean = false
+    implicitImports: boolean = false,
+    docOptions: DocCommentOptions = {}
 ): string {
     const headerParts: string[] = [];
     if (header.segment) {
@@ -509,16 +618,9 @@ function assembleEntityHoverMarkdown(
     }
 
     const sections: string[] = [headerParts.join(' ')];
-    const { docCommentBlock } = extractLeadingDocInfo(document, defLine);
-    if (docCommentBlock) {
-        const renderedDoc = formatDocCommentForHover(docCommentBlock, {
-            uri: document.uri,
-            line: defLine,
-            implicitImports,
-        });
-        if (renderedDoc) {
-            sections.push(renderedDoc);
-        }
+    const renderedDoc = renderDefinitionDocMarkdown(document, defLine, { ...docOptions, implicitImports });
+    if (renderedDoc) {
+        sections.push(renderedDoc);
     }
     return sections.join('\n\n');
 }
@@ -529,7 +631,8 @@ export function generateCheapLocalHoverMarkdown(
     document: TextDocument,
     symbolTable?: SymbolTable,
     implicitImports: boolean = false,
-    binIncludeDirs?: string[]
+    binIncludeDirs?: string[],
+    docOptions: DocCommentOptions = {}
 ): string {
     const defLine = defRange.start.line;
     const segment = getEffectiveSegmentAtLine(symbolTable, defLine);
@@ -555,7 +658,9 @@ export function generateCheapLocalHoverMarkdown(
             signatureMarkdown: formattedSignature,
         },
         defLine,
-        document
+        document,
+        implicitImports,
+        docOptions
     );
 }
 
@@ -563,7 +668,8 @@ export function generateSymbolTableEntityMarkdown(
     entity: SymbolTableEntity,
     document: TextDocument,
     implicitImports: boolean = false,
-    binIncludeDirs?: string[]
+    binIncludeDirs?: string[],
+    docOptions: DocCommentOptions = {}
 ): string {
     const definitionStart = entity.definition.start.line;
     const entitySymTable = symbolTables.get(entity.uri);
@@ -624,7 +730,8 @@ export function generateSymbolTableEntityMarkdown(
         { segment, badges, signatureMarkdown: finalSignature, trailingParts },
         definitionStart,
         document,
-        implicitImports
+        implicitImports,
+        docOptions
     );
 }
 

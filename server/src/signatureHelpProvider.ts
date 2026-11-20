@@ -13,7 +13,7 @@ import { ensureDocumentRefreshed, getDocumentSettings, includesGraph, initializa
 import { resolveMacroByName } from './symbolResolver';
 import { Macro, MacroKind } from './symbolTable';
 import { getCachedTextDocument } from './documentCache';
-import { extractLeadingDocInfo, formatDocCommentForHover } from './hoverProvider';
+import { renderDefinitionDocMarkdown } from './hoverProvider';
 
 function countTopLevelCommas(text: string): number {
     let quote: '"' | "'" | null = null;
@@ -97,14 +97,11 @@ async function getMacroDocComment(
         return undefined;
     }
 
-    const { docCommentBlock } = extractLeadingDocInfo(defDoc, macro.definition.start.line);
-    if (!docCommentBlock) {
-        return undefined;
-    }
-
-    return formatDocCommentForHover(docCommentBlock, {
-        uri: macro.uri,
-        line: macro.definition.start.line,
+    const settings = await getDocumentSettings(macro.uri);
+    return renderDefinitionDocMarkdown(defDoc, macro.definition.start.line, {
+        implicitImports: settings.implicitImports,
+        cComments: settings.cComments,
+        hoverDocs: settings.hoverDocs,
     }) || undefined;
 }
 

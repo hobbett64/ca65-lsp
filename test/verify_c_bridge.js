@@ -19,7 +19,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         '.export _draw',
         '.import _counter',
         '',
-        '; Draws the thing. See {_draw}.',
+        '/** Draws the thing. See {_draw}. */',
         '.proc _draw',
         '  lda _counter',
         '  jsr helper',
@@ -194,7 +194,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         // --- globalReferences ---
         const drawRefs = await request('ca65/globalReferences', { name: '_draw' });
         const drawRefKeys = fmt(drawRefs);
-        for (const expected of ['draw.s:0:8', 'draw.s:3:24', 'draw.s:4:6', 'main.s:0:8', 'main.s:4:6', 'other.s:0:8', 'other.s:2:6']) {
+        for (const expected of ['draw.s:0:8', 'draw.s:3:26', 'draw.s:4:6', 'main.s:0:8', 'main.s:4:6', 'other.s:0:8', 'other.s:2:6']) {
             assert(drawRefKeys.includes(expected), `Expected ${expected} in _draw refs, got ${drawRefKeys}`);
         }
 

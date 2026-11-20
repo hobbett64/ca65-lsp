@@ -202,7 +202,7 @@ function makeLspClient() {
         '    1',
         '  height /* mid field */ .word',
         '.endstruct',
-        '/*',
+        '/**',
         '  Macro block doc for SUM3',
         '*/',
         '.macro SUM3 first, \\',
@@ -210,12 +210,12 @@ function makeLspClient() {
         '  third',
         '  lda #first + second + third',
         '.endmacro',
-        '/*',
+        '/**',
         '  Define block doc for ADD2',
         '*/',
         '.define ADD2(a, \\',
         '  b) ((a) + (b))',
-        '/*',
+        '/**',
         '  Proc block doc for MainProc',
         '*/',
         '.proc MainProc',
@@ -254,7 +254,7 @@ function makeLspClient() {
         '  nop',
         '  lda /* mid_complete */ ',
         '.endproc',
-        '/* doc with export between */',
+        '/** doc with export between */',
         '.export exported_one',
         'exported_one:',
         '  rts',
@@ -413,12 +413,12 @@ function makeLspClient() {
             range: { start: { line: 0, character: 0 }, end: { line: lines.length, character: 0 } },
         });
         assert(
-            hints.some(h => h.label === '(1)' && h.position.line === realAnonLine && h.position.character === 1),
-            'Expected (1) inlay hint on real anonymous label'
+            hints.some(h => h.label === '1' && h.position.line === realAnonLine && h.position.character === 0),
+            'Expected 1 inlay hint left of the real anonymous label colon'
         );
         assert(
-            hints.some(h => h.label === '(1)' && h.position.line === beqAnonLine && h.position.character === lines[beqAnonLine].indexOf(':-') + 2),
-            'Expected (1) inlay hint on :- ref'
+            hints.some(h => h.label === '1' && h.position.line === beqAnonLine && h.position.character === lines[beqAnonLine].indexOf(':-')),
+            'Expected 1 inlay hint left of :- ref'
         );
         const headerAnonFakeLine = findLine(' * :');
         const bodyAnonFakeLine = findLine('    :', realAnonLine);
@@ -526,8 +526,8 @@ function makeLspClient() {
             position: { line: indentedDocLine, character: lines[indentedDocLine].indexOf('IndentedDocLbl') + 2 },
         });
         assert(
-            indentedDocHover && indentedDocHover.contents.value.includes('```ca65\n/**\n * Indented JSDoc\n */\n```'),
-            `Expected indented JSDoc hover alignment preserved verbatim inside ca65 code fence, got ${JSON.stringify(indentedDocHover)}`
+            indentedDocHover && indentedDocHover.contents.value.endsWith('\n\nIndented JSDoc'),
+            `Expected indented JSDoc hover rendered as Markdown without delimiters, got ${JSON.stringify(indentedDocHover)}`
         );
 
         const plainBlockLine = findLine('PlainBlockLbl:');
@@ -536,8 +536,8 @@ function makeLspClient() {
             position: { line: plainBlockLine, character: lines[plainBlockLine].indexOf('PlainBlockLbl') + 2 },
         });
         assert(
-            plainBlockHover && plainBlockHover.contents.value.includes('```ca65\n/*\n * Plain block\n */\n```'),
-            `Expected plain /* ... */ hover alignment preserved verbatim, got ${JSON.stringify(plainBlockHover)}`
+            plainBlockHover && !plainBlockHover.contents.value.includes('Plain block'),
+            `Plain /* ... */ (non-JSDoc) block must not attach as hover doc when C comments are on, got ${JSON.stringify(plainBlockHover)}`
         );
 
         const drawSpriteLine = findLine('.proc DrawSprite');
@@ -548,10 +548,11 @@ function makeLspClient() {
         const dsVal = drawSpriteHover && drawSpriteHover.contents && drawSpriteHover.contents.value;
         assert(
             dsVal
-            && dsVal.includes('```ca65\n/**\n * Draws a sprite cleanly.')
-            && dsVal.includes(' * @param A tile index\n * @param dst - destination\n * @return Carry set on error\n * @clobber X, Y\n * @preserve tmp0')
-            && dsVal.includes('\n */\n```'),
-            `Expected verbatim JSDoc block in ca65 fence for DrawSprite, got:\n${dsVal}`
+            && dsVal.includes('\n\nDraws a sprite cleanly.\n\n**Important:** call inside NMI.\n- outer\n  - nested')
+            && dsVal.includes('```ca65\n@loop:\n  dex\n```')
+            && dsVal.includes('*@param* A tile index\n\n*@param* dst - destination\n\n*@return* Carry set on error\n\n*@clobber* X, Y\n\n*@preserve* tmp0')
+            && !dsVal.includes('/**') && !dsVal.includes('*/'),
+            `Expected JSDoc rendered as Markdown for DrawSprite, got:\n${dsVal}`
         );
 
         const constMlLine = findLine('CONST_ML = $10');
@@ -744,8 +745,8 @@ function makeLspClient() {
         assert(
             sigJsdoc
             && sigJsdoc.signatures[0].documentation
-            && sigJsdoc.signatures[0].documentation.value.includes('```ca65\n/**\n * Emits immediate byte.\n * @param val byte to load\n */\n```'),
-            `Signature help should render verbatim /** ... */ comment in ca65 block, got: ${JSON.stringify(sigJsdoc)}`
+            && sigJsdoc.signatures[0].documentation.value === 'Emits immediate byte.\n\n*@param* val byte to load',
+            `Signature help should render /** ... */ comment as Markdown, got: ${JSON.stringify(sigJsdoc)}`
         );
 
         // --------------------------------------------------------------
@@ -856,7 +857,54 @@ function makeLspClient() {
     // ------------------------------------------------------------------
     // 4. Verbatim doc comment block unit checks
     // ------------------------------------------------------------------
-    const { formatDocCommentForHover } = loadHoverHelpers();
+    const { formatDocCommentForHover, extractLeadingDocInfo, renderDefinitionDocMarkdown } = loadHoverHelpers();
+    const stubDoc = (text) => {
+        const docLines = text.split('\n');
+        return {
+            uri: 'file:///stub.s',
+            lineCount: docLines.length,
+            getText: (r) => docLines.slice(r.start.line, r.end.line).map(l => l + '\n').join(''),
+        };
+    };
+    const inlineDoc = stubDoc([
+        '; this is a comment',                 // 0
+        'foo: ; this is inline',               // 1
+        'bar: lda #";" ; semi in string',      // 2
+        '/** jsdoc */',                        // 3
+        'baz: ; ignored inline',               // 4
+        '; ======================',            // 5
+        '; Section title',                     // 6
+        ';;;;;;;;;;;;;;;;;;;;;;;',             // 7
+        ';',                                   // 8
+        '; Real doc',                          // 9
+        ';',                                   // 10
+        '; - not a divider',                   // 11
+        '; ----------',                        // 12
+        'qux: ; ------',                       // 13
+        '/* plain */',                         // 14
+        'quux: ; after plain',                 // 15
+    ].join('\n'));
+    for (const cComments of [false, true]) {
+        assert.strictEqual(
+            renderDefinitionDocMarkdown(inlineDoc, 1, { cComments }),
+            '```ca65\n; this is a comment\n```\n\n---\n\n```ca65\n; this is inline\n```',
+            `The touching ; block and the definition line's trailing ; comment render verbatim, split by a rule (cComments ${cComments})`
+        );
+        assert.strictEqual(
+            renderDefinitionDocMarkdown(inlineDoc, 13, { cComments }),
+            '```ca65\n; ======================\n; Section title\n;;;;;;;;;;;;;;;;;;;;;;;\n;\n; Real doc\n;\n; - not a divider\n; ----------\n```\n\n---\n\n```ca65\n; ------\n```',
+            `; doc blocks and the trailing comment render verbatim, dividers and bare ; lines included (cComments ${cComments})`
+        );
+    }
+    assert.strictEqual(extractLeadingDocInfo(inlineDoc, 2, { cComments: false }).inlineComment, '; semi in string');
+    assert.strictEqual(renderDefinitionDocMarkdown(inlineDoc, 4, { cComments: true }), 'jsdoc', 'A /** */ block wins over ; comments and skips the trailing ; comment');
+    assert.strictEqual(renderDefinitionDocMarkdown(inlineDoc, 15, { cComments: true }), '```ca65\n; after plain\n```', 'A plain /* */ block is not a doc comment');
+
+    // ca65.hoverDocs: docBlocks shows only /** */ blocks
+    assert.strictEqual(renderDefinitionDocMarkdown(inlineDoc, 1, { hoverDocs: 'docBlocks' }), '', 'docBlocks ignores ; comments above and beside');
+    assert.strictEqual(renderDefinitionDocMarkdown(inlineDoc, 4, { hoverDocs: 'docBlocks' }), 'jsdoc', 'docBlocks still shows /** */ blocks');
+    assert.strictEqual(renderDefinitionDocMarkdown(inlineDoc, 4, { hoverDocs: 'docBlocks', cComments: false }), '', 'docBlocks shows nothing when C comments are off');
+
     assert.strictEqual(formatDocCommentForHover('/**/'), '');
     assert.strictEqual(formatDocCommentForHover('/*   */'), '');
     assert.strictEqual(

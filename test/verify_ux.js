@@ -335,7 +335,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         assert(constHover && constHover.contents && constHover.contents.value, 'Expected constant hover');
         const chVal = constHover.contents.value;
         assert(chVal.startsWith('const **ZP\\_MAX\\_HP** = `$10` (16)'), `Expected const constant header, got:\n${chVal}`);
-        assert(chVal.includes('; Maximum player hit points\n; -------------------------'), 'Doc comment should stay verbatim in ca65 block');
+        assert(chVal.includes('```ca65\n; Maximum player hit points\n; -------------------------\n```'), `Doc comment should stay verbatim in ca65 block, got:\n${chVal}`);
         assert(!chVal.includes('Defined in'), `Hovercard should not include Defined in footer, got:\n${chVal}`);
 
         // Hover enum member shows enum badge and qualified name with bold leaf
@@ -1015,10 +1015,10 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         const hasHint = (line, ch, label) => inlayHints.some(
             h => h.label === label && h.position.line === line && h.position.character === ch
         );
-        assert(hasHint(firstAnonDefLine, lines[firstAnonDefLine].indexOf(':') + 1, '(1)'), 'Expected (1) inlay hint right after first anonymous label def');
-        assert(hasHint(bneAnonLine, lines[bneAnonLine].indexOf(':-') + 2, '(1)'), 'Expected (1) inlay hint right after :- ref');
-        assert(hasHint(beqAnonLine, lines[beqAnonLine].indexOf(':+') + 2, '(2)'), 'Expected (2) inlay hint right after :+ ref');
-        assert(hasHint(secondAnonDefLine, lines[secondAnonDefLine].indexOf(':') + 1, '(2)'), 'Expected (2) inlay hint right after second anonymous label def');
+        assert(hasHint(firstAnonDefLine, lines[firstAnonDefLine].indexOf(':'), '1'), 'Expected 1 inlay hint left of first anonymous label def colon');
+        assert(hasHint(bneAnonLine, lines[bneAnonLine].indexOf(':-'), '1'), 'Expected 1 inlay hint left of :- ref');
+        assert(hasHint(beqAnonLine, lines[beqAnonLine].indexOf(':+'), '2'), 'Expected 2 inlay hint left of :+ ref');
+        assert(hasHint(secondAnonDefLine, lines[secondAnonDefLine].indexOf(':'), '2'), 'Expected 2 inlay hint left of second anonymous label def colon');
 
         // Range-filtered inlayHint should exclude hints outside params.range
         const rangeHints = await request('textDocument/inlayHint', {
@@ -1026,7 +1026,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             range: { start: { line: bneAnonLine, character: 0 }, end: { line: bneAnonLine, character: 40 } },
         });
         assert(
-            rangeHints.some(h => h.label === '(1)' && h.position.line === bneAnonLine)
+            rangeHints.some(h => h.label === '1' && h.position.line === bneAnonLine)
             && !rangeHints.some(h => h.position.line !== bneAnonLine),
             `Expected range-filtered inlay hints only on line ${bneAnonLine}, got ${JSON.stringify(rangeHints)}`
         );
@@ -1196,7 +1196,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             '.scope LocalScope',
             'local_helper:',
             '  rts',
-            '; Calls {local_helper}',
+            '/** Calls {local_helper} */',
             'local_caller:',
             '  rts',
             '.endscope',
@@ -1213,15 +1213,15 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         });
         assert(subHover && subHover.contents && subHover.contents.value, 'Expected hover on doc_linked_sub');
         const subHoverMd = subHover.contents.value;
-        assert(subHoverMd.includes('```ca65\n/**\n * Doc with {Player::init}'), `Expected verbatim ca65 doc block, got:\n${subHoverMd}`);
+        assert(subHoverMd.includes(`Doc with [Player::init](${defsUri}#L`) && subHoverMd.includes(`and [Entity](${defsUri}#L`), `Expected JSDoc rendered as Markdown with inline links, got:\n${subHoverMd}`);
         assert(
-            subHoverMd.includes(`*See:* [Player::init](${defsUri}#L`)
-            && subHoverMd.includes(`, [Entity](${defsUri}#L`)
-            && subHoverMd.includes(`, [zp\\_counter](${varsUri}#L`)
-            && subHoverMd.includes(`, [bss\\_var](${varsUri}#L`)
+            subHoverMd.includes('\n\n*@param* {u8} count')
+            && subHoverMd.includes(`\n\n*@input* [zp\\_counter](${varsUri}#L`)
+            && subHoverMd.includes(`\n\n*@modifies* [bss\\_var](${varsUri}#L`)
             && subHoverMd.includes(`, [ro\\_incbin](${varsUri}#L`)
-            && subHoverMd.includes(`, [Player::hp](${defsUri}#L`),
-            `Expected comma-separated clickable *See:* links for resolved symbols, got:\n${subHoverMd}`
+            && subHoverMd.includes(`\n\n*@see* [Player::hp](${defsUri}#L`)
+            && !subHoverMd.includes('/**') && !subHoverMd.includes('*See:*'),
+            `Expected tag paragraphs with inline clickable links for resolved symbols, got:\n${subHoverMd}`
         );
         assert(!subHoverMd.includes('[u8]') && !subHoverMd.includes('[Held]') && !subHoverMd.includes('[Updated]'), 'Unresolved types and trailing description words must not appear in *See:* links');
 
@@ -1230,8 +1230,8 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             position: { line: 14, character: 4 },
         });
         assert(
-            localCallerHover && localCallerHover.contents.value.includes(`*See:* [LocalScope::local\\_helper](${docLinkTestUri}#L12)`),
-            `Expected unqualified {local_helper} inside LocalScope to render qualified name in *See:*, got:\n${localCallerHover && localCallerHover.contents.value}`
+            localCallerHover && localCallerHover.contents.value.includes(`Calls [local\\_helper](${docLinkTestUri}#L12)`),
+            `Expected unqualified {local_helper} inside LocalScope to link to LocalScope::local_helper, got:\n${localCallerHover && localCallerHover.contents.value}`
         );
 
         const bracedStart = docLinkLines[2].indexOf('Player::init');

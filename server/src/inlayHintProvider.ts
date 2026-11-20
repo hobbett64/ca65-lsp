@@ -35,9 +35,10 @@ export function initializeInlayHintProvider(connection: _Connection, documents: 
                     if (!ranges) continue;
                     for (const range of ranges) {
                         if (range.end.line < startLine || range.end.line > endLine) continue;
+                        // Index just left of the colon for both: `3:` on declarations, `3:-` / `3:++` on references.
                         inlayHints.push({
-                            label: `(${labelIndex + 1})`,
-                            position: { line: range.end.line, character: range.end.character },
+                            label: `${labelIndex + 1}`,
+                            position: { line: range.start.line, character: range.start.character },
                             kind: InlayHintKind.Parameter,
                         });
                     }
