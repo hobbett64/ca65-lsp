@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.2] - 2026-11-21
+### Fixed
+- A lone `.` (e.g. a period ending a sentence in a comment) counted as a word, so with the cursor on one every other period in the file was highlighted, and double-click selected it as a word. A leading `.` is now only part of a word when a letter follows it, as in `.byte`.
+
 ## [2.6.1] - 2026-11-20
 ### Changed
 - `/** ... */` doc comment tags render like VS Code's TypeScript hovers: the tag's targets (the name of `@param`/`@input`/`@output`, the symbols of `@see`/`@modifies`/`@uses`, the registers of `@clobbers`/`@preserves`) show as code, linked when they resolve to a symbol, followed by an em dash and the description (e.g. *@param* `count` — loop count). Tags without targets show the dash before their text (*@return* — carry set on error); text spanning several lines starts on its own line instead.
