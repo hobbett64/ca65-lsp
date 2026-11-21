@@ -34,3 +34,17 @@ Thumbs.db
 
 # Example projects
 examples/
+
+# Neovim plugin (installed from this repo by Neovim plugin managers, not part of the extension)
+lua/
+plugin/
+ftplugin/
+ftdetect/
+syntax/
+after/
+build.lua
+.luarc.json
+
+# Release tooling
+.github/
+scripts/

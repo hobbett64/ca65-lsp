@@ -1,0 +1,66 @@
+# Pushing a version tag (git tag v2.7.0 && git push origin v2.7.0) builds the VS Code
+# extension and the standalone language server, and publishes them as a GitHub
+# release. The Neovim plugin downloads the server from the release whose tag matches
+# package.json's version, so the tag must match it.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Check the tag matches package.json
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match package.json version $version"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Package the VS Code extension
+        run: npx --yes @vscode/vsce@4.1.1 package --no-dependencies
+
+      - name: Package the language server
+        run: python3 scripts/package_server.py
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::No CHANGELOG.md section for $VERSION"
+            exit 1
+          fi
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            "ca65-vscode-extension-$VERSION.vsix" \
+            "dist/ca65-lsp-server-$VERSION.tar.gz" \
+            "dist/ca65-lsp-server-$VERSION.zip"

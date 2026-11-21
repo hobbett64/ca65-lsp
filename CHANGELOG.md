@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2026-11-21
+### Added
+- Neovim plugin: this repository can be installed as a Neovim plugin (0.11 or newer), e.g. `{ "hobbett64/ca65-lsp", version = "*" }` with lazy.nvim. It downloads the language server of the same version from the GitHub release, starts it for `.s`, `.asm` and `.inc` files, and adds ca65 syntax highlighting, `/** */` doc comment continuation, `%` between block directives, the `:Ref6502` instruction reference, and `:checkhealth ca65`. See the README.
+- Each release includes the standalone language server for other editors (`ca65-lsp-server-<version>.tar.gz` and `.zip`), built by a release workflow along with the `.vsix`.
+
+### Changed
+- The repository is now `hobbett64/ca65-lsp` (formerly `ca65-vscode-extension-64`; old links redirect). The VS Code extension itself is unchanged.
+
 ## [2.6.4] - 2026-11-21
 ### Changed
 - Instruction hovers show the full reference entry: each affected flag with its effect, and a table of every addressing mode with its opcode, bytes and cycles. This replaces the summary line and the "See details" link; the reference panel is still available as **ca65: Show Instruction Reference**.

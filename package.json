@@ -3,11 +3,11 @@
     "description": "ca65 Assembly language support for VS Code",
     "author": "Quang Luong",
     "license": "MIT",
-    "version": "2.6.4",
+    "version": "2.7.0",
     "publisher": "hobbett",
     "repository": {
         "type": "git",
-        "url": "https://github.com/hobbett64/ca65-vscode-extension-64.git"
+        "url": "https://github.com/hobbett64/ca65-lsp.git"
     },
     "engines": {
         "vscode": "^1.85.0"

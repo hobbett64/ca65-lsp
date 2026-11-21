@@ -104,28 +104,74 @@ Please see the Settings gear icon in the installed extension to easily set this 
 
 ## Using the language server in other editors
 
-The language server is a standalone Node.js program that speaks the Language Server Protocol over stdio, so editors other than VS Code (Neovim, Helix, Emacs, Sublime Text…) can use it too.
+The language server is a standalone Node.js program that speaks the Language Server Protocol over stdio, so editors other than VS Code (Neovim, Helix, Emacs, Sublime Text…) can use it too. This repository is also a Neovim plugin.
 
-### Build it
+### Neovim plugin
 
-Requires Node.js 18 or newer.
+Requires Neovim 0.11 or newer and Node.js 18 or newer. With [lazy.nvim](https://github.com/folke/lazy.nvim):
+
+```lua
+{
+  "hobbett64/ca65-lsp",
+  version = "*",   -- the latest release
+  opts = {
+    -- The server's settings, as in VS Code without the "ca65." prefix (see Settings below),
+    -- e.g. settings = { cpu = "65C02", includeDirs = { "include" } },
+  },
+}
+```
+
+On install, the plugin downloads the language server from the GitHub release of the same version, so the plugin and the server always match. If that fails (e.g. no network), it tries again when you open a ca65 file, or run `:Ca65InstallServer`. `:checkhealth ca65` checks Node.js, `ca65` and the server.
+
+What it sets up:
+
+- `.s`, `.asm` and `.inc` files open as `ca65`, with syntax highlighting (a port of the extension's grammar) under the server's semantic tokens.
+- The language server, with every standard LSP feature (see [What you get](#what-you-get)).
+- `;` comments for `gc`, `@cheap_locals` as one word, and `%` between `.proc`/`.endproc`, `.if`/`.else`/`.endif` and the other block directives.
+- `/** */` doc comments: Enter continues them with ` * `, Enter right after `/**` adds the closing ` */`, and typing `/` after a ` * ` closes one.
+- `:Ref6502` browses the instruction reference (in Telescope when installed); `:Ref6502 lda` shows one instruction.
+- `gx` on a hover's link to a definition (`file://…#L12`) opens it in Neovim at that line.
+
+All options, with their defaults:
+
+```lua
+require("ca65").setup({
+  -- Server settings. A function(root_dir) returning the table gives per-project settings:
+  -- settings = function(root) return { linkerConfig = "nrom256.cfg" } end,
+  settings = {},
+  root_markers = { ".git", "Makefile" },  -- the nearest one above a file is its project root
+  capabilities = nil,                     -- nil: blink.cmp's or nvim-cmp's, if installed
+  server = {
+    cmd = nil,                            -- run your own server, e.g. { "node", "/path/server.js", "--stdio" }
+    node = "node",                        -- Node.js executable for the bundled/downloaded server
+  },
+  close_doc_comments = true,              -- Enter after /** adds the closing */
+  open_file_links = true,                 -- gx on file://…#L12 links opens them in Neovim
+})
+```
+
+Without lazy.nvim, add the repository to your `runtimepath` with any plugin manager; `setup()` is optional. To develop the server, point the plugin at a clone and run `npm ci && npm run bundle` there: a built `server/out/server.js` in the plugin's directory is used instead of the download.
+
+### Other editors
+
+Download `ca65-lsp-server-<version>.tar.gz` (or `.zip`) from the [releases](https://github.com/hobbett64/ca65-lsp/releases) and start the server with:
 
 ```
-git clone https://github.com/hobbett64/ca65-vscode-extension-64
-cd ca65-vscode-extension-64
+node /path/to/ca65-lsp-server-<version>/server/out/server.js --stdio
+```
+
+Keep `server/out/` and `server/data/` side by side: the server loads its instruction and directive data from `server/data/`. `ca65` must be on your `PATH` (or set `ca65.executablePath`) for diagnostics, as in VS Code.
+
+To build it from source instead (Node.js 18 or newer):
+
+```
+git clone https://github.com/hobbett64/ca65-lsp
+cd ca65-lsp
 npm ci
 npm run bundle
 ```
 
-This produces `server/out/server.js`, a single self-contained file. It loads its instruction and directive data from `server/data/` relative to itself, so run it from where it was built (or copy `server/out/` and `server/data/` together, keeping them side by side). Run `npm run bundle` again after pulling updates.
-
-Start it with:
-
-```
-node /path/to/ca65-vscode-extension-64/server/out/server.js --stdio
-```
-
-`ca65` must be on your `PATH` (or set `ca65.executablePath`) for diagnostics, as in VS Code.
+This produces `server/out/server.js`. Run `npm run bundle` again after pulling updates.
 
 ### Settings
 
@@ -137,40 +183,13 @@ The server reads the same settings as the VS Code extension, through the standar
 
 Unset settings use the same defaults as VS Code.
 
-### Example: Neovim 0.10
-
-```lua
--- .s and .inc are ca65. Neovim's own ".*%.[sS]" pattern (asm) wins over a plain
--- extension rule, so use patterns with a higher priority.
-vim.filetype.add({
-  pattern = {
-    [".*%.s"] = { "ca65", { priority = 10 } },
-    [".*%.inc"] = { "ca65", { priority = 10 } },
-  },
-})
-
-vim.api.nvim_create_autocmd("FileType", {
-  pattern = "ca65",
-  callback = function(args)
-    vim.lsp.start({
-      name = "ca65",
-      cmd = { "node", vim.fn.expand("~/ca65-vscode-extension-64/server/out/server.js"), "--stdio" },
-      root_dir = vim.fs.root(args.buf, { "Makefile", ".git" }),
-      settings = { ca65 = { linkerConfig = "nrom256.cfg" } },
-    })
-  end,
-})
-```
-
-On Neovim 0.11 and later you can register the same `cmd`, `filetypes = { "ca65" }`, `root_markers` and `settings` with `vim.lsp.config("ca65", {...})` and `vim.lsp.enable("ca65")` instead.
-
 ### What you get
 
 Everything that's standard LSP: hover, go to definition, references, rename, completion, signature help, document and workspace symbols, call hierarchy, folding ranges, inlay hints, document highlights, document links, code actions, diagnostics and semantic tokens.
 
-Not available outside VS Code, because they're implemented in the VS Code client: syntax highlighting from the TextMate grammar (other editors get symbol colours from semantic tokens; use your editor's own syntax for the rest), the instruction reference panel, the overlays, the status bar cycle count and segment, and cc65 C mode.
+Not available outside VS Code, because they're implemented in the VS Code client: the overlays, the status bar cycle count and segment, and cc65 C mode. Other editors also don't get the extension's TextMate grammar (the Neovim plugin has its own syntax file; elsewhere, symbol colours come from semantic tokens), or the instruction reference panel (the Neovim plugin has `:Ref6502`).
 
-The data behind the instruction reference panel is available to any client through the custom request `ca65/getReferenceData` (params `{ uri?, cpu? }`, result `{ cpu, mnemonics }`), if you want to build a reference view in your editor.
+The data behind the instruction reference is available to any client through the custom request `ca65/getReferenceData` (params `{ uri?, cpu? }`, result `{ cpu, mnemonics }`), if you want to build a reference view in your editor.
 
 ## Running Tests
 ```
