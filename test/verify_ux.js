@@ -599,9 +599,11 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: mainUri },
             position: { line: ldaLine, character: lines[ldaLine].indexOf('lda') + 1 },
         });
-        assert(ldaHover && ldaHover.contents.value.includes('**Affected flags:** `N`, `Z`'), 'Expected compact Affected flags line on mnemonic hover');
-        assert(ldaHover.contents.value.includes('**Addressing modes:** `Immediate` `Zero page` `Zero page, X`'), 'Expected badge-styled Addressing modes line on mnemonic hover');
-        assert(ldaHover.contents.value.includes('[See details](command:ca65.showReference?%5B%22lda%22%5D)'), 'Expected See details link');
+        assert(ldaHover && ldaHover.contents.value.includes('**Flags affected:**'), 'Expected the full flags list on mnemonic hover');
+        assert(ldaHover.contents.value.includes('- `N`: ') && ldaHover.contents.value.includes('- `Z`: '), 'Expected each affected flag with its effect');
+        assert(/\| Immediate +\| `A9` +\| 2 +\| 2 +\|/.test(ldaHover.contents.value), `Expected a padded addressing mode table row:\n${ldaHover.contents.value}`);
+        assert(/\| Absolute, X +\| `BD` +\| 3 +\| 4 \(\+1 page\) +\|/.test(ldaHover.contents.value), 'Expected cycle notes in the table');
+        assert(!ldaHover.contents.value.includes('See details'), 'The full hover has no See details link');
         assert(!ldaHover.contents.value.includes('**See also:**'), 'Should not include seeAlso on mnemonic hover');
 
         // 3b. Number literal hovers (dec, hex with mnemonic-like digits $ADC, bin)

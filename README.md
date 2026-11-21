@@ -102,6 +102,76 @@ Diagnostics and UX toggles (`ca65.enableStderrDiagnostics`, `ca65.enableUnusedSy
 
 Please see the Settings gear icon in the installed extension to easily set this and other settings.
 
+## Using the language server in other editors
+
+The language server is a standalone Node.js program that speaks the Language Server Protocol over stdio, so editors other than VS Code (Neovim, Helix, Emacs, Sublime Text…) can use it too.
+
+### Build it
+
+Requires Node.js 18 or newer.
+
+```
+git clone https://github.com/hobbett64/ca65-vscode-extension-64
+cd ca65-vscode-extension-64
+npm ci
+npm run bundle
+```
+
+This produces `server/out/server.js`, a single self-contained file. It loads its instruction and directive data from `server/data/` relative to itself, so run it from where it was built (or copy `server/out/` and `server/data/` together, keeping them side by side). Run `npm run bundle` again after pulling updates.
+
+Start it with:
+
+```
+node /path/to/ca65-vscode-extension-64/server/out/server.js --stdio
+```
+
+`ca65` must be on your `PATH` (or set `ca65.executablePath`) for diagnostics, as in VS Code.
+
+### Settings
+
+The server reads the same settings as the VS Code extension, through the standard `workspace/configuration` request, in a `ca65` section. In your editor's LSP settings, drop the `ca65.` prefix and nest them, e.g. `ca65.linkerConfig` becomes:
+
+```json
+{ "ca65": { "linkerConfig": "nrom256.cfg", "cpu": "6502", "includeDirs": [] } }
+```
+
+Unset settings use the same defaults as VS Code.
+
+### Example: Neovim 0.10
+
+```lua
+-- .s and .inc are ca65. Neovim's own ".*%.[sS]" pattern (asm) wins over a plain
+-- extension rule, so use patterns with a higher priority.
+vim.filetype.add({
+  pattern = {
+    [".*%.s"] = { "ca65", { priority = 10 } },
+    [".*%.inc"] = { "ca65", { priority = 10 } },
+  },
+})
+
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = "ca65",
+  callback = function(args)
+    vim.lsp.start({
+      name = "ca65",
+      cmd = { "node", vim.fn.expand("~/ca65-vscode-extension-64/server/out/server.js"), "--stdio" },
+      root_dir = vim.fs.root(args.buf, { "Makefile", ".git" }),
+      settings = { ca65 = { linkerConfig = "nrom256.cfg" } },
+    })
+  end,
+})
+```
+
+On Neovim 0.11 and later you can register the same `cmd`, `filetypes = { "ca65" }`, `root_markers` and `settings` with `vim.lsp.config("ca65", {...})` and `vim.lsp.enable("ca65")` instead.
+
+### What you get
+
+Everything that's standard LSP: hover, go to definition, references, rename, completion, signature help, document and workspace symbols, call hierarchy, folding ranges, inlay hints, document highlights, document links, code actions, diagnostics and semantic tokens.
+
+Not available outside VS Code, because they're implemented in the VS Code client: syntax highlighting from the TextMate grammar (other editors get symbol colours from semantic tokens; use your editor's own syntax for the rest), the instruction reference panel, the overlays, the status bar cycle count and segment, and cc65 C mode.
+
+The data behind the instruction reference panel is available to any client through the custom request `ca65/getReferenceData` (params `{ uri?, cpu? }`, result `{ cpu, mnemonics }`), if you want to build a reference view in your editor.
+
 ## Running Tests
 ```
 npm test

@@ -348,9 +348,9 @@ function posOf(lines, needle, offset = 1) {
         await switchCpu('65C02');
 
         const rmbHover = await hoverToken('rmb0');
-        assert(rmbHover && rmbHover.contents.value.includes('(65C02)') && rmbHover.contents.value.includes('**Addressing modes:** `Zero page`'));
+        assert(rmbHover && rmbHover.contents.value.includes('(65C02)') && /\| Zero page +\|/.test(rmbHover.contents.value));
         const bbrHover = await hoverToken('bbr0');
-        assert(bbrHover && bbrHover.contents.value.includes('(65C02)') && bbrHover.contents.value.includes('**Addressing modes:** `Zero page, relative`'));
+        assert(bbrHover && bbrHover.contents.value.includes('(65C02)') && /\| Zero page, relative +\|/.test(bbrHover.contents.value));
         assert.strictEqual(await hoverToken('wai'), null, '65C02 should not expose WAI');
         assert.strictEqual(await hoverToken('jsl'), null, '65C02 should not expose JSL');
 
@@ -369,11 +369,10 @@ function posOf(lines, needle, offset = 1) {
         await switchCpu('W65C02');
 
         const waiHover = await hoverToken('wai');
-        assert(waiHover && waiHover.contents.value.includes('(W65C02)') && waiHover.contents.value.includes('**Addressing modes:** `Implied`'));
-        assert(waiHover.contents.value.includes('[See details](command:ca65.showReference?%5B%22wai%22%5D)'),
-            'Expected mnemonic hovercard to include clickable See details link to ca65.showReference with mnemonic arg');
+        assert(waiHover && waiHover.contents.value.includes('(W65C02)') && /\| Implied +\|/.test(waiHover.contents.value));
+        assert(!waiHover.contents.value.includes('See details'), 'The full mnemonic hover has no See details link');
         const stpHover = await hoverToken('stp');
-        assert(stpHover && stpHover.contents.value.includes('(W65C02)') && stpHover.contents.value.includes('**Addressing modes:** `Implied`'));
+        assert(stpHover && stpHover.contents.value.includes('(W65C02)') && /\| Implied +\|/.test(stpHover.contents.value));
         assert(await hoverToken('rmb0'), 'W65C02 should retain Rockwell bit ops');
         assert.strictEqual(await hoverToken('jsl'), null, 'W65C02 should not include JSL');
 

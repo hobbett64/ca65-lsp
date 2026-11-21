@@ -202,7 +202,7 @@ export function initializeHoverProvider(connection: _Connection, documents: Text
                 } else if (settings.enableInstructionHover) {
                     const data = getMnemonicInfo(word, settings.cpu);
                     if (data) {
-                        return { contents: { kind: MarkupKind.Markdown, value: generateMnemonicHoverMarkdown(word, data, settings.cpu) }, range: hoverRange };
+                        return { contents: { kind: MarkupKind.Markdown, value: generateMnemonicHoverMarkdown(word, data, settings.cpu, { detailed: true }) }, range: hoverRange };
                     }
                 }
                 return undefined;
@@ -911,6 +911,20 @@ export function generateDirectiveHoverMarkdown(directiveName: string, data: any)
     return markdown;
 }
 
+/**
+ * A Markdown table with its columns padded to line up as plain text, for clients that
+ * show hover Markdown unrendered (e.g. Neovim). Widths ignore backticks, since those
+ * clients hide them; renderers that draw the table (VS Code) ignore the padding.
+ */
+function formatMarkdownTable(header: string[], align: ('left' | 'center')[], rows: string[][]): string {
+    const visibleWidth = (cell: string) => cell.replace(/`/g, '').length;
+    const widths = header.map((h, i) => Math.max(visibleWidth(h), ...rows.map(r => visibleWidth(r[i])), 3));
+    const pad = (cell: string, i: number) => cell + ' '.repeat(widths[i] - visibleWidth(cell));
+    const line = (cells: string[]) => `| ${cells.map(pad).join(' | ')} |\n`;
+    const rule = widths.map((w, i) => align[i] === 'center' ? `:${'-'.repeat(w - 2)}:` : `:${'-'.repeat(w - 1)}`);
+    return line(header) + `| ${rule.join(' | ')} |\n` + rows.map(line).join('');
+}
+
 function formatModeBytes(info: MnemonicModeInfo): string {
     if (info.byteVariableM) return `${info.bytes}–${info.bytes + 1} (M)`;
     if (info.byteVariableX) return `${info.bytes}–${info.bytes + 1} (X)`;
@@ -956,11 +970,9 @@ export function generateMnemonicHoverMarkdown(
             markdown += `\n`;
         }
         if (modeEntries.length > 0) {
-            markdown += `| Mode | Opcode | Bytes | Cycles |\n`;
-            markdown += `| :--- | :---: | :---: | :---: |\n`;
-            for (const [modeName, info] of modeEntries) {
-                markdown += `| ${modeName} | \`${info.opcode}\` | ${formatModeBytes(info)} | ${formatModeCycles(info)} |\n`;
-            }
+            const rows = modeEntries.map(([modeName, info]) =>
+                [modeName, `\`${info.opcode}\``, formatModeBytes(info), formatModeCycles(info)]);
+            markdown += formatMarkdownTable(['Mode', 'Opcode', 'Bytes', 'Cycles'], ['left', 'center', 'center', 'center'], rows);
             markdown += `\n`;
         }
         return markdown;

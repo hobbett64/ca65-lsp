@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.4] - 2026-11-21
+### Changed
+- Instruction hovers show the full reference entry: each affected flag with its effect, and a table of every addressing mode with its opcode, bytes and cycles. This replaces the summary line and the "See details" link; the reference panel is still available as **ca65: Show Instruction Reference**.
+- The addressing mode table's columns are padded so they line up in editors that show hover Markdown as text (e.g. Neovim). VS Code draws the table as before.
+
+### Added
+- README: how to build and run the language server on its own for other editors, with settings and a Neovim example.
+
 ## [2.6.3] - 2026-11-21
 ### Changed
 - Cheap local names in hovers and completion docs keep the `@` outside the bold (`` Scope::routine@**local** ``). Hovers no longer contain an invisible U+2060 word joiner, which other editors (e.g. Neovim) displayed as `<2060>`.
