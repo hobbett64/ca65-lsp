@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.2] - 2026-11-21
+### Added
+- Neovim plugin: Enter right after `/**` also adds the closing ` */` in C files. The `close_doc_comments` option can also be a list of filetypes.
+
+### Changed
+- README: the Neovim section lists every setting and option with its default, and says what's available for C files.
+
 ## [2.7.1] - 2026-11-21
 ### Fixed
 - Neovim plugin: downloading the language server when the plugin is installed or updated (lazy.nvim's build step) reported success but left no server behind, so it was only downloaded when the first ca65 file was opened.

@@ -141,8 +141,8 @@ Requires Neovim 0.11 or newer and Node.js 18 or newer. With [lazy.nvim](https://
   "hobbett64/ca65-lsp",
   version = "*",   -- the latest release
   opts = {
-    -- The server's settings, as in VS Code without the "ca65." prefix (see Settings above),
-    -- e.g. settings = { cpu = "65C02", includeDirs = { "include" } },
+    -- Only what you want to change; see Options below for everything, e.g.
+    -- settings = { cpu = "65C02", linkerConfig = "nrom256.cfg" },
   },
 }
 ```
@@ -154,27 +154,63 @@ What it sets up:
 - `.s`, `.asm` and `.inc` files open as `ca65`, with syntax highlighting (a port of the extension's grammar) under the server's semantic tokens.
 - The language server, with every standard LSP feature (see [Language server features](#language-server-features)).
 - `;` comments for `gc`, `@cheap_locals` as one word, and `%` between `.proc`/`.endproc`, `.if`/`.else`/`.endif` and the other block directives.
-- `/** */` doc comments: Enter continues them with ` * `, Enter right after `/**` adds the closing ` */`, and typing `/` after a ` * ` closes one.
+- `/** */` doc comments: Enter continues them with ` * `, Enter right after `/**` adds the closing ` */`, and typing `/` after a ` * ` closes one. The closing ` */` also works in C files (Neovim's C support already continues ` * `).
 - `:Ref6502` browses the instruction reference (in Telescope when installed); `:Ref6502 lda` shows one instruction.
 - `gx` on a hover's link to a definition (`file://…#L12`) opens it in Neovim at that line.
 
-All options, with their defaults:
+### Options
+
+Everything you can pass to `setup()` (or lazy.nvim's `opts`), with the defaults. Leave out anything you don't change.
 
 ```lua
 require("ca65").setup({
-  -- Server settings. A function(root_dir) returning the table gives per-project settings:
-  -- settings = function(root) return { linkerConfig = "nrom256.cfg" } end,
-  settings = {},
-  root_markers = { ".git", "Makefile" },  -- the nearest one above a file is its project root
-  capabilities = nil,                     -- nil: blink.cmp's or nvim-cmp's, if installed
-  server = {
-    cmd = nil,                            -- run your own server, e.g. { "node", "/path/server.js", "--stdio" }
-    node = "node",                        -- Node.js executable for the bundled/downloaded server
+  -- Language server settings: the same as the VS Code extension's ca65.* settings.
+  -- Can also be a function(root_dir) returning this table, for per-project settings:
+  --   settings = function(root) return { linkerConfig = "nrom256.cfg" } end,
+  settings = {
+    executablePath = "",                      -- path to ca65; "" finds it on your PATH
+    cpu = "auto",                             -- "6502", "65SC02", "65C02", "W65C02", "65816",
+                                              -- or "auto": the CPU of cc65.target
+    cc65 = { target = "c64" },                -- picks the CPU when cpu = "auto" (e.g. "nes": 6502, "cx16": 65C02)
+    includeDirs = { "**/include" },           -- where .include looks (project-relative paths or globs)
+    binIncludeDirs = {},                      -- where .incbin looks
+    linkerConfig = "",                        -- ld65 .cfg file (project-relative or absolute), for
+                                              -- .segment completion, hovers, go to definition and checks
+    implicitImports = false,                  -- undefined symbols are imports (ca65 --auto-import)
+    cComments = true,                         -- /* */ comments (ca65 --feature c_comments)
+    lineContinuations = true,                 -- \ line continuations (ca65 --feature line_continuations)
+    additionalArgs = {},                      -- extra ca65 arguments, e.g. { "-D", "DEBUG=1" }
+    fileExtensions = { ".s", ".asm", ".inc" },-- files the server indexes
+    autoIncludeExtensions = { ".inc" },       -- files that completion offers to .include
+    enableStderrDiagnostics = true,           -- errors from running ca65
+    enableUnusedSymbolDiagnostics = true,     -- "symbol is never used" hints
+    enableInstructionHover = true,            -- hovers on instructions (lda, jsr…)
+    enableDirectiveHover = true,              -- hovers on directives (.proc, .byte…)
+    hoverDocs = "any",                        -- documentation in hovers: "any" (/** */ blocks, else
+                                              -- the ; comments) or "docBlocks" (only /** */ blocks)
+    anonymousLabelIndexHints = true,          -- inlay hints numbering anonymous labels (1:, 1:-)
+    importFromHints = true,                   -- inlay hints showing which file an import comes from
+    smartFolding = true,                      -- fold .proc, .scope, .if… blocks
   },
-  close_doc_comments = true,              -- Enter after /** adds the closing */
-  open_file_links = true,                 -- gx on file://…#L12 links opens them in Neovim
+
+  -- Plugin options
+  root_markers = { ".git", "Makefile" },      -- the nearest one above a file is its project root
+  capabilities = nil,                         -- LSP capabilities; nil: blink.cmp's or nvim-cmp's, if installed
+  server = {
+    cmd = nil,                                -- run your own server, e.g. { "node", "/path/server.js", "--stdio" }
+    node = "node",                            -- Node.js executable for the bundled or downloaded server
+  },
+  close_doc_comments = true,                  -- Enter after /** adds */: true (ca65 and C files),
+                                              -- a list of filetypes (e.g. { "ca65" }), or false
+  open_file_links = true,                     -- gx on file://…#L12 links opens them in Neovim
 })
 ```
+
+Settings changed with `setup()` while Neovim is running restart the server with them.
+
+### C files
+
+The VS Code extension's cc65 C mode (C ↔ assembly navigation, cc65 diagnostics, the generated assembly view, inline assembly) is part of the VS Code extension, so it isn't available in Neovim. For C files, use a C language server such as clangd; the plugin only adds the closing ` */` after `/**`.
 
 Without lazy.nvim, add the repository to your `runtimepath` with any plugin manager; `setup()` is optional. To develop the server, point the plugin at a clone and run `npm ci && npm run bundle` there: a built `server/out/server.js` in the plugin's directory is used instead of the download.
 

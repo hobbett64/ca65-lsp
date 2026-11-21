@@ -20,7 +20,8 @@ local defaults = {
     cmd = nil,
     node = "node",
   },
-  -- Enter right after "/**" also adds the closing " */" line below.
+  -- Enter right after "/**" also adds the closing " */" line below, in ca65 and C files
+  -- (true), in the filetypes listed (e.g. { "ca65" }), or nowhere (false).
   close_doc_comments = true,
   -- gx on a hover link to a file and line (file://…#L12) opens it in Neovim rather
   -- than handing it to the system's opener.
@@ -94,11 +95,17 @@ function M.start(buf)
   }, { bufnr = buf })
 end
 
--- " * " lines inside /* */ comments; Enter after "/**" adds the closing " */"
-local function setup_doc_comments(buf)
-  vim.bo[buf].comments = "s1:/*,mb:*,ex:*/"
-  vim.opt_local.formatoptions:append("ro")
-  if not M.config.close_doc_comments then return end
+--- Whether Enter after "/**" adds the closing " */" in this filetype.
+function M.closes_doc_comments(filetype)
+  local opt = M.config.close_doc_comments
+  if opt == true then opt = { "ca65", "c" } end
+  return type(opt) == "table" and vim.tbl_contains(opt, filetype)
+end
+
+--- Enter right after "/**" adds the closing " */" line below. Needs 'comments' to
+--- continue /* */ comments with " * " (ca65 buffers get that from attach(); C has it
+--- from Neovim's own C settings).
+function M.close_doc_comments(buf)
   vim.api.nvim_create_autocmd("TextChangedI", {
     buffer = buf,
     group = vim.api.nvim_create_augroup("ca65_doc_comments_" .. buf, { clear = true }),
@@ -114,6 +121,13 @@ local function setup_doc_comments(buf)
       end
     end,
   })
+end
+
+-- " * " lines inside /* */ comments; Enter after "/**" adds the closing " */"
+local function setup_doc_comments(buf)
+  vim.bo[buf].comments = "s1:/*,mb:*,ex:*/"
+  vim.opt_local.formatoptions:append("ro")
+  if M.closes_doc_comments("ca65") then M.close_doc_comments(buf) end
 end
 
 --- Buffer settings for a ca65 buffer, then the language server. Called by ftplugin/ca65.lua.
