@@ -645,7 +645,9 @@ function formatCheapLocalMarkdownName(
 ): string {
     const leafName = label.startsWith('@') ? label.slice(1) : label;
     const escapedLeaf = escapeInlineMarkdown(leafName);
-    const boldLeaf = `**@${escapedLeaf}**`;
+    // The @ stays outside the bold: a ** between punctuation (@) and a letter always
+    // opens bold in CommonMark, even right after a letter (Scope::name@**local**).
+    const boldLeaf = `@**${escapedLeaf}**`;
     if (!symbolTable) {
         return boldLeaf;
     }
@@ -655,8 +657,7 @@ function formatCheapLocalMarkdownName(
         if (boundaryEntity) {
             const { prefixParts, leaf } = formatQualifiedPrefixAndLeaf(boundaryEntity);
             const qualifiedBoundary = [...prefixParts, leaf].map(escapeInlineMarkdown).join('::');
-            // Insert U+2060 (Word Joiner, Cf) after ** so CommonMark / VS Code marked parses **@...** as bold right after an alphanumeric parent without visible spacing or line breaks.
-            return `${qualifiedBoundary}**\u2060@${escapedLeaf}**`;
+            return `${qualifiedBoundary}${boldLeaf}`;
         }
     }
     const enclosingScope = symbolTable.getScopeAtPosition({ line: defLine, character: 0 });

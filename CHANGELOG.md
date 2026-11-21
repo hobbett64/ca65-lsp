@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.3] - 2026-11-21
+### Changed
+- Cheap local names in hovers and completion docs keep the `@` outside the bold (`` Scope::routine@**local** ``). Hovers no longer contain an invisible U+2060 word joiner, which other editors (e.g. Neovim) displayed as `<2060>`.
+
 ## [2.6.2] - 2026-11-21
 ### Fixed
 - A lone `.` (e.g. a period ending a sentence in a comment) counted as a word, so with the cursor on one every other period in the file was highlighted, and double-click selected it as a word. A leading `.` is now only part of a word when a letter follows it, as in `.byte`.

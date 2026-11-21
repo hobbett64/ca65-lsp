@@ -534,14 +534,14 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
             textDocument: { uri: mainUri },
             position: { line: bneLocalLine, character: lines[bneLocalLine].indexOf('@loop') + 2 },
         });
-        assert.strictEqual(localHover && localHover.contents.value, '`CODE` PlayerUpdate**\u2060@loop**', `Unexpected hovercard for cheap local @loop:\n${localHover && localHover.contents.value}`);
+        assert.strictEqual(localHover && localHover.contents.value, '`CODE` PlayerUpdate@**loop**', `Unexpected hovercard for cheap local @loop:\n${localHover && localHover.contents.value}`);
 
         const zpTopLine = varsLines.findIndex(l => l.startsWith('@zp_top:'));
         const zpTopHover = await request('textDocument/hover', {
             textDocument: { uri: varsUri },
             position: { line: zpTopLine, character: 2 },
         });
-        assert.strictEqual(zpTopHover && zpTopHover.contents.value, '`ZEROPAGE` **@zp\\_top** (1 byte)', `Unexpected hovercard for cheap local @zp_top:\n${zpTopHover && zpTopHover.contents.value}`);
+        assert.strictEqual(zpTopHover && zpTopHover.contents.value, '`ZEROPAGE` @**zp\\_top** (1 byte)', `Unexpected hovercard for cheap local @zp_top:\n${zpTopHover && zpTopHover.contents.value}`);
 
         // Cheap locals defined by assignment (@tile = $10) are not scope members:
         // each routine resolves its own @tile, shown as routine@tile with its expression.
@@ -553,7 +553,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         });
         assert.strictEqual(
             aliasHover && aliasHover.contents.value,
-            'const AliasScope::alias\\_second**\u2060@tile** = `$20`',
+            'const AliasScope::alias\\_second@**tile** = `$20`',
             `Unexpected hovercard for assigned cheap local @tile:\n${aliasHover && aliasHover.contents.value}`
         );
         const aliasRefCol = lines[aliasRefLine].indexOf('@tile');
@@ -568,7 +568,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         });
         assert.strictEqual(
             firstAliasHover && firstAliasHover.contents.value,
-            'const AliasScope::alias\\_first**\u2060@tile** = `$10`',
+            'const AliasScope::alias\\_first@**tile** = `$10`',
             `Expected the first routine's own @tile, got:\n${firstAliasHover && firstAliasHover.contents.value}`
         );
         const aliasDef = await request('textDocument/definition', {
@@ -806,7 +806,7 @@ const serverEntry = path.resolve(process.cwd(), 'server/out/server.js');
         assert(myLocalItem, 'Expected cheap local completion item @mylocallabel');
         const resolvedLocalItem = await request('completionItem/resolve', myLocalItem);
         assert(
-            resolvedLocalItem.documentation && resolvedLocalItem.documentation.value === '`CODE` myscope::mylabel**\u2060@mylocallabel**',
+            resolvedLocalItem.documentation && resolvedLocalItem.documentation.value === '`CODE` myscope::mylabel@**mylocallabel**',
             `Expected cheap local resolve preview with segment and qualified name, got:\n${resolvedLocalItem.documentation && resolvedLocalItem.documentation.value}`
         );
 
