@@ -113,12 +113,18 @@ function M.install(opts)
       return done(nil)
     end
     local cmd = steps[i]
-    local ok, proc = pcall(vim.system, cmd, { text = true }, opts.sync and nil or vim.schedule_wrap(function(res)
-      if res.code ~= 0 then
-        return done(("`%s` failed: %s"):format(cmd[1], vim.trim(res.stderr or "")))
-      end
-      run(i + 1)
-    end))
+    -- Synchronous: no callback (wait() below runs the next step). Not `sync and nil or
+    -- cb`: that's always cb, and the steps would then run twice.
+    local on_exit = nil
+    if not opts.sync then
+      on_exit = vim.schedule_wrap(function(res)
+        if res.code ~= 0 then
+          return done(("`%s` failed: %s"):format(cmd[1], vim.trim(res.stderr or "")))
+        end
+        run(i + 1)
+      end)
+    end
+    local ok, proc = pcall(vim.system, cmd, { text = true }, on_exit)
     if not ok then
       return done(("couldn't run `%s`: %s"):format(cmd[1], proc))
     end

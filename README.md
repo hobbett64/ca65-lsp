@@ -1,10 +1,13 @@
-# ca65 Assembly for Visual Studio Code
+# ca65-lsp
 
-Provides basic LSP-backed language support for **ca65** assembly files.
+A language server for **ca65** assembly (the assembler of the [cc65](https://cc65.github.io/) suite), with a **VS Code extension** and a **Neovim plugin**. It runs `ca65` in the background for diagnostics and understands your whole workspace: definitions, references, hovers, completion and more.
 
-## Features
+- [Language server features](#language-server-features), available in every editor
+- [VS Code extension](#vs-code-extension): the server plus syntax highlighting, a hex listing, status bar counters, an instruction reference panel and cc65 C mode
+- [Neovim plugin](#neovim-plugin): the server plus syntax highlighting, ca65 editing settings and an instruction reference
+- [Other editors](#other-editors): the standalone server
 
-This extension provides a full-featured language server to make writing `ca65` assembly a modern and productive experience.
+## Language server features
 
 * **ca65-backed & LSP Diagnostics:**
     * Live validation by running `ca65` in the background and mapping errors to editor lines.
@@ -14,19 +17,68 @@ This extension provides a full-featured language server to make writing `ca65` a
     * **Go to Definition:** Jump directly to the definition of any label, constant, variable, macro, enum, struct, scope, or `.segment` / built-in segment directive (`.bss`, `.code`, `.data`, `.rodata`, `.zeropage`) in your configured `ca65.linkerConfig` `.cfg` file. Works across local, included, and workspace-exported symbols.
     * **Find All References & Safe Rename:** Find all usages across the workspace or rename symbols (`F2`) with `prepareRename` validation and cheap local (`@label`) normalization.
     * **Call Hierarchy:** See incoming and outgoing `jsr`/`jmp` (and `65816` `jsl`/`jml`) calls for procedures and labels.
-    * **Outline view:** Nested file outline with instruction/segment-aware symbol icons, non-`CODE` segment annotations (e.g. `(ZEROPAGE)`, `(RODATA)`, `(BSS)`, `(BANK01)`), `(macro)` labels, and source-order sorting.
+    * **Document symbols:** Nested symbols for outline views, with instruction/segment-aware symbol icons, non-`CODE` segment annotations (e.g. `(ZEROPAGE)`, `(RODATA)`, `(BSS)`, `(BANK01)`), `(macro)` labels, and source-order sorting.
 * **Code Intelligence:**
-    * **Rich Hover Information:** Shows segment badges (`CODE`, `ZEROPAGE`, `RODATA`, etc.) alongside kind badges (`proc`, `constant`, `variable`, `enum`, `struct`, `union`, `macro`, `define`), `(N bytes)` sizes, evaluated constant values, multi-base number literal hovers (Hex, Dec, Bin), doc comments (`/** ... */` blocks rendered as Markdown with `@tag` paragraphs and clickable `{symbol}` links, or else the `;` comments above the definition and its trailing `;` comment, verbatim including the `;` markers and split by a divider; set `ca65.hoverDocs` to `docBlocks` to show only `/** ... */` blocks), a `cc65 runtime` tag on imports of cc65 runtime symbols (`pusha`, `incsp2`, `sp`, `tmp1`, ...), linker segment/memory details on `.segment "..."`, and toggleable CPU-aware lowercase instruction and directive hovers (`ca65.enableInstructionHover`, `ca65.enableDirectiveHover`, `6502`–`65816`) with a **See details** link into the Reference panel.
+    * **Rich Hover Information:** Shows segment badges (`CODE`, `ZEROPAGE`, `RODATA`, etc.) alongside kind badges (`proc`, `constant`, `variable`, `enum`, `struct`, `union`, `macro`, `define`), `(N bytes)` sizes, evaluated constant values, multi-base number literal hovers (Hex, Dec, Bin), doc comments (`/** ... */` blocks rendered as Markdown with `@tag` paragraphs and clickable `{symbol}` links, or else the `;` comments above the definition and its trailing `;` comment, verbatim including the `;` markers and split by a divider; set `ca65.hoverDocs` to `docBlocks` to show only `/** ... */` blocks), a `cc65 runtime` tag on imports of cc65 runtime symbols (`pusha`, `incsp2`, `sp`, `tmp1`, ...), linker segment/memory details on `.segment "..."`, and toggleable CPU-aware lowercase instruction and directive hovers (`ca65.enableInstructionHover`, `ca65.enableDirectiveHover`, `6502`–`65816`); instruction hovers show the full reference entry, with each affected flag and a table of every addressing mode's opcode, bytes and cycles.
     * **Context-Aware Autocompletion & Snippets:** Suggests CPU-filtered mnemonics, directives, block snippets (`.proc`, `.macro`, `.scope`, `.struct`, `.union`, `.enum`, `.repeat`, `.if*`) with automatic block-closer/branch dedent, auto-quoted `.segment`/`.include`/`.incbin`/`.asciiz`/`.literal` completions, `Scope::` members, `.tag`/`.sizeof(` types, `.segment "..."` names (prioritizing `ca65.linkerConfig`), `.include`/`.incbin` paths, `@` doc-comment tags, and auto-import/include suggestions.
     * **Signature Help:** Active parameter hints for `.macro` calls and `.define` function-like macros.
     * **Import Tracing & Anonymous Label Indexing:** Inlay hints for `.import` origins and anonymous label indices: `1:` before each declaration, `1:-` before each reference (`ca65.anonymousLabelIndexHints`).
     * **C-Style Comments & Line Continuations:** Parses `/* ... */` block comments (`ca65.cComments`) and backslash (`\`) line continuations (`ca65.lineContinuations`) across definitions, references, hovers, completions, signature help, and instruction cycle analysis.
-* **Editor & Assembly Tools:**
-    * **Syntax Highlighting & Semantic Tokens:** TextMate grammar (with `/** ... */` doc tags and `Scope::` prefixes) paired with LSP semantic tokens distinguishing instruction-followed code labels (`function`), data/ZP/BSS/RAM labels (`variable` + `readonly` on read-only segments), `.proc`, `.macro`, constants, `.enum`, `.struct`, `.scope`, and `.set` variables.
-    * **Side-by-Side Hex & Address Listing:** Open `ca65: Show Hex & Address Listing Side-by-Side` (`$(file-binary)` editor title icon, or click the status bar counter) to inspect assembled addresses and emitted bytes aligned line-for-line with viewport-synced scrolling, or view live `ca65` errors when assembly fails.
-    * **Status Bar Cycle/Byte Counter & Active Segment:** Displays compact byte sizes and cycle counts (including 8/16-bit `M`/`X` ranges for `65816`) with a unified `Line | Hex | Cycles` tooltip for the current line or selection, plus the active segment at the cursor line with click-to-jump navigation to the directive that set it.
-    * **Code Folding & Sticky Scroll:** Fold `.proc`, `.macro`, `.scope`, `.struct`, `.union`, `.enum`, and conditional blocks.
-    * **Instruction Reference Panel:** Open the full opcode reference for the active target CPU (`ca65.cpu`) via `ca65: Show Instruction Reference`, or click **See details** on any instruction hovercard to jump straight to that opcode.
+* **Semantic Tokens:** Distinguishes instruction-followed code labels (`function`), data/ZP/BSS/RAM labels (`variable` + `readonly` on read-only segments), `.proc`, `.macro`, constants, `.enum`, `.struct`, `.scope`, and `.set` variables.
+* **Code Folding:** Fold `.proc`, `.macro`, `.scope`, `.struct`, `.union`, `.enum`, and conditional blocks.
+* **Instruction reference data:** The full opcode reference for each CPU, through the custom request `ca65/getReferenceData` (params `{ uri?, cpu? }`, result `{ cpu, mnemonics }`). The VS Code panel and the Neovim `:Ref6502` command are built on it.
+
+### Requirements
+
+- `ca65` in your `PATH`, or set `ca65.executablePath` to the absolute path of your `ca65` executable.
+- Node.js 18 or newer to run the server outside VS Code (VS Code brings its own).
+
+### Known Limitations
+
+* Diagnostics are mainly powered via `ca65`'s `stderr`, so they may be limited in detail, and they do not provide any diagnostics about the linking step.
+* The LSP is agnostic to the actual build command your project uses, it assumes that all ca65 files are linked together for the purpose of import/export visibility.
+* Macro expansion is entirely opaque to the LSP, so symbols/scopes/syntax that are affected by macro expansion will not be visible to the LSP.
+* Symbols with multiple definitions will always resolve to the first definition in the same file.
+* Symbol refs will always resolve to the symbol even if a macro is declared with the same name after it's declaration.
+* Anonymous structs are currently not handled to spec (the spec adds the members to an anonymous scope, but `ca65` actually adds them to the parent scope).
+
+### Settings
+
+The settings are the same in every editor. In VS Code they're `ca65.*` settings (see the Settings UI). Elsewhere, the server reads them through the standard `workspace/configuration` request, in a `ca65` section: drop the `ca65.` prefix and nest them, e.g. `ca65.linkerConfig` becomes:
+
+```json
+{ "ca65": { "linkerConfig": "nrom256.cfg", "cpu": "6502", "includeDirs": [] } }
+```
+
+Unset settings use the same defaults everywhere.
+
+* **`ca65.executablePath` & `ca65.fileExtensions`:** Path to `ca65` (resolved from `PATH` if unset) and workspace-watched/indexed extensions (prepopulated with `[".s", ".asm", ".inc"]`).
+* **`ca65.cpu`:** Target CPU architecture: `auto` (default; the CPU implied by `ca65.cc65.target`, e.g. `6502` for `c64`/`nes`, `65C02` for `cx16`, `65SC02` for `lynx`) or an explicit `6502`, `65SC02`, `65C02`, `W65C02`, `65816` that overrides it everywhere (including cc65 C mode), driving hovers, completions, cycle/byte estimates, call hierarchy, reference guide, and `ca65 --cpu`.
+* **`ca65.includeDirs` & `ca65.binIncludeDirs`:** Search paths for `.include` (defaults to `["**/include"]`) and `.incbin` (defaults to `[]`).
+* **`ca65.implicitImports`:** Treats undefined symbols as implicit imports (`--auto-import`).
+* **`ca65.cComments` & `ca65.lineContinuations`:** Control `--feature c_comments` and `--feature line_continuations` (both default to `true`, automatically enabled when supported by your `ca65` executable and skipped if unsupported).
+* **`ca65.linkerConfig`:** Optional path to an ld65 linker configuration (`.cfg`) file (default `""`) enabling `.segment` completions, hover details, go-to-definition, `type = zp`/`rw`/`ro` segment resolution, and unknown-segment warnings.
+* **`ca65.additionalArgs`:** Optional extra CLI flags passed to `ca65` (defaults to `[]`, e.g. `["-D", "DEBUG=1", "-s"]`; output flags `-o`, `-l`, `--listing`, `--create-dep`, `--create-full-dep` are ignored).
+
+Diagnostics and UX toggles (`ca65.enableStderrDiagnostics`, `ca65.enableUnusedSymbolDiagnostics`, `ca65.enableInstructionHover`, `ca65.enableDirectiveHover`, inlay hints, `ca65.smartFolding`, `ca65.autoIncludeExtensions`) can also be configured individually.
+
+## VS Code extension
+
+### Installation
+
+You can install the extension from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=hobbett.ca65-vscode-extension).
+
+Alternatively, in VS Code, open the **Extensions** view (`Ctrl+Shift+X`), search for `ca65 Assembly`, and click **Install**. Each [release](https://github.com/hobbett64/ca65-lsp/releases) also has the `.vsix`, for **Extensions: Install from VSIX…**
+
+### Features
+
+Everything in [Language server features](#language-server-features), plus:
+
+* **Syntax Highlighting:** TextMate grammar (with `/** ... */` doc tags and `Scope::` prefixes), under the server's semantic tokens.
+* **Outline & Sticky Scroll:** the server's document symbols and folding ranges in VS Code's Outline view and Sticky Scroll.
+* **Side-by-Side Hex & Address Listing:** Open `ca65: Show Hex & Address Listing Side-by-Side` (`$(file-binary)` editor title icon, or click the status bar counter) to inspect assembled addresses and emitted bytes aligned line-for-line with viewport-synced scrolling, or view live `ca65` errors when assembly fails.
+* **Status Bar Cycle/Byte Counter & Active Segment:** Displays compact byte sizes and cycle counts (including 8/16-bit `M`/`X` ranges for `65816`) with a unified `Line | Hex | Cycles` tooltip for the current line or selection, plus the active segment at the cursor line with click-to-jump navigation to the directive that set it.
+* **Instruction Reference Panel:** Open the full opcode reference for the active target CPU (`ca65.cpu`) via `ca65: Show Instruction Reference`.
 * **cc65 C mode (work in progress) — C ↔ assembly support for cc65 projects:**
     * *This feature is still in development: behavior and settings may change between releases. Feedback and bug reports are welcome.*
     * **Off by default:** turn on `ca65.enableCSupport` ("Enable C Support") in the workspaces where you want it. If you use another C extension (clangd, C/C++), disable it for those workspaces, or C files will get results from both.
@@ -42,31 +94,13 @@ This extension provides a full-featured language server to make writing `ca65` a
     * **Generated assembly view:** `ca65: Show Generated Assembly (cc65) Side-by-Side` (`$(file-code)` editor title icon or **Show Assembly** in the status bar on C files) opens a read-only view of the assembly cc65 generates for the current file (including unsaved changes) beside it, with each C line's source shown as a comment and the address and bytes of every instruction in hex listing columns (`addr  bytes | code`). Moving the cursor in the C file highlights the assembly generated for that line (for an `#include` line, the imports of the symbols the header declares and any code it defines), and clicking in the assembly highlights the C line it came from. The view refreshes as you edit.
     * **Diagnostics come from cc65 itself** instead of clangd: open C files are compiled in the background (including unsaved changes) with `ca65.cc65.target`, errors in included headers are shown on the headers, and cc65's output is assembled with ca65 to also catch inline asm operand errors (e.g. range errors) on the exact `__asm__` string. clangd's diagnostics are only shown if cc65 is not found.
     * **Inline assembly** (`__asm__("...")` / `asm("...")`) in C files behaves like ca65 code: ca65 syntax highlighting (with cc65 `%b`/`%w`/`%v`/`%o`/`%g` placeholders), instruction and symbol hovers, completion, Go to Definition, Find All References, and Rename. Inline uses are part of references and renames started from C or assembly, and `%v` arguments are seen by clangd as normal C references.
-    
-## Known Limitations
 
-* Diagnostics are mainly powered via `ca65`'s `stderr`, so they may be limited in detail, and they do not provide any diagnostics about the linking step.
-* The LSP is agnostic to the actual build command your project uses, it assumes that all ca65 files are linked together for the purpose of import/export visibility.
-* Macro expansion is entirely opaque to the LSP, so symbols/scopes/syntax that are affected by macro expansion will not be visible to the LSP.
-* Symbols with multiple definitions will always resolve to the first definition in the same file.
-* Symbol refs will always resolve to the symbol even if a macro is declared with the same name after it's declaration.
-* cc65 C mode needs `clangd`'s background index to find C symbols from assembly; right after startup, cross-language results may be incomplete until indexing finishes.
-* cc65 C mode doesn't coordinate with other C extensions: with it enabled, disable other C language support (clangd, C/C++) for that workspace, or C files get duplicate hovers, completions, and diagnostics.
-* Inline assembly features (other than highlighting) require cc65 C mode to be running. Each inline asm string is treated as one line of assembly, so a template split across literals on several lines is parsed line by line. Inline asm gets TextMate highlighting only (no semantic token colors), and the cycle/byte status bar does not cover it. A `%g` (C label) argument shows as an undeclared identifier in clangd.
-* Anonymous structs are currently not handled to spec (the spec adds the members to an anonymous scope, but `ca65` actually adds them to the parent scope).
+### Requirements
 
-## Pre-requisites
-- You must provide the `ca65` in your system's `PATH` or set setting `ca65.executablePath` to the absolute path of your `ca65` executable.
 - Auto-save must be enabled for reliable diagnostics.
 - For cc65 C mode (work in progress): `clangd` in your `PATH` (or `ca65.clangd.path`) and a cc65 installation (`cc65` for C diagnostics, the generated assembly view and its C headers; `ca65` to check inline assembly).
 
-## Installation
-
-You can install this extension from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=hobbett.ca65-vscode-extension).
-
-Alternatively, in VS Code, open the **Extensions** view (`Ctrl+Shift+X`), search for `ca65 Assembly`, and click **Install**.
-
-## File detection
+### File detection
 
 By default, `.s`, `.asm`, and `.inc` files are detected as `ca65` language.
 
@@ -81,32 +115,24 @@ e.g.
 }
 ```
 
-Use `ca65.fileExtensions` (defaulting to `[".s", ".asm", ".inc"]`) to configure which file extensions the language server watches and indexes.
+### VS Code settings
 
-## Other settings
+Besides the [language server settings](#settings):
 
-Configure structured assembler and editor settings via the VS Code Settings UI:
-
-* **`ca65.executablePath` & `ca65.fileExtensions`:** Path to `ca65` (resolved from `PATH` if unset) and workspace-watched/indexed extensions (prepopulated with `[".s", ".asm", ".inc"]`).
-* **`ca65.cpu`:** Target CPU architecture: `auto` (default; the CPU implied by `ca65.cc65.target`, e.g. `6502` for `c64`/`nes`, `65C02` for `cx16`, `65SC02` for `lynx`) or an explicit `6502`, `65SC02`, `65C02`, `W65C02`, `65816` that overrides it everywhere (including cc65 C mode), driving hovers, completions, cycle/byte estimates, call hierarchy, reference guide, and `ca65 --cpu`.
-* **`ca65.includeDirs` & `ca65.binIncludeDirs`:** Search paths for `.include` (defaults to `["**/include"]`) and `.incbin` (defaults to `[]`).
-* **`ca65.implicitImports`:** Treats undefined symbols as implicit imports (`--auto-import`).
-* **`ca65.cComments` & `ca65.lineContinuations`:** Control `--feature c_comments` and `--feature line_continuations` (both default to `true`, automatically enabled when supported by your `ca65` executable and skipped if unsupported).
-* **`ca65.linkerConfig`:** Optional path to an ld65 linker configuration (`.cfg`) file (default `""`) enabling `.segment` completions, hover details, go-to-definition, `type = zp`/`rw`/`ro` segment resolution, and unknown-segment warnings.
 * **`ca65.cc65.additionalArgs`:** (cc65 C mode, work in progress) Extra cc65 arguments (e.g. `["-Oirs"]`) used for C diagnostics and the generated assembly view, to match your build.
 * **`ca65.cc65.executablePath` & `ca65.cc65.target`:** (cc65 C mode, work in progress) The cc65 C compiler (resolved from `PATH` if unset), used for C diagnostics, the generated assembly view and to locate cc65's headers, and the target system (`cc65 -t`, default `c64` like cc65 itself), which selects the target's predefined macros (e.g. `__NES__`), CPU, and string character set; its macros are also passed to clangd.
 * **`ca65.enableCSupport`:** Turns on cc65 C mode (work in progress; off by default; needs `clangd`, and cc65 for C diagnostics and the generated assembly view). Related: `ca65.clangd.path`, `ca65.clangd.arguments` (extra clangd CLI args), `ca65.clangd.compileFlags` (extra C flags such as `"-D__C64__"`), `ca65.clangd.cc65IncludeDir` (defaults to auto-detection via `CC65_INC`, `CC65_HOME`, or the cc65 install). Use `ca65: Restart clangd (cc65 C mode)` after changing your toolchain.
-* **`ca65.additionalArgs`:** Optional extra CLI flags passed to `ca65` (defaults to `[]`, e.g. `["-D", "DEBUG=1", "-s"]`; output flags `-o`, `-l`, `--listing`, `--create-dep`, `--create-full-dep` are ignored).
-
-Diagnostics and UX toggles (`ca65.enableStderrDiagnostics`, `ca65.enableUnusedSymbolDiagnostics`, `ca65.enableInstructionHover`, `ca65.enableDirectiveHover`, inlay hints, status bar indicators, `ca65.smartFolding`, `ca65.autoIncludeExtensions`) can also be configured individually.
+* **`ca65.enableStatusBarCycleCount` & `ca65.enableStatusBarSegment`:** Show the status bar cycle/byte counter and the active segment.
 
 Please see the Settings gear icon in the installed extension to easily set this and other settings.
 
-## Using the language server in other editors
+### Known Limitations
 
-The language server is a standalone Node.js program that speaks the Language Server Protocol over stdio, so editors other than VS Code (Neovim, Helix, Emacs, Sublime Text…) can use it too. This repository is also a Neovim plugin.
+* cc65 C mode needs `clangd`'s background index to find C symbols from assembly; right after startup, cross-language results may be incomplete until indexing finishes.
+* cc65 C mode doesn't coordinate with other C extensions: with it enabled, disable other C language support (clangd, C/C++) for that workspace, or C files get duplicate hovers, completions, and diagnostics.
+* Inline assembly features (other than highlighting) require cc65 C mode to be running. Each inline asm string is treated as one line of assembly, so a template split across literals on several lines is parsed line by line. Inline asm gets TextMate highlighting only (no semantic token colors), and the cycle/byte status bar does not cover it. A `%g` (C label) argument shows as an undeclared identifier in clangd.
 
-### Neovim plugin
+## Neovim plugin
 
 Requires Neovim 0.11 or newer and Node.js 18 or newer. With [lazy.nvim](https://github.com/folke/lazy.nvim):
 
@@ -115,7 +141,7 @@ Requires Neovim 0.11 or newer and Node.js 18 or newer. With [lazy.nvim](https://
   "hobbett64/ca65-lsp",
   version = "*",   -- the latest release
   opts = {
-    -- The server's settings, as in VS Code without the "ca65." prefix (see Settings below),
+    -- The server's settings, as in VS Code without the "ca65." prefix (see Settings above),
     -- e.g. settings = { cpu = "65C02", includeDirs = { "include" } },
   },
 }
@@ -126,7 +152,7 @@ On install, the plugin downloads the language server from the GitHub release of 
 What it sets up:
 
 - `.s`, `.asm` and `.inc` files open as `ca65`, with syntax highlighting (a port of the extension's grammar) under the server's semantic tokens.
-- The language server, with every standard LSP feature (see [What you get](#what-you-get)).
+- The language server, with every standard LSP feature (see [Language server features](#language-server-features)).
 - `;` comments for `gc`, `@cheap_locals` as one word, and `%` between `.proc`/`.endproc`, `.if`/`.else`/`.endif` and the other block directives.
 - `/** */` doc comments: Enter continues them with ` * `, Enter right after `/**` adds the closing ` */`, and typing `/` after a ` * ` closes one.
 - `:Ref6502` browses the instruction reference (in Telescope when installed); `:Ref6502 lda` shows one instruction.
@@ -152,7 +178,9 @@ require("ca65").setup({
 
 Without lazy.nvim, add the repository to your `runtimepath` with any plugin manager; `setup()` is optional. To develop the server, point the plugin at a clone and run `npm ci && npm run bundle` there: a built `server/out/server.js` in the plugin's directory is used instead of the download.
 
-### Other editors
+## Other editors
+
+The language server is a standalone Node.js program that speaks the Language Server Protocol over stdio, so any editor with LSP support (Helix, Emacs, Sublime Text…) can use it. Configure its settings as described in [Settings](#settings).
 
 Download `ca65-lsp-server-<version>.tar.gz` (or `.zip`) from the [releases](https://github.com/hobbett64/ca65-lsp/releases) and start the server with:
 
@@ -172,24 +200,6 @@ npm run bundle
 ```
 
 This produces `server/out/server.js`. Run `npm run bundle` again after pulling updates.
-
-### Settings
-
-The server reads the same settings as the VS Code extension, through the standard `workspace/configuration` request, in a `ca65` section. In your editor's LSP settings, drop the `ca65.` prefix and nest them, e.g. `ca65.linkerConfig` becomes:
-
-```json
-{ "ca65": { "linkerConfig": "nrom256.cfg", "cpu": "6502", "includeDirs": [] } }
-```
-
-Unset settings use the same defaults as VS Code.
-
-### What you get
-
-Everything that's standard LSP: hover, go to definition, references, rename, completion, signature help, document and workspace symbols, call hierarchy, folding ranges, inlay hints, document highlights, document links, code actions, diagnostics and semantic tokens.
-
-Not available outside VS Code, because they're implemented in the VS Code client: the overlays, the status bar cycle count and segment, and cc65 C mode. Other editors also don't get the extension's TextMate grammar (the Neovim plugin has its own syntax file; elsewhere, symbol colours come from semantic tokens), or the instruction reference panel (the Neovim plugin has `:Ref6502`).
-
-The data behind the instruction reference is available to any client through the custom request `ca65/getReferenceData` (params `{ uri?, cpu? }`, result `{ cpu, mnemonics }`), if you want to build a reference view in your editor.
 
 ## Running Tests
 ```
