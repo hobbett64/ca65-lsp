@@ -156,7 +156,7 @@ What it sets up:
 - `.s`, `.asm` and `.inc` files open as `ca65`, with syntax highlighting (a port of the extension's grammar) under the server's semantic tokens.
 - The language server, with every standard LSP feature (see [Language server features](#language-server-features)).
 - `;` comments for `gc`, `@cheap_locals` as one word, and `%` between `.proc`/`.endproc`, `.if`/`.else`/`.endif` and the other block directives.
-- Enter after a label (`reset:`, `@loop: ; wait`) indents the new line one level, as in VS Code; other new lines keep the indent of the line above. Nothing you've typed is moved, and `=` leaves lines as they are. To move a line out, use `Ctrl-d` in insert mode or `<<`. The width is `'shiftwidth'`; for spaces, set `'expandtab'` (or use an `.editorconfig`).
+- Indenting as in VS Code: Enter after a label (`reset:`, `@loop: ; wait`) or a block directive (`.proc`, `.scope`, `.macro`, `.if`…, `.else`, `.repeat`, `.struct`…) indents the new line one level, and typing `.end…` or `.else` at the start of a line moves it back one level. Other new lines keep the indent of the line above, and nothing else is moved. To move a line yourself, use `Ctrl-d`/`Ctrl-t` in insert mode or `<<`/`>>`. The width is `'shiftwidth'`; for spaces, set `'expandtab'` (or use an `.editorconfig`).
 - `/** */` doc comments: Enter continues them with ` * `, Enter right after `/**` adds the closing ` */`, and typing `/` after a ` * ` closes one. The closing ` */` also works in C files (Neovim's C support already continues ` * `).
 - `:Ref6502` browses the instruction reference (in Telescope when installed); `:Ref6502 lda` shows one instruction.
 - `gx` on a hover's link to a definition (`file://…#L12`) opens it in Neovim at that line.

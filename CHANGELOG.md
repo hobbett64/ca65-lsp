@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.2] - 2026-11-22
+### Fixed
+- Neovim plugin: Enter after a block directive (`.proc`, `.scope`, `.macro`, `.if`…, `.else`, `.repeat`, `.struct`, `.union`, `.enum`) indents the new line again, and typing `.end…` or `.else` at the start of a line moves it back one level, as in VS Code. 2.9.1 only indented after labels.
+- Neovim plugin: the line after a `/** */` comment takes the indent of its `/**`, not the one-space indent of its ` */`.
+
 ## [2.9.1] - 2026-11-22
 ### Changed
 - Neovim plugin: indenting is simpler. Enter after a label (a line whose code ends in `:`) indents the new line one level, as in VS Code, and other new lines keep the indent of the line above. Lines are no longer moved as you type (labels on `:`, `.endscope` and `.else` to their block), and `=` leaves lines as they are instead of reindenting them.
