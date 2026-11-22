@@ -64,9 +64,15 @@ syn match ca65DocLink contained "\v\{%(\@link\s+)?%(::)?\h\w*%(::\h\w*)*\}" cont
 syn match ca65DocLinkName contained "\v%(::)?\h\w*%(::\h\w*)*"
 syn match ca65DocLinkTag  contained "\v\@link>"
 " @tags at the start of a doc comment line (after the * gutter)
-syn match ca65DocTag contained "\v\c%(^\s*%(\*\s*)?|\/\*\*\s*)\zs\@%(param|arg|argument|input|in|output|out|clobbers?|preserves?|see|modifies|uses|returns?|throws|deprecated|since|author|note|warning|example|todo|brief|details)>" nextgroup=ca65DocParam skipwhite
-" The name after @param/@input/@output/@preserve...
+syn match ca65DocTag contained "\v\c%(^\s*%(\*\s*)?|\/\*\*\s*)\zs\@%(param|arg|argument|input|in|output|out|see|modifies|uses|returns?|throws|deprecated|since|author|note|warning|example|todo|brief|details)>" nextgroup=ca65DocParam skipwhite
+" The name after @param/@input/@output...
 syn match ca65DocParam contained "\v[^ \t*()]+"
+" @clobbers/@preserves take a list, with or without commas: @preserves a, x, y or
+" @clobbers a x. Every item is coloured; the list ends at " - description", ':' or '('
+" (as in the TextMate grammar).
+syn match ca65DocTag contained "\v\c%(^\s*%(\*\s*)?|\/\*\*\s*)\zs\@%(clobbers?|preserves?)>" nextgroup=ca65DocList skipwhite
+syn match ca65DocList contained transparent "\v[^ \t,:*()]+%(%(\s*,\s*|\s+)%([-–—])@![^ \t,:*()]+)*" contains=ca65DocListItem
+syn match ca65DocListItem contained "\v[^ \t,:*()]+"
 
 syn match  ca65Comment      ";.*$" contains=ca65DocLink
 syn region ca65BlockComment start="/\*" end="\*/" contains=ca65DocLink
@@ -78,6 +84,7 @@ hi def link ca65BlockComment Comment
 hi def link ca65DocComment   Comment
 hi def link ca65DocTag       SpecialComment
 hi def link ca65DocParam     Identifier
+hi def link ca65DocListItem  ca65DocParam
 hi def link ca65DocLink      Comment
 hi def link ca65DocLinkName  Underlined
 hi def link ca65DocLinkTag   SpecialComment
