@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.1] - 2026-11-22
+### Fixed
+- Call hierarchy: a call to a qualified name (`jsr Gfx::init`) is a call to `Gfx::init` only. The scopes that qualify it (`Gfx`) no longer show up as called too, in outgoing calls, or with the caller in their incoming calls.
+
 ## [2.8.0] - 2026-11-22
 ### Added
 - Neovim plugin: `require("ca65").segment()`, `.bytes()` and `.cycles()` give the segment, size and cycle count of the current line, or of the selection in visual mode (`CODE`, `3 B`, `4 cyc`), for your status line, like the VS Code extension's status bar. The README shows how to add them to Neovim's status line or lualine. They ask the language server only once something calls them, with at most one request in flight, so moving the cursor quickly never builds up a backlog.

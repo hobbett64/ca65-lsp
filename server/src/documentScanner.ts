@@ -1120,7 +1120,8 @@ class DocumentScanner {
                     i === lastIdx ? context : 'scope',
                     mapSpanToRange(segments, index, index + name.length),
                     scope,
-                    callingEntity
+                    // Only the last part is called: in `jsr Gfx::init`, Gfx just qualifies the name
+                    i === lastIdx ? callingEntity : undefined
                 ));
                 if (i < lastIdx) {
                     (qualifiers ??= []).push(name);

@@ -422,11 +422,17 @@ class LspClient {
         '.incbin "gfx.bin"',
         '.proc Caller',
         '  jsr Callee',
+        '  jsr Gfx::init',
         '  rts',
         '.endproc',
         '.proc Callee',
         '  rts',
         '.endproc',
+        '.scope Gfx',
+        '.proc init',
+        '  rts',
+        '.endproc',
+        '.endscope',
     ].join('\n');
     fs.writeFileSync(mainPath, mainSrc);
 
@@ -457,8 +463,11 @@ class LspClient {
         });
         assert(prep && prep.length === 1);
         const outgoing = await client.request('callHierarchy/outgoingCalls', { item: prep[0] });
-        assert.strictEqual(outgoing.length, 1);
-        assert.strictEqual(outgoing[0].to.name, 'Callee');
+        // `jsr Gfx::init` calls init only: the Gfx qualifier is not a call to the scope
+        assert.deepStrictEqual(outgoing.map(c => c.to.name).sort(), ['Callee', 'Gfx::init'],
+            `Expected calls to Callee and Gfx::init only, got: ${outgoing.map(c => c.to.name).join(', ')}`);
+        const initCall = outgoing.find(c => c.to.name === 'Gfx::init');
+        assert.deepStrictEqual(initCall.fromRanges, [{ start: { line: 4, character: 11 }, end: { line: 4, character: 15 } }]);
 
         // Rapid edit removing .include "hdr.inc" and immediately checking documentLinks (coalesced flush)
         const editedSrc = mainSrc.replace('.include "hdr.inc"\n', '');
