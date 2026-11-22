@@ -1064,6 +1064,19 @@ function getVisibleTranslationUnitSet(uri: string, graph: IncludesGraph): Readon
     return new Set([uri]);
 }
 
+/**
+ * The top-level scopes of these files. ca65 assembles a translation unit as one source,
+ * so names resolve across all of them (for Scope.findRelativeName).
+ */
+function getTopLevelScopes(uris: Iterable<string>, allSymbolTables: Map<string, SymbolTable>): Scope[] {
+    const roots: Scope[] = [];
+    for (const uri of uris) {
+        const table = allSymbolTables.get(uri);
+        if (table) roots.push(table.getRootScope());
+    }
+    return roots;
+}
+
 function isValueCompletionEntity(entity: SymbolTableEntity): boolean {
     return (entity instanceof Macro && entity.kind === MacroKind.Define)
         || entity instanceof Symbol
@@ -1154,6 +1167,7 @@ function getStructUnionCompletions(
 
     const items: CompletionItem[] = [];
     const visibleUriSet = getVisibleTranslationUnitSet(document.uri, graph);
+    const tuRoots = getTopLevelScopes(visibleUriSet, allSymbolTables);
     const visibleFqns = new Set<string>();
 
     for (const depUri of visibleUriSet) {
@@ -1163,7 +1177,7 @@ function getStructUnionCompletions(
         const { typeEntities } = getTableCompletionMeta(depSymbolTable);
         for (const entry of typeEntities) {
             visibleFqns.add(entry.fqn);
-            const label = currentScope.findRelativeName(entry.entity);
+            const label = currentScope.findRelativeName(entry.entity, tuRoots);
             items.push({
                 label,
                 kind: entry.kind,
@@ -1183,9 +1197,11 @@ function getStructUnionCompletions(
         if (typeEntities.length === 0) continue;
 
         const canonicalPath = findCanonicalIncludePath(document.uri, uri, settings.includeDirs);
+        // Once included, the file's top level joins the translation unit's
+        const includedRoots = [...tuRoots, otherSymbolTable.getRootScope()];
         for (const entry of typeEntities) {
             if (visibleFqns.has(entry.fqn)) continue;
-            const label = currentScope.findRelativeName(entry.entity);
+            const label = currentScope.findRelativeName(entry.entity, includedRoots);
             items.push(makeAutoIncludeCompletionItem(
                 document.uri,
                 label,
@@ -1315,6 +1331,7 @@ async function getCompletionSymbols(
 
     // Gather all locally visible symbols across the current translation unit
     const visibleUriSet = getVisibleTranslationUnitSet(document.uri, includesGraph);
+    const tuRoots = getTopLevelScopes(visibleUriSet, allSymbolTables);
     const seenImports: Set<string> = new Set();
     const visibleFqns: Set<string> = new Set();
     if (!isImportDir) {
@@ -1326,7 +1343,7 @@ async function getCompletionSymbols(
             for (let i = 0; i < valueEntities.length; i++) {
                 const entry = valueEntities[i];
                 visibleFqns.add(entry.fqn);
-                const label = currentScope.findRelativeName(entry.entity);
+                const label = currentScope.findRelativeName(entry.entity, tuRoots);
 
                 completionItems.push({
                     label,
@@ -1348,7 +1365,7 @@ async function getCompletionSymbols(
                 seenImports.add(importEntity.name);
                 visibleFqns.add(importEntity.getFullyQualifiedName());
 
-                const label = currentScope.findRelativeName(importEntity);
+                const label = currentScope.findRelativeName(importEntity, tuRoots);
                 let kind = getCompletionItemKind(getLSPSymbolKind(importEntity, allSymbolTables));
                 let detail = getCompletionItemDetail(importEntity);
                 let targetEntity: SymbolTableEntity = importEntity;
@@ -1404,6 +1421,8 @@ async function getCompletionSymbols(
                 }
                 return canonicalPath;
             };
+            // Once included, the file's top level joins the translation unit's
+            const includedRoots = [...tuRoots, otherSymbolTable.getRootScope()];
 
             // Suggest including .inc files that define a symbol
             const { valueEntities } = getTableCompletionMeta(otherSymbolTable);
@@ -1412,7 +1431,7 @@ async function getCompletionSymbols(
                 if (visibleFqns.has(entry.fqn)) continue;
                 completionItems.push(makeAutoIncludeCompletionItem(
                     document.uri,
-                    currentScope.findRelativeName(entry.entity),
+                    currentScope.findRelativeName(entry.entity, includedRoots),
                     getCompletionItemKind(getLSPSymbolKind(entry.entity, allSymbolTables)),
                     entry.detail,
                     getCanonicalPath(),
@@ -1424,7 +1443,7 @@ async function getCompletionSymbols(
             for (const importEntity of otherSymbolTable.imports) {
                 if (visibleFqns.has(importEntity.getFullyQualifiedName())) continue;
 
-                const label = currentScope.findRelativeName(importEntity);
+                const label = currentScope.findRelativeName(importEntity, includedRoots);
                 let kind = getCompletionItemKind(getLSPSymbolKind(importEntity, allSymbolTables));
                 let detail = getCompletionItemDetail(importEntity);
                 let targetEntity: SymbolTableEntity = importEntity;

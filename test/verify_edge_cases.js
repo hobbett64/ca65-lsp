@@ -179,6 +179,41 @@ loadAllData({ console: { log() {}, error() {} } });
     assert.strictEqual(res.items[3].mode, 'Zero page');
 }
 
+// 4a. findRelativeName across the files of a translation unit: from inside Game, which has
+// its own init, graphics.s's Gfx::init is "Gfx::init", not "::Gfx::init" (ca65 finds the
+// top-level Gfx from there); "::" only when this file's own Gfx scope hides it
+{
+    const { Position, Range } = require('vscode-languageserver-types');
+    const { ScopeKind, SymbolKind, SymbolTable } = require(path.resolve(process.cwd(), 'server/out/symbolTable.js'));
+    const at = (line) => Range.create(Position.create(line, 0), Position.create(line, 4));
+
+    const gfxTable = new SymbolTable('file:///tu/graphics.s');
+    const gfx = gfxTable.getRootScope().addChildScope('Gfx', at(0), ScopeKind.Scope);
+    const gfxInit = gfx.addSymbol('init', at(1), SymbolKind.CodeLabel);
+    const drawSprite = gfx.addSymbol('drawSprite', at(2), SymbolKind.CodeLabel);
+    const topLevel = gfxTable.getRootScope().addSymbol('waitFrame', at(3), SymbolKind.CodeLabel);
+
+    const gameTable = new SymbolTable('file:///tu/game.s');
+    const game = gameTable.getRootScope().addChildScope('Game', at(0), ScopeKind.Scope);
+    game.addSymbol('init', at(1), SymbolKind.CodeLabel);
+    const tuRoots = [gameTable.getRootScope(), gfxTable.getRootScope()];
+
+    assert.strictEqual(game.findRelativeName(gfxInit, tuRoots), 'Gfx::init');
+    assert.strictEqual(game.findRelativeName(drawSprite, tuRoots), 'Gfx::drawSprite');
+    assert.strictEqual(game.findRelativeName(topLevel, tuRoots), 'waitFrame');
+    // Without the translation unit, the clash with Game::init forced the full name
+    assert.strictEqual(game.findRelativeName(gfxInit), '::Gfx::init');
+
+    // A Gfx scope inside Game hides the top-level one, so "::" is needed after all
+    const shadowTable = new SymbolTable('file:///tu/shadow.s');
+    const outer = shadowTable.getRootScope().addChildScope('Game', at(0), ScopeKind.Scope);
+    outer.addChildScope('Gfx', at(1), ScopeKind.Scope).addSymbol('init', at(2), SymbolKind.CodeLabel);
+    assert.strictEqual(
+        outer.findRelativeName(gfxInit, [shadowTable.getRootScope(), gfxTable.getRootScope()]),
+        '::Gfx::init'
+    );
+}
+
 // 4b. Feature-flag comment/continuation gating & built-in fs glob matcher
 {
     const {

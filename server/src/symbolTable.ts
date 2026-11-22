@@ -379,11 +379,18 @@ export class Scope extends SymbolTableEntity {
         return this.orderedChildScopes ?? EMPTY_SCOPES;
     }
 
+    /**
+     * Resolves a name the way ca65 does from this scope: in this scope, then each scope
+     * around it. tuRoots are the top-level scopes of the other files in the translation
+     * unit: ca65 assembles the included files as one source, so their top-level scopes
+     * (a module's `.scope Gfx` in graphics.s) are part of the same top level.
+     */
     private findName(
         name: string,
         qualifiers: readonly string[],
         context: ReferenceInfo['context'],
-        allowImports: boolean
+        allowImports: boolean,
+        tuRoots: readonly Scope[] = EMPTY_SCOPES
     ): SymbolTableEntity | undefined {
         let currentBaseScope: Scope | null = this;
         while (currentBaseScope) {
@@ -392,47 +399,70 @@ export class Scope extends SymbolTableEntity {
                 if (qualifiers[0]?.length === 0) {
                     qualifiers = qualifiers.slice(1);
                 }
+
+                // The top level: this file's, then the rest of the translation unit's
+                const resolved = Scope.findNameIn(currentBaseScope, name, qualifiers, context, allowImports);
+                if (resolved) return resolved;
+                for (const root of tuRoots) {
+                    if (root === currentBaseScope) continue;
+                    const resolvedInUnit = Scope.findNameIn(root, name, qualifiers, context, allowImports);
+                    if (resolvedInUnit) return resolvedInUnit;
+                }
+                return undefined;
             }
 
-            let nextScope: Scope | undefined = currentBaseScope;
-            for (let i = 0; i < qualifiers.length; i++) {
-                nextScope = nextScope.getChildScope(qualifiers[i]);
-                if (!nextScope) break;
-            }
-
-            if (nextScope) {
-                const resolvedScope = nextScope.getChildScope(name);
-                if (
-                    resolvedScope
-                    && (
-                        context === 'scope'
-                        || context === 'sizeof'
-                        || resolvedScope.kind === ScopeKind.Proc
-                    )
-                ) {
-                    return resolvedScope;
-                }
-
-                const resolvedSymbol = nextScope.getSymbol(name);
-                if (resolvedSymbol && (context === 'symbol' || context === 'sizeof')) {
-                    return resolvedSymbol;
-                }
-
-                if (allowImports && context === 'symbol') {
-                    const resolvedImport = nextScope.getImport(name);
-                    if (resolvedImport) return resolvedImport;
-                }
-            }
+            const resolved = Scope.findNameIn(currentBaseScope, name, qualifiers, context, allowImports);
+            if (resolved) return resolved;
             currentBaseScope = currentBaseScope.scope; // Walk up to the parent
         }
+    }
+
+    /** Resolves qualifiers::name starting from base only, without walking up. */
+    private static findNameIn(
+        base: Scope,
+        name: string,
+        qualifiers: readonly string[],
+        context: ReferenceInfo['context'],
+        allowImports: boolean
+    ): SymbolTableEntity | undefined {
+        let nextScope: Scope | undefined = base;
+        for (let i = 0; i < qualifiers.length; i++) {
+            nextScope = nextScope.getChildScope(qualifiers[i]);
+            if (!nextScope) return undefined;
+        }
+
+        const resolvedScope = nextScope.getChildScope(name);
+        if (
+            resolvedScope
+            && (
+                context === 'scope'
+                || context === 'sizeof'
+                || resolvedScope.kind === ScopeKind.Proc
+            )
+        ) {
+            return resolvedScope;
+        }
+
+        const resolvedSymbol = nextScope.getSymbol(name);
+        if (resolvedSymbol && (context === 'symbol' || context === 'sizeof')) {
+            return resolvedSymbol;
+        }
+
+        if (allowImports && context === 'symbol') {
+            const resolvedImport = nextScope.getImport(name);
+            if (resolvedImport) return resolvedImport;
+        }
+        return undefined;
     }
 
     /**
      * Finds the shortest, unambiguous name for a given entity, relative to the current scope.
      * It does this by testing progressively more qualified names until one resolves back
-     * to the original entity.
+     * to the original entity. Pass tuRoots (the top-level scopes of the translation unit's
+     * files) so names from other files resolve as ca65 resolves them: `Gfx::init` from
+     * inside a scope with its own `init`, rather than `::Gfx::init`.
      */
-    public findRelativeName(entity: SymbolTableEntity): string {
+    public findRelativeName(entity: SymbolTableEntity, tuRoots: readonly Scope[] = EMPTY_SCOPES): string {
         // Macro is unaffected by scopes
         if (entity instanceof Macro) {
             return entity.name;
@@ -442,9 +472,9 @@ export class Scope extends SymbolTableEntity {
         const entityScopeStack = entity.getScopeStack();
         const context: ReferenceInfo['context'] = entity instanceof Scope ? 'scope' : 'symbol';
 
-        // Fast path for external top-level entities: only check unqualified collision in this file.
+        // Fast path for external top-level entities: only check unqualified collision.
         if (entityScopeStack.length === 0 && entity.uri !== this.uri) {
-            const resolvedEntity = this.findDefinitionOrImport(name, EMPTY_STRING_ARRAY, context);
+            const resolvedEntity = this.findDefinitionOrImport(name, EMPTY_STRING_ARRAY, context, tuRoots);
             if (!resolvedEntity || resolvedEntity === entity) {
                 return name;
             }
@@ -458,7 +488,7 @@ export class Scope extends SymbolTableEntity {
             const testQualifiers = i === 0
                 ? EMPTY_STRING_ARRAY
                 : (i === stackLen ? entityScopeStack : entityScopeStack.slice(stackLen - i));
-            const resolvedEntity = this.findDefinitionOrImport(name, testQualifiers, context);
+            const resolvedEntity = this.findDefinitionOrImport(name, testQualifiers, context, tuRoots);
             if (!resolvedEntity) continue;
 
             if (resolvedEntity === entity) {
@@ -480,9 +510,10 @@ export class Scope extends SymbolTableEntity {
     findDefinitionOrImport(
         name: string,
         qualifiers: readonly string[],
-        context: ReferenceInfo['context']
+        context: ReferenceInfo['context'],
+        tuRoots: readonly Scope[] = EMPTY_SCOPES
     ): SymbolTableEntity | undefined {
-        return this.findName(name, qualifiers, context, true);
+        return this.findName(name, qualifiers, context, true, tuRoots);
     }
 
     findDefinition(
