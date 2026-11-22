@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.2] - 2026-11-22
+### Fixed
+- Call hierarchy: preparing it works in files that aren't open in the editor too (they were scanned with the workspace). Clients that prepare each caller again by position to walk further up the hierarchy, like telescope-hierarchy.nvim in Neovim, now go past the first level instead of stopping with no callers.
+
 ## [2.8.1] - 2026-11-22
 ### Fixed
 - Call hierarchy: a call to a qualified name (`jsr Gfx::init`) is a call to `Gfx::init` only. The scopes that qualify it (`Gfx`) no longer show up as called too, in outgoing calls, or with the caller in their incoming calls.

@@ -469,6 +469,14 @@ class LspClient {
         const initCall = outgoing.find(c => c.to.name === 'Gfx::init');
         assert.deepStrictEqual(initCall.fromRanges, [{ start: { line: 4, character: 11 }, end: { line: 4, character: 15 } }]);
 
+        // Preparing in a file that isn't open (hdr.inc, only scanned) still finds the symbol there
+        const prepClosed = await client.request('textDocument/prepareCallHierarchy', {
+            textDocument: { uri: hdrUri },
+            position: { line: 0, character: 1 },
+        });
+        assert.deepStrictEqual(prepClosed && prepClosed.map(i => i.name), ['UNUSED_HDR_SYM'],
+            `Expected UNUSED_HDR_SYM in the unopened hdr.inc, got: ${JSON.stringify(prepClosed)}`);
+
         // Rapid edit removing .include "hdr.inc" and immediately checking documentLinks (coalesced flush)
         const editedSrc = mainSrc.replace('.include "hdr.inc"\n', '');
         const clearHdrDiags = client.waitForDiags(hdrUri, (d) => Array.isArray(d));

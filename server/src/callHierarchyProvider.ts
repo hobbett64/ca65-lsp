@@ -39,8 +39,10 @@ export function initializeCallHierarchyProvider(
             await initializationGate.isInitialized;
             await ensureDocumentRefreshed?.(params.textDocument.uri);
 
-            const document = documents.get(params.textDocument.uri);
-            if (!document) {
+            // Files that aren't open in the editor count too: they were scanned with the
+            // workspace, and clients like telescope-hierarchy.nvim prepare each caller
+            // (in any file) again by position to walk further up the hierarchy
+            if (!documents.get(params.textDocument.uri) && !symbolTables.has(params.textDocument.uri)) {
                 return null;
             }
 
