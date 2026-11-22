@@ -98,6 +98,14 @@ function M.start(buf)
         require("ca65.status").listing_updated(params and params.uris)
       end,
     },
+    commands = {
+      -- Picking a folder in an .include/.incbin path asks for the completion menu again,
+      -- to go on inside it (VS Code's command). With Neovim's own LSP completion, reopen
+      -- it; blink.cmp and the like reopen theirs anyway, and for them this does nothing.
+      ["editor.action.triggerSuggest"] = function()
+        vim.schedule(function() vim.lsp.completion.get() end)
+      end,
+    },
   }, { bufnr = buf })
 end
 

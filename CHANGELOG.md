@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.4] - 2026-11-22
+### Fixed
+- Neovim plugin: with Neovim's own LSP completion (`vim.lsp.completion`), picking a folder in an `.include`/`.incbin` path reopens the menu inside it, instead of reporting that the server doesn't support `editor.action.triggerSuggest`. The plugin now handles that VS Code command itself. Completion plugins like blink.cmp, which reopen their menu anyway, are unaffected.
+
 ## [2.9.3] - 2026-11-22
 ### Fixed
 - Completion: names from other files of the translation unit are as short as ca65 allows. Inside a scope with its own `init`, `Gfx::init` from an included file was offered as `::Gfx::init`, since only the current file's scopes were searched for `Gfx`; the included files' top-level scopes are now searched too, as ca65 assembles them as one source. `::` is still added when a scope in the current file hides the top-level one.
