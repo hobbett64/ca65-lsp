@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.1] - 2026-11-22
+### Changed
+- Neovim plugin: indenting is simpler. Enter after a label (a line whose code ends in `:`) indents the new line one level, as in VS Code, and other new lines keep the indent of the line above. Lines are no longer moved as you type (labels on `:`, `.endscope` and `.else` to their block), and `=` leaves lines as they are instead of reindenting them.
+
 ## [2.9.0] - 2026-11-22
 ### Added
 - Neovim plugin: indenting for ca65 files (`indent/ca65.lua`). Labels, constants and directives sit at the block's level, instructions and data one level in. Enter after a label indents, as in VS Code; typing a label's `:` after code moves it back out, and `.endscope`/`.endproc` line up with their block. Nested `.scope`/`.proc`/`.macro` blocks indent their contents, except a `.scope` wrapping the whole file. `=` reindents with the same rules.
