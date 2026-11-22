@@ -149,6 +149,8 @@ Requires Neovim 0.11 or newer and Node.js 18 or newer. With [lazy.nvim](https://
 
 On install, the plugin downloads the language server from the GitHub release of the same version, so the plugin and the server always match. If that fails (e.g. no network), it tries again when you open a ca65 file, or run `:Ca65InstallServer`. `:checkhealth ca65` checks Node.js, `ca65` and the server.
 
+To see the segment, bytes and cycles of the current line in your status line, add `require("ca65").segment()`, `.bytes()` and `.cycles()` to it (see [Bytes, cycles and segment](#bytes-cycles-and-segment)).
+
 What it sets up:
 
 - `.s`, `.asm` and `.inc` files open as `ca65`, with syntax highlighting (a port of the extension's grammar) under the server's semantic tokens.
@@ -157,6 +159,25 @@ What it sets up:
 - `/** */` doc comments: Enter continues them with ` * `, Enter right after `/**` adds the closing ` */`, and typing `/` after a ` * ` closes one. The closing ` */` also works in C files (Neovim's C support already continues ` * `).
 - `:Ref6502` browses the instruction reference (in Telescope when installed); `:Ref6502 lda` shows one instruction.
 - `gx` on a hover's link to a definition (`file://…#L12`) opens it in Neovim at that line.
+- The segment, bytes and cycles of the current line or selection, for your status line (see below).
+
+### Bytes, cycles and segment
+
+Like the VS Code extension's status bar, the plugin can show, for the current line or the selection in visual mode:
+
+- `segment()`: the segment it's in (`CODE`, `RODATA`, `ZEROPAGE`…), from the `.segment` directive above it, or ca65's default `CODE`;
+- `bytes()`: its size: `3 B`, or a range such as `2–3 B` when it depends on the operand's size. Data lines (`.byte`, `.word`…) show their size from the assembler listing.
+- `cycles()`: its cycle count: `4 cyc`, or a range such as `4–5 cyc` with page crossings or branches.
+
+Neovim's status line is yours, so the plugin doesn't change it; add `require("ca65").segment()`, `.bytes()` and `.cycles()` where you want them. Neovim's classic layout with all three on the right:
+
+```lua
+vim.o.statusline = "%<%f %h%w%m%r%=%{v:lua.require'ca65'.segment()}   %{v:lua.require'ca65'.bytes()}  %{v:lua.require'ca65'.cycles()}   %-14.(%l,%c%V%) %P"
+```
+
+With lualine: `sections = { lualine_x = { function() return require("ca65").segment() end, function() return require("ca65").bytes() end, function() return require("ca65").cycles() end } }`.
+
+They are empty outside ca65 files and in windows other than the current one. Nothing is asked until one is first called; `bytes()` and `cycles()` share one request. After that, the plugin asks the server when the cursor moves to another line, the selection changes or the text changes, with one request at a time: moves made while one is pending become a single request for wherever the cursor ends up.
 
 ### Options
 

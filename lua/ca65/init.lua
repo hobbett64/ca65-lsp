@@ -92,8 +92,27 @@ function M.start(buf)
     root_dir = root,
     capabilities = capabilities(),
     settings = { ca65 = settings },
+    handlers = {
+      -- The assembler listing was rebuilt: data lines' byte counts may have changed
+      ["ca65/listingUpdated"] = function(_, params)
+        require("ca65.status").listing_updated(params and params.uris)
+      end,
+    },
   }, { bufnr = buf })
 end
+
+-- For the status line, about the current line or the selection in visual mode, e.g.
+--   vim.o.statusline = "%f %m%=%{v:lua.require'ca65'.segment()}  %{v:lua.require'ca65'.bytes()}  %{v:lua.require'ca65'.cycles()}  %l:%c "
+-- Each is empty outside ca65 buffers, and nothing is asked until one is first called.
+
+--- The segment it's in: "CODE", "RODATA"…
+function M.segment() return require("ca65.status").get("segment", "segment") end
+
+--- Its size: "3 B", or "2–3 B" when it depends on the operand's size.
+function M.bytes() return require("ca65.status").get("stats", "bytes") end
+
+--- Its cycle count: "4 cyc", or "4–5 cyc" with page crossings or branches.
+function M.cycles() return require("ca65.status").get("stats", "cycles") end
 
 --- Whether Enter after "/**" adds the closing " */" in this filetype.
 function M.closes_doc_comments(filetype)
